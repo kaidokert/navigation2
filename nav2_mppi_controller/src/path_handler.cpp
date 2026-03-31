@@ -162,15 +162,15 @@ nav_msgs::msg::Path PathHandler::transformPath(
   // No persistent state is modified — only the returned transformed_plan.
   float tgp_length = utils::pathLength(transformed_plan);
   if (enforce_path_inversion_ && min_inversion_horizon_ > 0.0f &&
-      inversion_locale_ != 0u &&
-      tgp_length < min_inversion_horizon_ &&
-      !transformed_plan.poses.empty())
+    inversion_locale_ != 0u &&
+    tgp_length < min_inversion_horizon_ &&
+    !transformed_plan.poses.empty())
   {
     size_t appended = 0;
     unsigned int mx, my;
     for (size_t i = inversion_locale_;
-         i < global_plan_.poses.size() && tgp_length < min_inversion_horizon_;
-         ++i)
+      i < global_plan_.poses.size() && tgp_length < min_inversion_horizon_;
+      ++i)
     {
       // Create a local copy to avoid mutating global_plan_ headers
       geometry_msgs::msg::PoseStamped global_pose_copy = global_plan_.poses[i];
