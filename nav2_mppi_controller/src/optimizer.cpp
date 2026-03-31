@@ -181,12 +181,50 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 {
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
 
+  bool diag = (diag_tick_++ % 4 == 0);
+  const auto ts = settings_.time_steps;
+
+  // [A] INPUT: robot feedback velocity + control_sequence_ carried from last tick
+  if (diag && ts >= 3) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] A.input  robot_vx=%.4f robot_wz=%.3f  ctrl[0..2]=(%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      robot_speed.linear.x, robot_speed.angular.z,
+      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
+      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
+  }
+
   do {
-    optimize();
+    optimize(diag);
   } while (fallback(critics_data_.fail_flag));
 
+  // [E] POST-OPTIMIZE (after softmax + accel constraints)
+  if (diag && ts >= 5) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] E.post-opt  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
+      control_sequence_.vx(3), control_sequence_.vx(4),
+      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
+  }
+
   utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
+
+  // [F] POST-SG FILTER
+  if (diag && ts >= 5) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] F.post-SG   ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
+      control_sequence_.vx(3), control_sequence_.vx(4),
+      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
+  }
+
   auto control = getControlFromSequenceAsTwist(plan.header.stamp);
+
+  // [G] FINAL CMD_VEL
+  if (diag) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] G.cmd_vel   vx=%.4f wz=%.3f",
+      control.twist.linear.x, control.twist.angular.z);
+  }
 
   if (settings_.shift_control_sequence) {
     shiftControlSequence();
@@ -195,12 +233,41 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   return control;
 }
 
-void Optimizer::optimize()
+void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
     generateNoisedTrajectories();
+
+    // [B] BATCH STATS after noise+predict
+    if (diag) {
+      auto cvx0 = xt::view(state_.cvx, xt::all(), 0);
+      auto cvx1 = xt::view(state_.cvx, xt::all(), 1);
+      auto cwz0 = xt::view(state_.cwz, xt::all(), 0);
+      auto cwz1 = xt::view(state_.cwz, xt::all(), 1);
+      RCLCPP_DEBUG(logger_,
+        "[MPPI] B.batch  cvx0: mean=%.3f [%.3f,%.3f] neg=%d/%d  cvx1: mean=%.3f [%.3f,%.3f]  cwz_mean=(%.3f,%.3f)",
+        static_cast<float>(xt::mean(cvx0)()),
+        static_cast<float>(xt::amin(cvx0)()), static_cast<float>(xt::amax(cvx0)()),
+        static_cast<int>(xt::sum(xt::cast<int>(cvx0 < 0.0f))()), settings_.batch_size,
+        static_cast<float>(xt::mean(cvx1)()),
+        static_cast<float>(xt::amin(cvx1)()), static_cast<float>(xt::amax(cvx1)()),
+        static_cast<float>(xt::mean(cwz0)()), static_cast<float>(xt::mean(cwz1)()));
+    }
+
     critic_manager_.evalTrajectoriesScores(critics_data_);
-    updateControlSequence();
+
+    // [C] COSTS after critics (before control regularization + softmax)
+    if (diag) {
+      float c_min = static_cast<float>(xt::amin(costs_)());
+      float c_max = static_cast<float>(xt::amax(costs_)());
+      float c_mean = static_cast<float>(xt::mean(costs_)());
+      float c_std = static_cast<float>(xt::stddev(costs_)());
+      RCLCPP_DEBUG(logger_,
+        "[MPPI] C.costs  min=%.1f max=%.1f mean=%.1f spread=%.1f std=%.2f",
+        c_min, c_max, c_mean, c_max - c_min, c_std);
+    }
+
+    updateControlSequence(diag);
   }
 }
 
@@ -421,7 +488,7 @@ xt::xtensor<float, 2> Optimizer::getOptimizedTrajectory()
   return std::move(trajectories);
 }
 
-void Optimizer::updateControlSequence()
+void Optimizer::updateControlSequence(bool diag)
 {
   const bool is_holo = isHolonomic();
   auto & s = settings_;
@@ -447,10 +514,31 @@ void Optimizer::updateControlSequence()
   auto && softmaxes = xt::eval(exponents / xt::sum(exponents, immediate));
   auto && softmaxes_extened = xt::eval(xt::view(softmaxes, xt::all(), xt::newaxis()));
 
+  // [D] SOFTMAX: how concentrated are the weights?
+  if (diag) {
+    float w_max = static_cast<float>(xt::amax(softmaxes)());
+    size_t w_max_idx = xt::argmax(softmaxes)();
+    float ess = 1.0f / static_cast<float>(xt::sum(xt::square(softmaxes))());
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] D.softmax  w_max=%.4f ess=%.0f/%d  best[%zu]: cvx(%.3f,%.3f,%.3f) cwz(%.3f,%.3f)",
+      w_max, ess, settings_.batch_size, w_max_idx,
+      state_.cvx(w_max_idx, 0), state_.cvx(w_max_idx, 1), state_.cvx(w_max_idx, 2),
+      state_.cwz(w_max_idx, 0), state_.cwz(w_max_idx, 1));
+  }
+
   xt::noalias(control_sequence_.vx) = xt::sum(state_.cvx * softmaxes_extened, 0, immediate);
   xt::noalias(control_sequence_.wz) = xt::sum(state_.cwz * softmaxes_extened, 0, immediate);
   if (is_holo) {
     xt::noalias(control_sequence_.vy) = xt::sum(state_.cvy * softmaxes_extened, 0, immediate);
+  }
+
+  // [D2] POST-SOFTMAX (before accel constraints)
+  if (diag && settings_.time_steps >= 5) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] D2.w-avg  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
+      control_sequence_.vx(3), control_sequence_.vx(4),
+      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
   applyControlSequenceConstraints();
