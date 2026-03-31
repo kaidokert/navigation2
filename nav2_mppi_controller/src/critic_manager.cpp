@@ -59,13 +59,34 @@ void CriticManager::loadCritics()
     RCLCPP_INFO(logger_, "Critic loaded : %s", fullname.c_str());
   }
 
-  auto node = parent_.lock();
   if (publish_critics_stats_) {
-    critics_effect_pub_ = node->create_publisher<nav2_critics_msgs::msg::CriticsStats>(
-      "~/critics_stats", rclcpp::QoS(10));
-    critics_effect_pub_->on_activate();
-    RCLCPP_INFO(logger_, "Publishing per-critic cost stats to ~/critics_stats");
+    auto node = parent_.lock();
+    if (node) {
+      critics_effect_pub_ = node->create_publisher<nav2_critics_msgs::msg::CriticsStats>(
+        "~/critics_stats", rclcpp::QoS(10));
+      RCLCPP_INFO(logger_, "Publishing per-critic cost stats to ~/critics_stats");
+    }
   }
+}
+
+void CriticManager::on_activate()
+{
+  if (critics_effect_pub_) {
+    critics_effect_pub_->on_activate();
+  }
+}
+
+void CriticManager::on_deactivate()
+{
+  if (critics_effect_pub_) {
+    critics_effect_pub_->on_deactivate();
+  }
+}
+
+void CriticManager::on_cleanup()
+{
+  critics_effect_pub_.reset();
+  critics_.clear();
 }
 
 std::string CriticManager::getFullName(const std::string & name)
@@ -110,22 +131,26 @@ void CriticManager::evalTrajectoriesScores(
     }
   }
 
-  if (publish_critics_stats_ && critics_effect_pub_) {
+  if (publish_critics_stats_ && critics_effect_pub_ && stats_msg) {
     // Find the best (lowest total cost) trajectory
-    size_t best_idx = 0;
-    float best_cost = data.costs(0);
-    for (size_t k = 1; k < data.costs.size(); ++k) {
-      if (data.costs(k) < best_cost) {
-        best_cost = data.costs(k);
-        best_idx = k;
+    if (data.costs.size() > 0) {
+      size_t best_idx = 0;
+      float best_cost = data.costs(0);
+      for (size_t k = 1; k < data.costs.size(); ++k) {
+        if (data.costs(k) < best_cost) {
+          best_cost = data.costs(k);
+          best_idx = k;
+        }
+      }
+      for (size_t i = 0; i < per_critic_deltas.size(); ++i) {
+        stats_msg->costs_best.push_back(per_critic_deltas[i](best_idx));
       }
     }
-    for (size_t i = 0; i < per_critic_deltas.size(); ++i) {
-      stats_msg->costs_best.push_back(per_critic_deltas[i](best_idx));
-    }
     auto node = parent_.lock();
-    stats_msg->stamp = node->get_clock()->now();
-    critics_effect_pub_->publish(std::move(*stats_msg));
+    if (node) {
+      stats_msg->stamp = node->get_clock()->now();
+      critics_effect_pub_->publish(std::move(stats_msg));
+    }
   }
 }
 

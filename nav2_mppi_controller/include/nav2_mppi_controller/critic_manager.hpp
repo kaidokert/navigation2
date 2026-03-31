@@ -75,6 +75,21 @@ public:
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS>, ParametersHandler *);
 
   /**
+    * @brief Activate critic manager (activate publishers)
+    */
+  void on_activate();
+
+  /**
+    * @brief Deactivate critic manager (deactivate publishers)
+    */
+  void on_deactivate();
+
+  /**
+    * @brief Cleanup critic manager (reset publishers and critics)
+    */
+  void on_cleanup();
+
+  /**
     * @brief Score trajectories by the set of loaded critic functions
     * @param CriticData Struct of necessary information to pass to the critic functions
     */
