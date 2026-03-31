@@ -41,6 +41,7 @@ void PathHandler::initialize(
   if (enforce_path_inversion_) {
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
     getParam(inversion_yaw_tolerance, "inversion_yaw_tolerance", 0.4);
+    getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
     inversion_locale_ = 0u;
   }
 }
@@ -127,6 +128,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
+  // Standard inversion handoff — persistent, unchanged from upstream.
+  // No rebuild of transformed_plan here: the original 1-tick lag is preserved
+  // to avoid control spikes from instantaneous plan jumps at the cusp.
   if (enforce_path_inversion_ && inversion_locale_ != 0u) {
     if (isWithinInversionTolerances(global_pose)) {
       prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_);
@@ -135,8 +139,91 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
   }
 
+  // Virtual Lookahead — stateless horizon extension for micro-segment cusps.
+  //
+  // Trigger: the current segment has structurally few points before the next
+  // inversion (inversion_locale_ < 10), indicating a planner micro-segment
+  // artifact, AND the visible TGP is too short for MPPI to produce meaningful
+  // cost gradients.
+  //
+  // Action: borrow points from global_plan_ starting at the inversion boundary
+  // (index-based, not Euclidean search) and append them to transformed_plan
+  // for this cycle only. No persistent state is modified.
+  //
+  // This does NOT fire during normal approach to a real inversion (e.g., M8's
+  // 0.97m reverse segment has inversion_locale_ ~35, well above the threshold).
+  // Use min_inversion_horizon_ as the sole trigger: if the visible TGP is
+  // shorter than the minimum horizon AND there IS a next inversion in the
+  // current segment, extend. The guard only borrows up to min_horizon length
+  // of extra points, so even if it fires on a legitimate segment approach,
+  // the extension is bounded and won't extend far past the inversion.
+  if (enforce_path_inversion_ && min_inversion_horizon_ > 0.0f &&
+      inversion_locale_ != 0u &&
+      utils::pathLength(transformed_plan) < min_inversion_horizon_ &&
+      !transformed_plan.poses.empty())
+  {
+    // Borrow points from global_plan_ starting at inversion_locale_.
+    // global_plan_up_to_inversion_ was set to global_plan_ at handoff, then
+    // cropped at inversion_locale_. So global_plan_.poses[inversion_locale_]
+    // is the first point past the current segment's inversion boundary.
+    size_t appended = 0;
+    unsigned int mx, my;
+    for (size_t i = inversion_locale_;
+         i < global_plan_.poses.size() &&
+         utils::pathLength(transformed_plan) < min_inversion_horizon_;
+         ++i)
+    {
+      geometry_msgs::msg::PoseStamped costmap_pose;
+      global_plan_.poses[i].header.stamp = global_pose.header.stamp;
+      global_plan_.poses[i].header.frame_id = global_plan_.header.frame_id;
+      if (transformPose(costmap_->getGlobalFrameID(), global_plan_.poses[i], costmap_pose)) {
+        // Respect costmap bounds — same check as normal plan builder (line 91)
+        if (!costmap_->getCostmap()->worldToMap(
+            costmap_pose.pose.position.x, costmap_pose.pose.position.y, mx, my))
+        {
+          break;  // Stop if point is outside costmap
+        }
+        transformed_plan.poses.push_back(costmap_pose);
+        appended++;
+      }
+    }
+
+    if (appended > 0) {
+      RCLCPP_INFO(logger_,
+        "[HORIZON_GUARD] Virtual lookahead: appended %zu pts from idx %u, "
+        "TGP now %zu pts / %.4fm (inv_locale=%u)",
+        appended, inversion_locale_, transformed_plan.poses.size(),
+        utils::pathLength(transformed_plan), inversion_locale_);
+    }
+  }
+
   if (transformed_plan.poses.empty()) {
     throw nav2_core::InvalidPath("Resulting plan has 0 poses in it.");
+  }
+
+  // [PROBE A] TGP metadata — measure visible path after inversion crop
+  {
+    static int probe_a_tick = 0;
+    if (++probe_a_tick % 4 == 0) {  // ~5Hz at 20Hz control rate
+      double tgp_dist = 0.0;
+      for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+        tgp_dist += hypot(
+          transformed_plan.poses[i].pose.position.x - transformed_plan.poses[i-1].pose.position.x,
+          transformed_plan.poses[i].pose.position.y - transformed_plan.poses[i-1].pose.position.y);
+      }
+      // Distance from robot to the inversion point (last pose in up_to_inversion)
+      double cusp_dist = 0.0;
+      if (!global_plan_up_to_inversion_.poses.empty()) {
+        const auto & cusp = global_plan_up_to_inversion_.poses.back();
+        cusp_dist = hypot(
+          global_pose.pose.position.x - cusp.pose.position.x,
+          global_pose.pose.position.y - cusp.pose.position.y);
+      }
+      RCLCPP_INFO(logger_,
+        "[PROBE_A] TGP_PTS=%zu TGP_LEN=%.4fm INV_LOCALE=%u CUSP_DIST=%.4fm",
+        transformed_plan.poses.size(), tgp_dist, inversion_locale_,
+        cusp_dist);
+    }
   }
 
   return transformed_plan;
