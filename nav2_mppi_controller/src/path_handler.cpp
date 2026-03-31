@@ -30,6 +30,9 @@ void PathHandler::initialize(
   costmap_ = costmap;
   tf_buffer_ = buffer;
   auto node = parent.lock();
+  if (!node) {
+    throw std::runtime_error("PathHandler: parent node expired during initialize()");
+  }
   logger_ = node->get_logger();
   clock_ = node->get_clock();
   parameters_handler_ = param_handler;
