@@ -31,6 +31,7 @@ void PathHandler::initialize(
   tf_buffer_ = buffer;
   auto node = parent.lock();
   logger_ = node->get_logger();
+  clock_ = node->get_clock();
   parameters_handler_ = param_handler;
 
   auto getParam = parameters_handler_->getParamGetter(name_);
@@ -152,36 +153,44 @@ nav_msgs::msg::Path PathHandler::transformPath(
   //
   // This does NOT fire during normal approach to a real inversion (e.g., M8's
   // 0.97m reverse segment has inversion_locale_ ~35, well above the threshold).
-  // Use min_inversion_horizon_ as the sole trigger: if the visible TGP is
-  // shorter than the minimum horizon AND there IS a next inversion in the
-  // current segment, extend. The guard only borrows up to min_horizon length
-  // of extra points, so even if it fires on a legitimate segment approach,
-  // the extension is bounded and won't extend far past the inversion.
+  // Virtual Lookahead — stateless horizon extension for micro-segment cusps.
+  //
+  // When the visible TGP is shorter than min_inversion_horizon_ and there is
+  // a next inversion boundary, borrow points from global_plan_ past that
+  // boundary. This prevents MPPI's cost gradient from collapsing to zero
+  // at planner-generated micro-segments (Ackermann cusp artifacts).
+  // No persistent state is modified — only the returned transformed_plan.
+  float tgp_length = utils::pathLength(transformed_plan);
   if (enforce_path_inversion_ && min_inversion_horizon_ > 0.0f &&
       inversion_locale_ != 0u &&
-      utils::pathLength(transformed_plan) < min_inversion_horizon_ &&
+      tgp_length < min_inversion_horizon_ &&
       !transformed_plan.poses.empty())
   {
-    // Borrow points from global_plan_ starting at inversion_locale_.
-    // global_plan_up_to_inversion_ was set to global_plan_ at handoff, then
-    // cropped at inversion_locale_. So global_plan_.poses[inversion_locale_]
-    // is the first point past the current segment's inversion boundary.
     size_t appended = 0;
     unsigned int mx, my;
     for (size_t i = inversion_locale_;
-         i < global_plan_.poses.size() &&
-         utils::pathLength(transformed_plan) < min_inversion_horizon_;
+         i < global_plan_.poses.size() && tgp_length < min_inversion_horizon_;
          ++i)
     {
+      // Create a local copy to avoid mutating global_plan_ headers
+      geometry_msgs::msg::PoseStamped global_pose_copy = global_plan_.poses[i];
+      global_pose_copy.header.stamp = global_pose.header.stamp;
+      global_pose_copy.header.frame_id = global_plan_.header.frame_id;
+
       geometry_msgs::msg::PoseStamped costmap_pose;
-      global_plan_.poses[i].header.stamp = global_pose.header.stamp;
-      global_plan_.poses[i].header.frame_id = global_plan_.header.frame_id;
-      if (transformPose(costmap_->getGlobalFrameID(), global_plan_.poses[i], costmap_pose)) {
-        // Respect costmap bounds — same check as normal plan builder (line 91)
+      if (transformPose(costmap_->getGlobalFrameID(), global_pose_copy, costmap_pose)) {
+        // Respect costmap bounds — same check as normal plan builder
         if (!costmap_->getCostmap()->worldToMap(
             costmap_pose.pose.position.x, costmap_pose.pose.position.y, mx, my))
         {
-          break;  // Stop if point is outside costmap
+          break;
+        }
+        // Incrementally track path length to avoid O(N²) recomputation
+        if (!transformed_plan.poses.empty()) {
+          const auto & prev = transformed_plan.poses.back();
+          tgp_length += hypotf(
+            costmap_pose.pose.position.x - prev.pose.position.x,
+            costmap_pose.pose.position.y - prev.pose.position.y);
         }
         transformed_plan.poses.push_back(costmap_pose);
         appended++;
@@ -189,11 +198,11 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
 
     if (appended > 0) {
-      RCLCPP_INFO(logger_,
+      RCLCPP_DEBUG(logger_,
         "[HORIZON_GUARD] Virtual lookahead: appended %zu pts from idx %u, "
         "TGP now %zu pts / %.4fm (inv_locale=%u)",
         appended, inversion_locale_, transformed_plan.poses.size(),
-        utils::pathLength(transformed_plan), inversion_locale_);
+        tgp_length, inversion_locale_);
     }
   }
 
@@ -201,29 +210,19 @@ nav_msgs::msg::Path PathHandler::transformPath(
     throw nav2_core::InvalidPath("Resulting plan has 0 poses in it.");
   }
 
-  // [PROBE A] TGP metadata — measure visible path after inversion crop
+  // Diagnostic: TGP metadata after inversion crop + virtual lookahead
   {
-    static int probe_a_tick = 0;
-    if (++probe_a_tick % 4 == 0) {  // ~5Hz at 20Hz control rate
-      double tgp_dist = 0.0;
-      for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
-        tgp_dist += hypot(
-          transformed_plan.poses[i].pose.position.x - transformed_plan.poses[i-1].pose.position.x,
-          transformed_plan.poses[i].pose.position.y - transformed_plan.poses[i-1].pose.position.y);
-      }
-      // Distance from robot to the inversion point (last pose in up_to_inversion)
-      double cusp_dist = 0.0;
-      if (!global_plan_up_to_inversion_.poses.empty()) {
-        const auto & cusp = global_plan_up_to_inversion_.poses.back();
-        cusp_dist = hypot(
-          global_pose.pose.position.x - cusp.pose.position.x,
-          global_pose.pose.position.y - cusp.pose.position.y);
-      }
-      RCLCPP_INFO(logger_,
-        "[PROBE_A] TGP_PTS=%zu TGP_LEN=%.4fm INV_LOCALE=%u CUSP_DIST=%.4fm",
-        transformed_plan.poses.size(), tgp_dist, inversion_locale_,
-        cusp_dist);
+    double cusp_dist = 0.0;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      const auto & cusp = global_plan_up_to_inversion_.poses.back();
+      cusp_dist = hypot(
+        global_pose.pose.position.x - cusp.pose.position.x,
+        global_pose.pose.position.y - cusp.pose.position.y);
     }
+    RCLCPP_DEBUG_THROTTLE(logger_, *clock_, 200,
+      "[PathHandler] TGP_PTS=%zu TGP_LEN=%.4fm INV_LOCALE=%u CUSP_DIST=%.4fm",
+      transformed_plan.poses.size(), tgp_length, inversion_locale_,
+      cusp_dist);
   }
 
   return transformed_plan;
