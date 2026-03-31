@@ -32,11 +32,14 @@
 
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_mppi_controller/critic_data.hpp"
 #include "nav2_mppi_controller/critic_function.hpp"
+
+#include "nav2_critics_msgs/msg/critics_stats.hpp"
 
 namespace mppi
 {
@@ -72,6 +75,21 @@ public:
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS>, ParametersHandler *);
 
   /**
+    * @brief Activate critic manager (activate publishers)
+    */
+  void on_activate();
+
+  /**
+    * @brief Deactivate critic manager (deactivate publishers)
+    */
+  void on_deactivate();
+
+  /**
+    * @brief Cleanup critic manager (reset publishers and critics)
+    */
+  void on_cleanup();
+
+  /**
     * @brief Score trajectories by the set of loaded critic functions
     * @param CriticData Struct of necessary information to pass to the critic functions
     */
@@ -104,6 +122,10 @@ protected:
   Critics critics_;
 
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
+
+  rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::CriticsStats>::SharedPtr
+    critics_effect_pub_;
+  bool publish_critics_stats_{false};
 };
 
 }  // namespace mppi
