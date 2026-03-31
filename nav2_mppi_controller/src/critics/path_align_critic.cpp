@@ -46,10 +46,11 @@ void PathAlignCritic::score(CriticData & data)
   if (!enabled_ || utils::withinPositionGoalTolerance(
       threshold_to_consider_, data.state.pose.pose, data.goal))
   {
-    static int skip_goal_ctr_ = 0;
-    if (++skip_goal_ctr_ % 20 == 1) {
-      RCLCPP_INFO(logger_,
-        "[PAC] SKIP: within goal tolerance (%.3f)", threshold_to_consider_);
+    auto node = parent_.lock();
+    if (node) {
+      const char * reason = !enabled_ ? "disabled" : "within goal tolerance";
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: %s (threshold=%.3f)", reason, threshold_to_consider_);
     }
     return;
   }
@@ -60,10 +61,11 @@ void PathAlignCritic::score(CriticData & data)
   const size_t path_segments_count = *data.furthest_reached_path_point;
   float path_segments_flt = static_cast<float>(path_segments_count);
   if (path_segments_count < offset_from_furthest_) {
-    static int skip_offset_ctr_ = 0;
-    if (++skip_offset_ctr_ % 20 == 1) {
-      RCLCPP_INFO(logger_,
-        "[PAC] SKIP: furthest_reached=%zu < offset=%zu", path_segments_count, static_cast<size_t>(offset_from_furthest_));
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: furthest_reached=%zu < offset=%zu",
+        path_segments_count, static_cast<size_t>(offset_from_furthest_));
     }
     return;
   }
@@ -75,9 +77,9 @@ void PathAlignCritic::score(CriticData & data)
   for (size_t i = 0; i < path_segments_count; i++) {
     if (!path_pts_valid[i]) {invalid_ctr += 1.0f;}
     if (invalid_ctr / path_segments_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f) {
-      static int skip_occ_ctr_ = 0;
-      if (++skip_occ_ctr_ % 20 == 1) {
-        RCLCPP_INFO(logger_,
+      auto node = parent_.lock();
+      if (node) {
+        RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
           "[PAC] SKIP: path_occupancy %.1f%% > max %.1f%% (invalid=%d/%zu)",
           100.0f * invalid_ctr / path_segments_flt, 100.0f * max_path_occupancy_ratio_,
           static_cast<int>(invalid_ctr), path_segments_count);

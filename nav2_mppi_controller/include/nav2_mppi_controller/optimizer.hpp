@@ -260,6 +260,7 @@ protected:
   ParametersHandler * parameters_handler_;
   CriticManager critic_manager_;
   NoiseGenerator noise_generator_;
+  int diag_tick_{0};
 
   models::OptimizerSettings settings_;
 

@@ -60,15 +60,15 @@ void PathFollowCritic::score(CriticData & data)
   const auto path_x = data.path.x(offseted_idx);
   const auto path_y = data.path.y(offseted_idx);
 
-  // [PROBE B] Target point selection — where is PFC aiming?
+  // Diagnostic: target point selection
   {
-    static int probe_b_tick = 0;
-    if (++probe_b_tick % 4 == 0) {
-      float dist_to_target = hypotf(
-        data.state.pose.pose.position.x - path_x,
-        data.state.pose.pose.position.y - path_y);
-      RCLCPP_INFO(logger_,
-        "[PROBE_B] PFC_TARGET_IDX=%zu/%zu FURTHEST=%zu DIST_TO_TARGET=%.4fm",
+    float dist_to_target = hypotf(
+      data.state.pose.pose.position.x - path_x,
+      data.state.pose.pose.position.y - path_y);
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 200,
+        "[PFC] target_idx=%zu/%zu furthest=%zu dist_to_target=%.4fm",
         offseted_idx, path_size,
         *data.furthest_reached_path_point, dist_to_target);
     }
