@@ -37,6 +37,7 @@ void CriticManager::getParams()
   auto node = parent_.lock();
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(critic_names_, "critics", std::vector<std::string>{}, ParameterType::Static);
+  getParam(publish_critics_stats_, "publish_critics_stats", false, ParameterType::Static);
 }
 
 void CriticManager::loadCritics()
@@ -57,6 +58,14 @@ void CriticManager::loadCritics()
       parameters_handler_);
     RCLCPP_INFO(logger_, "Critic loaded : %s", fullname.c_str());
   }
+
+  auto node = parent_.lock();
+  if (publish_critics_stats_) {
+    critics_effect_pub_ = node->create_publisher<nav2_critics_msgs::msg::CriticsStats>(
+      "~/critics_stats", rclcpp::QoS(10));
+    critics_effect_pub_->on_activate();
+    RCLCPP_INFO(logger_, "Publishing per-critic cost stats to ~/critics_stats");
+  }
 }
 
 std::string CriticManager::getFullName(const std::string & name)
@@ -67,11 +76,56 @@ std::string CriticManager::getFullName(const std::string & name)
 void CriticManager::evalTrajectoriesScores(
   CriticData & data) const
 {
-  for (const auto & critic : critics_) {
+  std::unique_ptr<nav2_critics_msgs::msg::CriticsStats> stats_msg;
+  // Per-critic cost deltas for each trajectory (to extract best trajectory costs)
+  std::vector<xt::xtensor<float, 1>> per_critic_deltas;
+  if (publish_critics_stats_) {
+    stats_msg = std::make_unique<nav2_critics_msgs::msg::CriticsStats>();
+    stats_msg->critics.reserve(critic_names_.size());
+    stats_msg->changed.reserve(critic_names_.size());
+    stats_msg->costs_sum.reserve(critic_names_.size());
+    stats_msg->costs_best.reserve(critic_names_.size());
+    per_critic_deltas.reserve(critic_names_.size());
+  }
+
+  for (size_t i = 0; i < critics_.size(); ++i) {
     if (data.fail_flag) {
       break;
     }
-    critic->score(data);
+
+    xt::xtensor<float, 1> costs_before;
+    if (publish_critics_stats_) {
+      costs_before = data.costs;
+    }
+
+    critics_[i]->score(data);
+
+    if (publish_critics_stats_) {
+      auto delta = data.costs - costs_before;
+      stats_msg->critics.push_back(critic_names_[i]);
+      float costs_sum = static_cast<float>(xt::sum(delta)());
+      stats_msg->costs_sum.push_back(costs_sum);
+      stats_msg->changed.push_back(costs_sum != 0.0f);
+      per_critic_deltas.push_back(std::move(delta));
+    }
+  }
+
+  if (publish_critics_stats_ && critics_effect_pub_) {
+    // Find the best (lowest total cost) trajectory
+    size_t best_idx = 0;
+    float best_cost = data.costs(0);
+    for (size_t k = 1; k < data.costs.size(); ++k) {
+      if (data.costs(k) < best_cost) {
+        best_cost = data.costs(k);
+        best_idx = k;
+      }
+    }
+    for (size_t i = 0; i < per_critic_deltas.size(); ++i) {
+      stats_msg->costs_best.push_back(per_critic_deltas[i](best_idx));
+    }
+    auto node = parent_.lock();
+    stats_msg->stamp = node->get_clock()->now();
+    critics_effect_pub_->publish(std::move(*stats_msg));
   }
 }
 

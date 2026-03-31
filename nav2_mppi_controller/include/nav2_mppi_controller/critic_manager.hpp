@@ -32,11 +32,14 @@
 
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_mppi_controller/critic_data.hpp"
 #include "nav2_mppi_controller/critic_function.hpp"
+
+#include "nav2_critics_msgs/msg/critics_stats.hpp"
 
 namespace mppi
 {
@@ -104,6 +107,10 @@ protected:
   Critics critics_;
 
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
+
+  rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::CriticsStats>::SharedPtr
+    critics_effect_pub_;
+  bool publish_critics_stats_{false};
 };
 
 }  // namespace mppi
