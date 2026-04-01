@@ -154,12 +154,14 @@ protected:
   nav_msgs::msg::Path global_plan_;
   nav_msgs::msg::Path global_plan_up_to_inversion_;
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
+  rclcpp::Clock::SharedPtr clock_;
 
   double max_robot_pose_search_dist_{0};
   double prune_distance_{0};
   double transform_tolerance_{0};
   float inversion_xy_tolerance_{0.2};
   float inversion_yaw_tolerance{0.4};
+  float min_inversion_horizon_{0.15};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
 };

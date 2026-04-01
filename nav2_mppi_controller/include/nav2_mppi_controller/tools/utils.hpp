@@ -573,6 +573,22 @@ inline unsigned int removePosesAfterFirstInversion(nav_msgs::msg::Path & path)
 }
 
 /**
+ * @brief Compute the integrated arc length of a path
+ * @param path Path to measure
+ * @return Total arc length in meters
+ */
+inline float pathLength(const nav_msgs::msg::Path & path)
+{
+  float length = 0.0f;
+  for (size_t i = 1; i < path.poses.size(); ++i) {
+    length += hypotf(
+      path.poses[i].pose.position.x - path.poses[i - 1].pose.position.x,
+      path.poses[i].pose.position.y - path.poses[i - 1].pose.position.y);
+  }
+  return length;
+}
+
+/**
  * @brief Compare to trajectory points to find closest path point along integrated distances
  * @param vec Vect to check
  * @return dist Distance to look for

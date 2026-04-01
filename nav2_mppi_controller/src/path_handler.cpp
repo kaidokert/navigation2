@@ -30,7 +30,11 @@ void PathHandler::initialize(
   costmap_ = costmap;
   tf_buffer_ = buffer;
   auto node = parent.lock();
+  if (!node) {
+    throw std::runtime_error("PathHandler: parent node expired during initialize()");
+  }
   logger_ = node->get_logger();
+  clock_ = node->get_clock();
   parameters_handler_ = param_handler;
 
   auto getParam = parameters_handler_->getParamGetter(name_);
@@ -41,6 +45,13 @@ void PathHandler::initialize(
   if (enforce_path_inversion_) {
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
     getParam(inversion_yaw_tolerance, "inversion_yaw_tolerance", 0.4);
+    getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
+    if (min_inversion_horizon_ < 0.0f) {
+      RCLCPP_WARN(logger_,
+        "min_inversion_horizon (%.3f) is negative, disabling virtual lookahead",
+        min_inversion_horizon_);
+      min_inversion_horizon_ = 0.0f;
+    }
     inversion_locale_ = 0u;
   }
 }
@@ -127,6 +138,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
+  // Standard inversion handoff — persistent, unchanged from upstream.
+  // No rebuild of transformed_plan here: the original 1-tick lag is preserved
+  // to avoid control spikes from instantaneous plan jumps at the cusp.
   if (enforce_path_inversion_ && inversion_locale_ != 0u) {
     if (isWithinInversionTolerances(global_pose)) {
       prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_);
@@ -135,8 +149,82 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
   }
 
+  // Virtual Lookahead — stateless horizon extension.
+  //
+  // When the visible TGP is shorter than min_inversion_horizon_ and there is
+  // a next inversion boundary, borrow points from global_plan_ past that
+  // boundary into the returned transformed_plan for this cycle only.
+  // This prevents MPPI's cost gradient from collapsing to zero when
+  // planner-generated micro-segments (Ackermann cusp artifacts) leave
+  // the controller with insufficient lookahead.
+  //
+  // The extension is bounded to min_inversion_horizon_ meters, so for
+  // segments that are already long enough (e.g., a real 0.97m reverse),
+  // the guard does not fire because tgp_length >= min_inversion_horizon_.
+  // No persistent state is modified.
+  float tgp_length = utils::pathLength(transformed_plan);
+  if (enforce_path_inversion_ && min_inversion_horizon_ > 0.0f &&
+    inversion_locale_ != 0u &&
+    tgp_length < min_inversion_horizon_ &&
+    !transformed_plan.poses.empty())
+  {
+    size_t appended = 0;
+    unsigned int mx, my;
+    for (size_t i = inversion_locale_;
+      i < global_plan_.poses.size() && tgp_length < min_inversion_horizon_;
+      ++i)
+    {
+      // Create a local copy to avoid mutating global_plan_ headers
+      geometry_msgs::msg::PoseStamped global_pose_copy = global_plan_.poses[i];
+      global_pose_copy.header.stamp = global_pose.header.stamp;
+      global_pose_copy.header.frame_id = global_plan_.header.frame_id;
+
+      geometry_msgs::msg::PoseStamped costmap_pose;
+      if (transformPose(costmap_->getGlobalFrameID(), global_pose_copy, costmap_pose)) {
+        // Respect costmap bounds — same check as normal plan builder
+        if (!costmap_->getCostmap()->worldToMap(
+            costmap_pose.pose.position.x, costmap_pose.pose.position.y, mx, my))
+        {
+          break;
+        }
+        // Incrementally track path length to avoid O(N²) recomputation
+        if (!transformed_plan.poses.empty()) {
+          const auto & prev = transformed_plan.poses.back();
+          tgp_length += hypotf(
+            costmap_pose.pose.position.x - prev.pose.position.x,
+            costmap_pose.pose.position.y - prev.pose.position.y);
+        }
+        transformed_plan.poses.push_back(costmap_pose);
+        appended++;
+      }
+    }
+
+    if (appended > 0) {
+      RCLCPP_DEBUG(logger_,
+        "[HORIZON_GUARD] Virtual lookahead: appended %zu pts from idx %u, "
+        "TGP now %zu pts / %.4fm (inv_locale=%u)",
+        appended, inversion_locale_, transformed_plan.poses.size(),
+        tgp_length, inversion_locale_);
+    }
+  }
+
   if (transformed_plan.poses.empty()) {
     throw nav2_core::InvalidPath("Resulting plan has 0 poses in it.");
+  }
+
+  // Diagnostic: TGP metadata after inversion crop + virtual lookahead
+  {
+    double cusp_dist = 0.0;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      const auto & cusp = global_plan_up_to_inversion_.poses.back();
+      cusp_dist = hypot(
+        global_pose.pose.position.x - cusp.pose.position.x,
+        global_pose.pose.position.y - cusp.pose.position.y);
+    }
+    RCLCPP_DEBUG_THROTTLE(logger_, *clock_, 200,
+      "[PathHandler] TGP_PTS=%zu TGP_LEN=%.4fm INV_LOCALE=%u CUSP_DIST=%.4fm",
+      transformed_plan.poses.size(), tgp_length, inversion_locale_,
+      cusp_dist);
   }
 
   return transformed_plan;

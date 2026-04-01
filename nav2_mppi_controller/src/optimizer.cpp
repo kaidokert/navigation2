@@ -245,7 +245,8 @@ void Optimizer::optimize(bool diag)
       auto cwz0 = xt::view(state_.cwz, xt::all(), 0);
       auto cwz1 = xt::view(state_.cwz, xt::all(), 1);
       RCLCPP_DEBUG(logger_,
-        "[MPPI] B.batch  cvx0: mean=%.3f [%.3f,%.3f] neg=%d/%d  cvx1: mean=%.3f [%.3f,%.3f]  cwz_mean=(%.3f,%.3f)",
+        "[MPPI] B.batch  cvx0: mean=%.3f [%.3f,%.3f] neg=%d/%d"
+        "  cvx1: mean=%.3f [%.3f,%.3f]  cwz_mean=(%.3f,%.3f)",
         static_cast<float>(xt::mean(cvx0)()),
         static_cast<float>(xt::amin(cvx0)()), static_cast<float>(xt::amax(cvx0)()),
         static_cast<int>(xt::sum(xt::cast<int>(cvx0 < 0.0f))()), settings_.batch_size,
