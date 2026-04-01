@@ -143,26 +143,19 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
   }
 
-  // Virtual Lookahead — stateless horizon extension for micro-segment cusps.
-  //
-  // Trigger: the current segment has structurally few points before the next
-  // inversion (inversion_locale_ < 10), indicating a planner micro-segment
-  // artifact, AND the visible TGP is too short for MPPI to produce meaningful
-  // cost gradients.
-  //
-  // Action: borrow points from global_plan_ starting at the inversion boundary
-  // (index-based, not Euclidean search) and append them to transformed_plan
-  // for this cycle only. No persistent state is modified.
-  //
-  // This does NOT fire during normal approach to a real inversion (e.g., M8's
-  // 0.97m reverse segment has inversion_locale_ ~35, well above the threshold).
-  // Virtual Lookahead — stateless horizon extension for micro-segment cusps.
+  // Virtual Lookahead — stateless horizon extension.
   //
   // When the visible TGP is shorter than min_inversion_horizon_ and there is
   // a next inversion boundary, borrow points from global_plan_ past that
-  // boundary. This prevents MPPI's cost gradient from collapsing to zero
-  // at planner-generated micro-segments (Ackermann cusp artifacts).
-  // No persistent state is modified — only the returned transformed_plan.
+  // boundary into the returned transformed_plan for this cycle only.
+  // This prevents MPPI's cost gradient from collapsing to zero when
+  // planner-generated micro-segments (Ackermann cusp artifacts) leave
+  // the controller with insufficient lookahead.
+  //
+  // The extension is bounded to min_inversion_horizon_ meters, so for
+  // segments that are already long enough (e.g., a real 0.97m reverse),
+  // the guard does not fire because tgp_length >= min_inversion_horizon_.
+  // No persistent state is modified.
   float tgp_length = utils::pathLength(transformed_plan);
   if (enforce_path_inversion_ && min_inversion_horizon_ > 0.0f &&
     inversion_locale_ != 0u &&
