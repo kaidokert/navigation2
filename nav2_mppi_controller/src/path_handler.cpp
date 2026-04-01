@@ -46,6 +46,12 @@ void PathHandler::initialize(
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
     getParam(inversion_yaw_tolerance, "inversion_yaw_tolerance", 0.4);
     getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
+    if (min_inversion_horizon_ < 0.0f) {
+      RCLCPP_WARN(logger_,
+        "min_inversion_horizon (%.3f) is negative, disabling virtual lookahead",
+        min_inversion_horizon_);
+      min_inversion_horizon_ = 0.0f;
+    }
     inversion_locale_ = 0u;
   }
 }
