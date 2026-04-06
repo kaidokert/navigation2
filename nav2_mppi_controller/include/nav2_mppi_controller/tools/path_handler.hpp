@@ -144,7 +144,66 @@ protected:
     * @param robot_pose Robot's current pose to check
     * @return bool If the robot pose is within the set inversion tolerances
     */
-  bool isWithinInversionTolerances(const geometry_msgs::msg::PoseStamped & robot_pose);
+  bool isWithinInversionTolerances(const geometry_msgs::msg::PoseStamped & robot_pose) const;
+
+  /**
+   * @brief Check whether ghost extension should be activated for the current path segment
+   * @param transformed_plan Real transformed segment before any synthetic extension
+   * @param global_pose Robot pose in plan frame
+   * @param tgp_length Current transformed plan arc length
+   * @param cusp_dist Output distance from robot to active cusp pose
+   * @param heading Output filtered heading estimate for synthetic continuation
+   * @param heading_variance Output heading variance used for stability gating
+   * @return true if ghost extension should be activated
+   */
+  bool shouldUseGhostPath(
+    const nav_msgs::msg::Path & transformed_plan,
+    const geometry_msgs::msg::PoseStamped & global_pose,
+    const double tgp_length,
+    double & cusp_dist,
+    double & heading,
+    double & heading_variance) const;
+
+  /**
+   * @brief Estimate a stable continuation heading from the tail of the active path segment
+   * @param transformed_plan Real transformed segment before any synthetic extension
+   * @param heading Output filtered heading estimate
+   * @param heading_variance Output weighted variance around the filtered heading
+   * @param seed_arc_length Output total seed arc length used for the estimate
+   * @return true if the heading estimate is stable enough to use
+   */
+  bool estimateGhostHeading(
+    const nav_msgs::msg::Path & transformed_plan,
+    double & heading,
+    double & heading_variance,
+    double & seed_arc_length) const;
+
+  /**
+   * @brief Append synthetic ghost points continuing the current active segment
+   * @param transformed_plan Plan to extend in the costmap frame
+   * @param heading Filtered heading estimate for continuation
+   * @param target_total_length Desired total transformed path length after extension
+   * @return number of appended ghost points
+   */
+  size_t appendGhostPath(
+    nav_msgs::msg::Path & transformed_plan,
+    const double heading,
+    const double target_total_length,
+    double & total_length) const;
+
+  /**
+   * @brief Check if a costmap-frame pose is traversable for synthetic continuation
+   * @param pose Pose in costmap frame
+   * @return true if pose is in bounds and not in lethal or inscribed cost
+   */
+  bool isTraversableCostmapPose(const geometry_msgs::msg::PoseStamped & pose) const;
+
+  /**
+   * @brief Compute distance from robot to the active cusp pose
+   * @param global_pose Robot pose in plan frame
+   * @return cusp distance in meters, or infinity if no active cusp exists
+   */
+  double getCuspDistance(const geometry_msgs::msg::PoseStamped & global_pose) const;
 
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
@@ -159,11 +218,18 @@ protected:
   double max_robot_pose_search_dist_{0};
   double prune_distance_{0};
   double transform_tolerance_{0};
-  float inversion_xy_tolerance_{0.2};
-  float inversion_yaw_tolerance{0.4};
-  float min_inversion_horizon_{0.15};
+  double inversion_xy_tolerance_{0.2};
+  double inversion_yaw_tolerance_{0.4};
+  double min_inversion_horizon_{0.15};
+  double ghost_max_extension_{0.35};
+  double ghost_point_spacing_{0.05};
+  double ghost_min_seed_arc_length_{0.05};
+  int ghost_min_seed_points_{4};
+  double micro_cusp_length_threshold_{0.25};
+  double micro_cusp_yaw_scale_{2.0};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
+  double current_segment_length_{std::numeric_limits<double>::infinity()};
 };
 }  // namespace mppi
 

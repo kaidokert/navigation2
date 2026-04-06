@@ -518,7 +518,10 @@ void Optimizer::updateControlSequence(bool diag)
   // [D] SOFTMAX: how concentrated are the weights?
   if (diag) {
     float w_max = static_cast<float>(xt::amax(softmaxes)());
-    size_t w_max_idx = xt::argmax(softmaxes)();
+    size_t w_max_idx = 0;
+    for (size_t k = 1; k < softmaxes.size(); ++k) {
+      if (softmaxes(k) > softmaxes(w_max_idx)) {w_max_idx = k;}
+    }
     float ess = 1.0f / static_cast<float>(xt::sum(xt::square(softmaxes))());
     RCLCPP_DEBUG(logger_,
       "[MPPI] D.softmax  w_max=%.4f ess=%.0f/%d  best[%zu]: cvx(%.3f,%.3f,%.3f) cwz(%.3f,%.3f)",
