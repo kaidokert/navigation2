@@ -153,7 +153,6 @@ protected:
    * @param tgp_length Current transformed plan arc length
    * @param cusp_dist Output distance from robot to active cusp pose
    * @param heading Output filtered heading estimate for synthetic continuation
-   * @param heading_variance Output heading variance used for stability gating
    * @return true if ghost extension should be activated
    */
   bool shouldUseGhostPath(
@@ -161,8 +160,7 @@ protected:
     const geometry_msgs::msg::PoseStamped & global_pose,
     const double tgp_length,
     double & cusp_dist,
-    double & heading,
-    double & heading_variance) const;
+    double & heading) const;
 
   /**
    * @brief Estimate a stable continuation heading from the tail of the active path segment
@@ -183,6 +181,7 @@ protected:
    * @param transformed_plan Plan to extend in the costmap frame
    * @param heading Filtered heading estimate for continuation
    * @param target_total_length Desired total transformed path length after extension
+   * @param total_length In/out: updated with new total arc length after extension
    * @return number of appended ghost points
    */
   size_t appendGhostPath(
@@ -229,6 +228,11 @@ protected:
   double micro_cusp_yaw_scale_{2.0};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
+  // Structural length of the active segment, set at handoff time.
+  // Thread safety: follows the same single-threaded controller model as
+  // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
+  // all mutated in transformPath() and setPlan() which are called from
+  // computeVelocityCommands() on the controller server's single thread.
   double current_segment_length_{std::numeric_limits<double>::infinity()};
 };
 }  // namespace mppi
