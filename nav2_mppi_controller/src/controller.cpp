@@ -59,6 +59,7 @@ void MPPIController::cleanup()
 void MPPIController::activate()
 {
   trajectory_visualizer_.on_activate();
+  optimizer_.on_activate();
   parameters_handler_->start();
   RCLCPP_INFO(logger_, "Activated MPPI Controller: %s", name_.c_str());
 }
@@ -66,6 +67,7 @@ void MPPIController::activate()
 void MPPIController::deactivate()
 {
   trajectory_visualizer_.on_deactivate();
+  optimizer_.on_deactivate();
   RCLCPP_INFO(logger_, "Deactivated MPPI Controller: %s", name_.c_str());
 }
 
