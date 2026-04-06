@@ -86,6 +86,16 @@ public:
   void shutdown();
 
   /**
+   * @brief Activate optimizer (activate critic manager publishers)
+   */
+  void on_activate();
+
+  /**
+   * @brief Deactivate optimizer (deactivate critic manager publishers)
+   */
+  void on_deactivate();
+
+  /**
    * @brief Compute control using MPPI algorithm
    * @param robot_pose Pose of the robot at given time
    * @param robot_speed Speed of the robot at given time
@@ -127,7 +137,7 @@ protected:
   /**
    * @brief Main function to generate, score, and return trajectories
    */
-  void optimize();
+  void optimize(bool diag = false);
 
   /**
    * @brief Prepare state information on new request for trajectory rollouts
@@ -211,7 +221,7 @@ protected:
    * @brief Update control sequence with state controls weighted by costs
    * using softmax function
    */
-  void updateControlSequence();
+  void updateControlSequence(bool diag = false);
 
   /**
    * @brief Convert control sequence to a twist commant
@@ -250,6 +260,7 @@ protected:
   ParametersHandler * parameters_handler_;
   CriticManager critic_manager_;
   NoiseGenerator noise_generator_;
+  int diag_tick_{0};
 
   models::OptimizerSettings settings_;
 

@@ -60,6 +60,20 @@ void PathFollowCritic::score(CriticData & data)
   const auto path_x = data.path.x(offseted_idx);
   const auto path_y = data.path.y(offseted_idx);
 
+  // Diagnostic: target point selection
+  {
+    float dist_to_target = hypotf(
+      data.state.pose.pose.position.x - path_x,
+      data.state.pose.pose.position.y - path_y);
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 200,
+        "[PFC] target_idx=%zu/%zu furthest=%zu dist_to_target=%.4fm",
+        offseted_idx, path_size,
+        *data.furthest_reached_path_point, dist_to_target);
+    }
+  }
+
   const auto last_x = xt::view(data.trajectories.x, xt::all(), -1);
   const auto last_y = xt::view(data.trajectories.y, xt::all(), -1);
 
