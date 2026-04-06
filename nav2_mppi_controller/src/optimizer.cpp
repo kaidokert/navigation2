@@ -58,6 +58,17 @@ void Optimizer::initialize(
 void Optimizer::shutdown()
 {
   noise_generator_.shutdown();
+  critic_manager_.on_cleanup();
+}
+
+void Optimizer::on_activate()
+{
+  critic_manager_.on_activate();
+}
+
+void Optimizer::on_deactivate()
+{
+  critic_manager_.on_deactivate();
 }
 
 void Optimizer::getParams()
