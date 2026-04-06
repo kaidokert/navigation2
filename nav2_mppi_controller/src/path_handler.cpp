@@ -51,7 +51,6 @@ void PathHandler::initialize(
     getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
     getParam(ghost_max_extension_, "ghost_max_extension", 0.35);
     getParam(ghost_point_spacing_, "ghost_point_spacing", 0.05);
-    getParam(ghost_min_seed_arc_length_, "ghost_min_seed_arc_length", 0.05);
     getParam(ghost_min_seed_points_, "ghost_min_seed_points", 4);
     getParam(micro_cusp_length_threshold_, "micro_cusp_length_threshold", 0.25);
     getParam(micro_cusp_yaw_scale_, "micro_cusp_yaw_scale", 2.0);
@@ -65,7 +64,6 @@ void PathHandler::initialize(
     ghost_point_spacing_ = std::max(
       ghost_point_spacing_,
       costmap_->getCostmap()->getResolution());
-    ghost_min_seed_arc_length_ = std::max(ghost_min_seed_arc_length_, 0.0);
     ghost_min_seed_points_ = std::max(ghost_min_seed_points_, 2);
     micro_cusp_length_threshold_ = std::max(micro_cusp_length_threshold_, 0.0);
     micro_cusp_yaw_scale_ = std::max(micro_cusp_yaw_scale_, 1.0);

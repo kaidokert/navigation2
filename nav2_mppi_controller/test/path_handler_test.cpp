@@ -354,8 +354,8 @@ TEST(PathHandlerTests, GhostPathContinuesCurrentSegmentInsteadOfBorrowingReverse
   node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.01));
   node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.20));
   node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
-  node->declare_parameter("dummy.ghost_activation_max_cusp_distance", rclcpp::ParameterValue(1.0));
-  node->declare_parameter("dummy.ghost_min_seed_arc_length", rclcpp::ParameterValue(0.01));
+
+
   node->declare_parameter("dummy.ghost_min_seed_points", rclcpp::ParameterValue(2));
   auto costmap_ros = makeConfiguredCostmapRos();
   ParametersHandler param_handler(node);
@@ -388,8 +388,8 @@ TEST(PathHandlerTests, GhostPathDoesNotMutateGlobalPlanOrInversionLocale)
   node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.01));
   node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.20));
   node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
-  node->declare_parameter("dummy.ghost_activation_max_cusp_distance", rclcpp::ParameterValue(1.0));
-  node->declare_parameter("dummy.ghost_min_seed_arc_length", rclcpp::ParameterValue(0.01));
+
+
   node->declare_parameter("dummy.ghost_min_seed_points", rclcpp::ParameterValue(2));
   auto costmap_ros = makeConfiguredCostmapRos();
   ParametersHandler param_handler(node);
@@ -430,8 +430,8 @@ TEST(PathHandlerTests, GhostPathStopsBeforeLethalObstacle)
   node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.01));
   node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.20));
   node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
-  node->declare_parameter("dummy.ghost_activation_max_cusp_distance", rclcpp::ParameterValue(1.0));
-  node->declare_parameter("dummy.ghost_min_seed_arc_length", rclcpp::ParameterValue(0.01));
+
+
   node->declare_parameter("dummy.ghost_min_seed_points", rclcpp::ParameterValue(2));
   auto costmap_ros = makeConfiguredCostmapRos();
   ParametersHandler param_handler(node);

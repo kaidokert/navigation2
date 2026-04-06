@@ -222,7 +222,6 @@ protected:
   double min_inversion_horizon_{0.15};
   double ghost_max_extension_{0.35};
   double ghost_point_spacing_{0.05};
-  double ghost_min_seed_arc_length_{0.05};
   int ghost_min_seed_points_{4};
   double micro_cusp_length_threshold_{0.25};
   double micro_cusp_yaw_scale_{2.0};
