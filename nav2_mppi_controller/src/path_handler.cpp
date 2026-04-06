@@ -79,11 +79,13 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
 
   auto begin = global_plan_up_to_inversion_.poses.begin();
 
+  // Limit the search for the closest pose up to max_robot_pose_search_dist on the path
   auto closest_pose_upper_bound =
     nav2_util::geometry_utils::first_after_integrated_distance(
     global_plan_up_to_inversion_.poses.begin(), global_plan_up_to_inversion_.poses.end(),
     max_robot_pose_search_dist_);
 
+  // Find closest point to the robot
   auto closest_point = nav2_util::geometry_utils::min_by(
     begin, closest_pose_upper_bound,
     [&global_pose](const geometry_msgs::msg::PoseStamped & ps) {
@@ -99,20 +101,26 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
     closest_point, global_plan_up_to_inversion_.poses.end(), prune_distance_);
 
   unsigned int mx, my;
+  // Find the furthest relevent pose on the path to consider within costmap
+  // bounds
+  // Transforming it to the costmap frame in the same loop
   for (auto global_plan_pose = closest_point; global_plan_pose != pruned_plan_end;
     ++global_plan_pose)
   {
+    // Transform from global plan frame to costmap frame
     geometry_msgs::msg::PoseStamped costmap_plan_pose;
     global_plan_pose->header.stamp = global_pose.header.stamp;
     global_plan_pose->header.frame_id = global_plan_.header.frame_id;
     transformPose(costmap_->getGlobalFrameID(), *global_plan_pose, costmap_plan_pose);
 
+    // Check if pose is inside the costmap
     if (!costmap_->getCostmap()->worldToMap(
         costmap_plan_pose.pose.position.x, costmap_plan_pose.pose.position.y, mx, my))
     {
       return {transformed_plan, closest_point};
     }
 
+    // Filling the transformed plan to return with the transformed pose
     transformed_plan.poses.push_back(costmap_plan_pose);
   }
 
@@ -138,6 +146,7 @@ geometry_msgs::msg::PoseStamped PathHandler::transformToGlobalPlanFrame(
 nav_msgs::msg::Path PathHandler::transformPath(
   const geometry_msgs::msg::PoseStamped & robot_pose)
 {
+  // Find relevent bounds of path to use
   geometry_msgs::msg::PoseStamped global_pose = transformToGlobalPlanFrame(robot_pose);
   auto [transformed_plan, lower_bound] = getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
 
@@ -489,6 +498,7 @@ geometry_msgs::msg::PoseStamped PathHandler::getTransformedGoal(
 bool PathHandler::isWithinInversionTolerances(
   const geometry_msgs::msg::PoseStamped & robot_pose) const
 {
+  // Keep full path if we are within tolerance of the inversion pose
   const auto last_pose = global_plan_up_to_inversion_.poses.back();
   const double distance = std::hypot(
     robot_pose.pose.position.x - last_pose.pose.position.x,
