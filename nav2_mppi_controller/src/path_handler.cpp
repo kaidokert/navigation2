@@ -47,7 +47,7 @@ void PathHandler::initialize(
   getParam(enforce_path_inversion_, "enforce_path_inversion", false);
   if (enforce_path_inversion_) {
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
-    getParam(inversion_yaw_tolerance, "inversion_yaw_tolerance", 0.4);
+    getParam(inversion_yaw_tolerance_, "inversion_yaw_tolerance", 0.4);
     getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
     getParam(ghost_max_extension_, "ghost_max_extension", 0.35);
     getParam(ghost_point_spacing_, "ghost_point_spacing", 0.05);

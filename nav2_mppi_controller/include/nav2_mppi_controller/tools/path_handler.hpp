@@ -218,7 +218,7 @@ protected:
   double prune_distance_{0};
   double transform_tolerance_{0};
   float inversion_xy_tolerance_{0.2};
-  float inversion_yaw_tolerance{0.4};
+  float inversion_yaw_tolerance_{0.4};
   double min_inversion_horizon_{0.15};
   double ghost_max_extension_{0.35};
   double ghost_point_spacing_{0.05};
