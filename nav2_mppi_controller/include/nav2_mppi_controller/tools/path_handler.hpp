@@ -204,6 +204,15 @@ protected:
    */
   double getCuspDistance(const geometry_msgs::msg::PoseStamped & global_pose) const;
 
+  /**
+   * @brief Travel heading of the segment AFTER the active cusp, in plan frame.
+   * Only valid while the handoff has been blocked long enough for the escape
+   * policy (Layer 2, notes/cusp_handoff_fix_plan.md) to engage.
+   * @param heading Output: atan2 of the first post-cusp displacement
+   * @return true when escape is engaged and a post-cusp segment exists
+   */
+  bool computeEscapeHeading(double & heading) const;
+
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -225,6 +234,17 @@ protected:
   int ghost_min_seed_points_{4};
   double micro_cusp_length_threshold_{0.25};
   double micro_cusp_yaw_scale_{2.0};
+  // Cusp handoff deadlock escape (Layers 1+2, notes/cusp_handoff_fix_plan.md).
+  // Cycle-based (one isWithinInversionTolerances call per control cycle) so the
+  // policy is deterministic and unit-testable without a clock.
+  double handoff_yaw_relax_per_cycle_{0.005};   // rad of extra yaw tol per blocked cycle
+  double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
+  int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
+                                                // <=0 DISABLES escape (default: off until the
+                                                // oscillation latch is implemented — review 2026-09-25)
+  // mutable: the check is const to callers, but consecutive-blocked tracking is
+  // internal state. Same single-threaded controller model as the members below.
+  mutable unsigned int handoff_blocked_cycles_{0u};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
   // Structural length of the active segment, set at handoff time.

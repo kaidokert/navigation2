@@ -97,7 +97,43 @@ public:
   {
     return estimateGhostHeading(transformed_plan, heading, heading_variance, seed_arc_length);
   }
+
+  void setGlobalPlan(const nav_msgs::msg::Path & path)
+  {
+    global_plan_ = path;
+  }
+
+  void setInversionLocale(unsigned int locale)
+  {
+    inversion_locale_ = locale;
+  }
+
+  void setEnforcePathInversion(bool enforce)
+  {
+    enforce_path_inversion_ = enforce;
+  }
+
+  bool computeEscapeHeadingWrapper(double & heading) const
+  {
+    return computeEscapeHeading(heading);
+  }
+
+  void setHandoffEscapeAfterCycles(int cycles)
+  {
+    handoff_escape_after_cycles_ = cycles;
+  }
 };
+
+// Helper: robot pose at (x, y) with the given yaw
+geometry_msgs::msg::PoseStamped makePose(double x, double y, double yaw)
+{
+  geometry_msgs::msg::PoseStamped pose;
+  pose.pose.position.x = x;
+  pose.pose.position.y = y;
+  pose.pose.orientation.z = sin(yaw / 2.0);
+  pose.pose.orientation.w = cos(yaw / 2.0);
+  return pose;
+}
 
 nav_msgs::msg::Path makeMicroCuspPath(const std::string & frame_id = "map")
 {
@@ -568,4 +604,155 @@ TEST(PathHandlerTests, GhostHeadingMultiPointReverseSegmentUsesDisplacement)
   EXPECT_GT(heading, 0.5) << "Multi-point heading should be positive (backing up northeast)";
   EXPECT_LT(heading, 1.5) << "Multi-point heading should be ~1.1 rad (~65°)";
   EXPECT_GT(arc, 0.05);
+}
+
+// ── Layer 1: time-adaptive handoff yaw gate ─────────────────────────────────
+// Regression family for the M5 cusp-handoff deadlock (2026-09 Phase-1
+// campaign): xy tolerance met, yaw error above tolerance, no escape existed.
+
+TEST(PathHandlerTests, TestHandoffYawRelaxationUnlocks)
+{
+  nav_msgs::msg::Path path;
+  for (unsigned int i = 0; i != 10; i++) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = static_cast<double>(i);
+    path.poses.push_back(pose);
+  }
+  path.poses.back().pose.orientation.w = 1;  // cusp heading = 0
+
+  PathHandlerWrapper handler;
+  handler.setGlobalPlanUpToInversion(path);
+
+  // On top of the cusp in xy, 0.6 rad off in yaw (tol 0.4, relax cap 0.8)
+  auto robot_pose = makePose(9.0, 0.0, 0.6);
+
+  // Blocked at the static tolerance
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(robot_pose));
+
+  // Repeated blocked cycles must relax the gate until it unlocks
+  bool unlocked = false;
+  for (int cycle = 0; cycle != 300 && !unlocked; ++cycle) {
+    unlocked = handler.isWithinInversionTolerancesWrapper(robot_pose);
+  }
+  EXPECT_TRUE(unlocked) <<
+    "handoff gate never relaxed: the M5 deadlock (xy met, yaw blocked forever)";
+
+  // Unlock must reset the blocked state: a fresh over-cap error blocks again
+  auto worse_pose = makePose(9.0, 0.0, 1.2);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(worse_pose));
+}
+
+TEST(PathHandlerTests, TestHandoffNoRelaxationWhenFarInXY)
+{
+  nav_msgs::msg::Path path;
+  for (unsigned int i = 0; i != 10; i++) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = static_cast<double>(i);
+    path.poses.push_back(pose);
+  }
+  path.poses.back().pose.orientation.w = 1;
+
+  PathHandlerWrapper handler;
+  handler.setGlobalPlanUpToInversion(path);
+
+  // Far away in xy: many cycles must NOT accumulate relaxation
+  auto far_pose = makePose(4.0, 3.0, 0.6);
+  for (int cycle = 0; cycle != 200; ++cycle) {
+    EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(far_pose));
+  }
+
+  // First arrival at the cusp with yaw over tolerance: still blocked (no
+  // banked relaxation from the far cycles)
+  auto near_pose = makePose(9.0, 0.0, 0.6);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(near_pose));
+}
+
+// ── Layer 2: escape along the next segment after persistent blocking ────────
+// The M5 deadlock geometry from the 2026-09 Phase-1 campaign: a ~0.28m first
+// segment ending in a cusp, robot at the cusp with ~1.0 rad yaw error — above
+// the relax cap, so Layer 1 alone must NOT unlock, and the escape policy must
+// offer the post-cusp travel direction instead.
+TEST(PathHandlerTests, TestHandoffEscapeHeadingAfterBlockedM5Regression)
+{
+  // Segment A: forward +x, 0.28 m; segment B: reversing back -x (inversion)
+  nav_msgs::msg::Path full_plan;
+  std::vector<std::pair<double, double>> pts = {
+    {0.00, 0.0}, {0.04, 0.0}, {0.08, 0.0}, {0.12, 0.0}, {0.16, 0.0},
+    {0.20, 0.0}, {0.24, 0.0}, {0.28, 0.0},           // cusp at index 7
+    {0.23, 0.01}, {0.18, 0.02}, {0.13, 0.03}, {0.08, 0.04}};  // reverse leg
+  for (const auto & [x, y] : pts) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.orientation.w = 1.0;
+    full_plan.poses.push_back(pose);
+  }
+  nav_msgs::msg::Path segment_a = full_plan;
+  segment_a.poses.resize(8);
+
+  PathHandlerWrapper handler;
+  handler.setEnforcePathInversion(true);
+  handler.setGlobalPlan(full_plan);
+  handler.setGlobalPlanUpToInversion(segment_a);
+  handler.setInversionLocale(8u);  // first pose after the cusp
+
+  // At the cusp in xy, 1.0 rad off in yaw: above the 0.8 relax cap
+  auto robot_pose = makePose(0.28, 0.0, 1.0);
+
+  double heading = 0.0;
+  // Escape is DISABLED by default (handoff_escape_after_cycles <= 0): even a
+  // long block must not engage it.
+  for (int cycle = 0; cycle != 25; ++cycle) {
+    EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(robot_pose));
+    EXPECT_FALSE(handler.computeEscapeHeadingWrapper(heading)) <<
+      "escape engaged while disabled, after " << cycle + 1 << " blocked cycles";
+  }
+
+  // Enable with a 20-cycle threshold: the accumulated block engages escape
+  // with the post-cusp travel direction
+  handler.setHandoffEscapeAfterCycles(20);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(robot_pose));
+  ASSERT_TRUE(handler.computeEscapeHeadingWrapper(heading)) <<
+    "escape policy never engaged: the M5 deadlock would park here forever";
+  // B leg travels -x (slightly +y): heading ~ pi
+  EXPECT_NEAR(std::fabs(heading), M_PI, 0.30);
+
+  // Leaving the xy tolerance resets the blocked state and disarms escape
+  auto away_pose = makePose(1.5, 0.0, 1.0);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(away_pose));
+  EXPECT_FALSE(handler.computeEscapeHeadingWrapper(heading));
+}
+
+TEST(PathHandlerTests, TestHandoffRelaxationCapHolds)
+{
+  nav_msgs::msg::Path path;
+  for (unsigned int i = 0; i != 10; i++) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = static_cast<double>(i);
+    path.poses.push_back(pose);
+  }
+  path.poses.back().pose.orientation.w = 1;
+
+  // Just under the 0.8 relax cap: unlocks once relaxation reaches it
+  {
+    PathHandlerWrapper handler;
+    handler.setGlobalPlanUpToInversion(path);
+    auto pose = makePose(9.0, 0.0, 0.79);
+    bool unlocked = false;
+    for (int cycle = 0; cycle != 400 && !unlocked; ++cycle) {
+      unlocked = handler.isWithinInversionTolerancesWrapper(pose);
+    }
+    EXPECT_TRUE(unlocked);
+  }
+
+  // Above the cap: must NEVER unlock, no matter how long it blocks
+  {
+    PathHandlerWrapper handler;
+    handler.setGlobalPlanUpToInversion(path);
+    auto pose = makePose(9.0, 0.0, 0.85);
+    for (int cycle = 0; cycle != 400; ++cycle) {
+      EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(pose)) <<
+        "relaxation exceeded its cap at cycle " << cycle;
+    }
+  }
 }

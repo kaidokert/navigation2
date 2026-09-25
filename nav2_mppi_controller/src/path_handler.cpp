@@ -54,6 +54,13 @@ void PathHandler::initialize(
     getParam(ghost_min_seed_points_, "ghost_min_seed_points", 4);
     getParam(micro_cusp_length_threshold_, "micro_cusp_length_threshold", 0.25);
     getParam(micro_cusp_yaw_scale_, "micro_cusp_yaw_scale", 2.0);
+    getParam(handoff_yaw_relax_per_cycle_, "handoff_yaw_relax_per_cycle", 0.005);
+    getParam(handoff_yaw_relax_cap_, "handoff_yaw_relax_cap", 0.8);
+    // <=0 disables the escape policy (default: disabled pending oscillation latch)
+    getParam(handoff_escape_after_cycles_, "handoff_escape_after_cycles", 0);
+    handoff_yaw_relax_per_cycle_ = std::max(handoff_yaw_relax_per_cycle_, 0.0);
+    handoff_yaw_relax_cap_ = std::max(
+      handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
     if (min_inversion_horizon_ < 0.0) {
       RCLCPP_WARN(logger_,
         "min_inversion_horizon (%.3f) is negative, disabling ghost extension",
@@ -188,7 +195,61 @@ nav_msgs::msg::Path PathHandler::transformPath(
   double tgp_length = real_tgp_length;
   double cusp_dist = std::numeric_limits<double>::infinity();
   double ghost_heading = 0.0;
-  if (shouldUseGhostPath(
+
+  // Layer 2 escape (notes/cusp_handoff_fix_plan.md): the handoff has been
+  // blocked long enough that extrapolating the consumed segment cannot help —
+  // extend along the NEXT segment's travel direction instead, so the optimizer
+  // has a reachable objective that also reduces the blocking yaw error.
+  double escape_heading_plan = 0.0;
+  bool escape_handled = false;
+  if (enforce_path_inversion_ && inversion_locale_ != 0u &&
+    computeEscapeHeading(escape_heading_plan) && !transformed_plan.poses.empty())
+  {
+    // Rotate the plan-frame direction into the costmap frame by transforming
+    // the two plan poses that define it (same convention as the bounds loop).
+    geometry_msgs::msg::PoseStamped a = global_plan_.poses[inversion_locale_ - 1];
+    geometry_msgs::msg::PoseStamped b = global_plan_.poses[inversion_locale_];
+    a.header.stamp = global_pose.header.stamp;
+    a.header.frame_id = global_plan_.header.frame_id;
+    b.header.stamp = global_pose.header.stamp;
+    b.header.frame_id = global_plan_.header.frame_id;
+    geometry_msgs::msg::PoseStamped ta, tb;
+    double escape_heading = escape_heading_plan;
+    if (transformPose(costmap_->getGlobalFrameID(), a, ta) &&
+      transformPose(costmap_->getGlobalFrameID(), b, tb))
+    {
+      escape_heading = std::atan2(
+        tb.pose.position.y - ta.pose.position.y,
+        tb.pose.position.x - ta.pose.position.x);
+    }
+    const double target_total_length = std::min(
+      min_inversion_horizon_,
+      real_tgp_length + std::max(ghost_point_spacing_ * 4.0, ghost_max_extension_));
+    const size_t before = transformed_plan.poses.size();
+    const size_t appended = appendGhostPath(
+      transformed_plan, escape_heading, target_total_length, tgp_length);
+    if (appended > 0) {
+      // Path poses carry NOSE orientation; on a reversing post-cusp segment
+      // that is travel+pi. appendGhostPath stamps the travel heading, which
+      // would make PathAlignCritic(use_path_orientations) penalize exactly
+      // the reverse move the escape encourages — use the post-cusp pose's
+      // own orientation instead (review finding 5, 2026-09-25).
+      for (size_t i = before; i < transformed_plan.poses.size(); ++i) {
+        transformed_plan.poses[i].pose.orientation = tb.pose.orientation;
+      }
+      escape_handled = true;
+      if (clock_) {
+        RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+          "[HANDOFF_ESCAPE] blocked=%u appended=%zu pts along next-segment "
+          "heading=%.3frad real=%.4fm total=%.4fm",
+          handoff_blocked_cycles_, appended, escape_heading,
+          real_tgp_length, tgp_length);
+      }
+    }
+    // appended == 0 (escape direction blocked by cost): fall through to the
+    // normal ghost branch below (review finding 8).
+  }
+  if (!escape_handled && shouldUseGhostPath(
       transformed_plan, global_pose, real_tgp_length, cusp_dist,
       ghost_heading))
   {
@@ -213,7 +274,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
         appended, ghost_heading, ghost_heading * 180.0 / M_PI,
         real_tgp_length, tgp_length, cusp_dist);
     }
-  } else if (real_tgp_length < min_inversion_horizon_ && inversion_locale_ != 0u) {
+  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_ &&
+    inversion_locale_ != 0u)
+  {
     // Log WHY ghost didn't fire when TGP is short
     cusp_dist = getCuspDistance(global_pose);
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
@@ -518,25 +581,73 @@ bool PathHandler::isWithinInversionTolerances(
     ? inversion_yaw_tolerance_ * micro_cusp_yaw_scale_
     : inversion_yaw_tolerance_;
 
+  // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
+  // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
+  // cap, so a heading error the robot cannot correct in place cannot block the
+  // handoff forever. Safe to relax now that PathAlignCritic with path
+  // orientations supplies the corrective signal after handoff.
+  // Floor at effective_yaw_tol: with a large micro_cusp_yaw_scale the scaled
+  // tolerance can exceed the cap, and min(cap, ...) alone would TIGHTEN the
+  // micro gate (review finding, 2026-09-25).
+  const double relaxed_yaw_tol = std::max(
+    effective_yaw_tol,
+    std::min(
+      handoff_yaw_relax_cap_,
+      effective_yaw_tol +
+      handoff_yaw_relax_per_cycle_ * static_cast<double>(handoff_blocked_cycles_)));
+
   bool result = distance <= inversion_xy_tolerance_ &&
-         std::fabs(angle_distance) <= effective_yaw_tol;
-  if (result && is_micro_cusp) {
-    RCLCPP_INFO(logger_,
-      "[HANDOFF_MICRO] xy=%.4fm yaw=%.3frad(tol=%.2f) seg_len=%.3fm",
-      distance, std::fabs(angle_distance), effective_yaw_tol,
-      current_segment_length_);
-  } else if (!result && distance <= inversion_xy_tolerance_ && clock_) {
+         std::fabs(angle_distance) <= relaxed_yaw_tol;
+
+  if (!result && distance <= inversion_xy_tolerance_) {
+    ++handoff_blocked_cycles_;
     // clock_ is only set by initialize(); guard so the tolerance check stays
     // callable on a bare PathHandler (unit tests construct it without a node —
     // dereferencing the null clock here was a SIGSEGV in path_handler_test).
-    RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
-      "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) seg_len=%.3fm",
-      distance, inversion_xy_tolerance_,
-      std::fabs(angle_distance), effective_yaw_tol,
-      is_micro_cusp ? " MICRO" : "",
-      current_segment_length_);
+    if (clock_) {
+      RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+        "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) "
+        "seg_len=%.3fm blocked=%u",
+        distance, inversion_xy_tolerance_,
+        std::fabs(angle_distance), relaxed_yaw_tol,
+        is_micro_cusp ? " MICRO" : "",
+        current_segment_length_, handoff_blocked_cycles_);
+    }
+  } else {
+    // Unlocked, or left the xy tolerance: relaxation must not bank across
+    // separate approaches.
+    handoff_blocked_cycles_ = 0u;
+    if (result && is_micro_cusp) {
+      RCLCPP_INFO(logger_,
+        "[HANDOFF_MICRO] xy=%.4fm yaw=%.3frad(tol=%.2f) seg_len=%.3fm",
+        distance, std::fabs(angle_distance), relaxed_yaw_tol,
+        current_segment_length_);
+    }
   }
   return result;
+}
+
+bool PathHandler::computeEscapeHeading(double & heading) const
+{
+  // Layer 2: after enough consecutive blocked cycles, offer the optimizer the
+  // FUTURE — the travel direction of the segment after the cusp — instead of
+  // more extrapolation of the segment it has already consumed. Plan frame.
+  if (handoff_escape_after_cycles_ <= 0 ||  // policy disabled
+    inversion_locale_ == 0u ||
+    handoff_blocked_cycles_ < static_cast<unsigned int>(handoff_escape_after_cycles_) ||
+    static_cast<size_t>(inversion_locale_) >= global_plan_.poses.size())
+  {
+    return false;
+  }
+  const auto & cusp = global_plan_.poses[inversion_locale_ - 1].pose.position;
+  const auto & next = global_plan_.poses[inversion_locale_].pose.position;
+  const double dx = next.x - cusp.x;
+  const double dy = next.y - cusp.y;
+  if (std::hypot(dx, dy) < 1e-6) {
+    return false;
+  }
+  heading = std::atan2(dy, dx);
+  return true;
 }
 
 }  // namespace mppi
