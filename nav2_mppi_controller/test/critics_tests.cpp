@@ -876,3 +876,65 @@ TEST(CriticTests, ApproachAngleCritic)
   critic.score(data);
   EXPECT_GT(costs(1), costs_at_03);
 }
+
+TEST(CriticTests, ObstaclesCriticGoalTruncation)
+{
+  // M6 regression (notes/cusp_handoff_fix_plan.md, 2026-09-25): rollout tails
+  // extend ~2s PAST the goal; when the goal sits near a wall, every
+  // progress-making sample "collides" beyond it and the optimizer parks at a
+  // standoff (critics_stats showed ObstaclesCritic 0 -> 5e10 at the brake
+  // moment). Points past the goal are fantasy — the executed robot stops.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  auto getParam = param_handler.getParamGetter("critic");
+  bool consider_footprint;
+  getParam(consider_footprint, "consider_footprint", false);
+  double trunc;
+  getParam(trunc, "goal_truncation_distance", 0.3);
+
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  // Lethal wall at x = 2.0m, beyond the goal at (1.5, 0)
+  auto * cm = costmap_ros->getCostmap();
+  unsigned int mx, my;
+  for (double y = -1.0; y <= 1.0; y += 0.05) {
+    if (cm->worldToMap(2.0, y, mx, my)) {
+      cm->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
+  }
+
+  models::State state;
+  state.pose.pose.position.x = 1.0;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(50, 30);
+  // One straight line from x=1.0 through the goal at 1.5 into the wall at 2.0
+  for (unsigned int i = 0; i != 50; i++) {
+    for (unsigned int t = 0; t != 30; t++) {
+      generated_trajectories.x(i, t) = 1.0 + 0.05 * static_cast<double>(t);
+      generated_trajectories.y(i, t) = 0.0;
+    }
+  }
+  models::Path path;
+  path.reset(10);
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 1.5;
+  goal.orientation.w = 1.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({50});
+  float model_dt = 0.1;
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+
+  ObstaclesCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  critic.score(data);
+  // With goal truncation, the post-goal wall must not veto the trajectory
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6) <<
+    "post-goal obstacle vetoed a trajectory that stops at the goal";
+  EXPECT_FALSE(data.fail_flag);
+}
