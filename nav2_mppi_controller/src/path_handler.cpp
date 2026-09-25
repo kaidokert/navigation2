@@ -525,7 +525,10 @@ bool PathHandler::isWithinInversionTolerances(
       "[HANDOFF_MICRO] xy=%.4fm yaw=%.3frad(tol=%.2f) seg_len=%.3fm",
       distance, std::fabs(angle_distance), effective_yaw_tol,
       current_segment_length_);
-  } else if (!result && distance <= inversion_xy_tolerance_) {
+  } else if (!result && distance <= inversion_xy_tolerance_ && clock_) {
+    // clock_ is only set by initialize(); guard so the tolerance check stays
+    // callable on a bare PathHandler (unit tests construct it without a node —
+    // dereferencing the null clock here was a SIGSEGV in path_handler_test).
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
       "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) seg_len=%.3fm",
       distance, inversion_xy_tolerance_,
