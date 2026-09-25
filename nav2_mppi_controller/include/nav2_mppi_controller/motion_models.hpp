@@ -178,6 +178,44 @@ public:
   }
 
   /**
+   * @brief Predict rollout velocities with the Ackermann turning limit
+   * enforced per step. Upstream applied the limit only to the winning
+   * control sequence, so the optimizer scored pivot fantasies
+   * (|vx|/|wz| < r_min) the vehicle cannot execute (stage-3,
+   * notes/cusp_handoff_fix_plan.md). Review-amended (2026-09-25): the
+   * projection is applied to the CONTROLS (cwz, written back — so scoring,
+   * averaging and the importance weights all see the same feasible values),
+   * inside the acceleration chain (wz_last carries projected values, so
+   * az_max still holds), and never touches column 0 (measured state).
+   * @param state State with sampled controls to roll out
+   */
+  void predict(models::State & state) override
+  {
+    MotionModel::predict(state);
+
+    // Project ROLLOUT wz (columns 1+; column 0 is the measured state) onto
+    // the feasible Ackermann cone so scoring only rewards executable motion.
+    //
+    // DELIBERATELY NOT written back into cwz, and deliberately post-hoc
+    // rather than inside the acceleration chain: the "consistent" variant
+    // (per-step cone clamp written back into the controls, review
+    // 2026-09-25) was implemented and EMPIRICALLY FALSIFIED — at maneuver
+    // start vx≈0 collapses the cone, the zeroed samples then dominate the
+    // control-sequence average, and the mean wz can never leave zero: a
+    // self-locking straight line (M5 drove 1.9m AWAY from its goal, trio
+    // gate 2/15 vs 6/15 with this version; radius change ruled out by a
+    // one-variable arm). The scoring/averaging incoherence this leaves
+    // (averaged cwz can exceed the scored wz; final applyConstraints clamps
+    // the winner) is a known, documented trade.
+    using namespace xt::placeholders;  // NOLINT
+    auto vx = xt::view(state.vx, xt::all(), xt::range(1, _));
+    auto wz = xt::view(state.wz, xt::all(), xt::range(1, _));
+
+    auto view = xt::masked_view(wz, (xt::fabs(vx) / xt::fabs(wz)) < min_turning_r_);
+    view = xt::sign(wz) * xt::fabs(vx) / min_turning_r_;
+  }
+
+  /**
    * @brief Get minimum turning radius of ackermann drive
    * @return Minimum turning radius
    */

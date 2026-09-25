@@ -17,6 +17,10 @@
       <description>mppi critic for achieving the goal heading angle</description>
     </class>
 
+    <class type="mppi::critics::ApproachAngleCritic" base_class_type="mppi::critics::CriticFunction">
+      <description>final-approach terminal-heading shaping toward the true goal orientation, hard-gated by activation distance</description>
+    </class>
+
     <class type="mppi::critics::PathAlignCritic" base_class_type="mppi::critics::CriticFunction">
       <description>mppi critic for aligning to path</description>
     </class>

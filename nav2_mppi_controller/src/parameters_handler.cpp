@@ -66,7 +66,13 @@ ParametersHandler::dynamicParamsCallback(
     {
       callback->second(param);
     } else {
-      RCLCPP_WARN(logger_, "Parameter %s not found", param_name.c_str());
+      // Foreign parameters (other plugins on the shared controller_server
+      // node, e.g. general_goal_checker.*) routinely pass through this
+      // callback. Not ours — not a warning. The old WARN ("Parameter %s not
+      // found") repeatedly misled log forensics (2026-09 campaigns).
+      RCLCPP_DEBUG(
+        logger_, "Parameter %s not registered with MPPI handler",
+        param_name.c_str());
     }
   }
 

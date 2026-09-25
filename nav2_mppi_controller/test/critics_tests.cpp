@@ -21,6 +21,7 @@
 #include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_mppi_controller/motion_models.hpp"
 #include "nav2_mppi_controller/critics/constraint_critic.hpp"
+#include "nav2_mppi_controller/critics/approach_angle_critic.hpp"
 #include "nav2_mppi_controller/critics/goal_angle_critic.hpp"
 #include "nav2_mppi_controller/critics/goal_critic.hpp"
 #include "nav2_mppi_controller/critics/obstacles_critic.hpp"
@@ -807,4 +808,71 @@ TEST(CriticTests, VelocityDeadbandCritic)
   critic.score(data);
   // 35.0 weight * 0.1 model_dt * (0.07 + 0.06 + 0.059) * 30 timesteps = 56.7
   EXPECT_NEAR(costs(1), 19.845, 0.01);
+}
+
+TEST(CriticTests, ApproachAngleCritic)
+{
+  // Standard preamble
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  models::State state;
+  models::ControlSequence control_sequence;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(1000, 30);
+  models::Path path;
+  geometry_msgs::msg::Pose goal;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({1000});
+  float model_dt = 0.1;
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+
+  ApproachAngleCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  EXPECT_EQ(critic.getName(), "critic");
+
+  // Goal at (10,0) facing pi; every trajectory terminally misaligned (yaw 0)
+  goal.position.x = 10.0;
+  goal.orientation.w = 0.0;
+  goal.orientation.z = 1.0;  // yaw = pi
+  path.reset(10);
+
+  // PROVABLY INERT beyond activation_distance (0.5): far away...
+  state.pose.pose.position.x = 1.0;
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6);
+  // ...and just outside the boundary
+  state.pose.pose.position.x = 9.45;
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6);
+
+  // ACTIVE inside: dist 0.3 -> ramp = 1 - 0.3/0.5 = 0.4
+  state.pose.pose.position.x = 9.7;
+  critic.score(data);
+  EXPECT_GT(xt::sum(costs, immediate)(), 0) <<
+    "critic inert during final approach: M5 would park misaligned again";
+  // terminal yaw error pi, weight 3.0, ramp 0.4 -> 3.7699
+  EXPECT_NEAR(costs(0), 3.7699, 0.02);
+
+  // A terminally-ALIGNED trajectory scores ~zero
+  costs = xt::zeros<float>({1000});
+  for (unsigned int t = 0; t != 30; t++) {
+    generated_trajectories.yaws(0, t) = 3.14159;
+  }
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0, 1e-3);
+  EXPECT_GT(costs(1), 1.0);
+
+  // Ramp grows monotonically as the goal nears: dist 0.1 -> ramp 0.8
+  auto costs_at_03 = costs(1);
+  costs = xt::zeros<float>({1000});
+  state.pose.pose.position.x = 9.9;
+  critic.score(data);
+  EXPECT_GT(costs(1), costs_at_03);
 }
