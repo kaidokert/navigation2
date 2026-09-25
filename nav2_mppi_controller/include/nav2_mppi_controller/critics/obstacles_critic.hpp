@@ -93,6 +93,11 @@ protected:
   float possible_collision_cost_;
   float collision_margin_distance_;
   float near_goal_distance_;
+  // Stop scoring a trajectory once it comes within this distance of the goal:
+  // the executed robot stops there, so post-goal rollout points are fantasy.
+  // 0 disables (upstream behavior). Fixes the goal-near-wall standoff veto
+  // (M6, notes/cusp_handoff_fix_plan.md 2026-09-25).
+  float goal_truncation_distance_{0};
   float circumscribed_cost_{0}, circumscribed_radius_{0};
 
   unsigned int power_{0};

@@ -31,6 +31,7 @@ void ObstaclesCritic::initialize()
   getParam(collision_cost_, "collision_cost", 100000.0f);
   getParam(collision_margin_distance_, "collision_margin_distance", 0.10f);
   getParam(near_goal_distance_, "near_goal_distance", 0.5f);
+  getParam(goal_truncation_distance_, "goal_truncation_distance", 0.0f);
   getParam(inflation_layer_name_, "inflation_layer_name", std::string(""));
 
   collision_checker_.setCostmap(costmap_);
@@ -148,6 +149,18 @@ void ObstaclesCritic::score(CriticData & data)
     repulsive_cost[i] = 0.0f;
 
     for (size_t j = 0; j < traj_len; j++) {
+      if (goal_truncation_distance_ > 0.0f) {
+        // The rollout has reached the goal: the executed robot stops here,
+        // everything past this point is fantasy — do not let a post-goal
+        // obstacle veto the trajectory (goal-near-wall standoff, M6).
+        const float dxg = traj.x(i, j) - static_cast<float>(data.goal.position.x);
+        const float dyg = traj.y(i, j) - static_cast<float>(data.goal.position.y);
+        if (dxg * dxg + dyg * dyg <
+          goal_truncation_distance_ * goal_truncation_distance_)
+        {
+          break;
+        }
+      }
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
       if (pose_cost.cost < 1.0f) {continue;}  // In free space
 

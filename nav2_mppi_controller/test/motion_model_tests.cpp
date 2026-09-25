@@ -255,3 +255,54 @@ TEST(MotionModelTests, AckermannReversingTest)
   // Check it cleanly destructs
   model.reset();
 }
+
+TEST(MotionModelTests, AckermannPredictEnforcesTurningRadiusOnSamples)
+{
+  // Stage-3 regression (notes/cusp_handoff_fix_plan.md): sampled trajectories
+  // used to roll out with wz the vehicle cannot execute (|vx|/|wz| < r_min).
+  // Scoring those pivot-fantasy rollouts, then clamping only the winning
+  // sequence, produced the full-lock crawl (M3 start stalls, M6 mid-reverse
+  // stall, reverse-start stalls on cuspless plans).
+  models::State state;
+  int batches = 100;
+  int timesteps = 30;
+  state.reset(batches, timesteps);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  ParametersHandler param_handler(node);
+  auto model = std::make_unique<AckermannMotionModel>(&param_handler, node->get_name());
+  const float r_min = model->getMinTurningRadius();
+
+  // Base predict applies acceleration limits from initialize(); without it
+  // the deltas are zero and wz freezes at its initial row (vacuous test).
+  models::ControlConstraints constraints{0.5f, -0.35f, 0.0f, 1.9f, 3.0f, -3.0f, 0.0f, 0.0f, 3.5f};
+  model->initialize(constraints, 0.05f);
+
+  // Infeasible samples: slow reverse creep with a hard turn demand —
+  // exactly the pivot-in-place fantasy MPPI kept selecting
+  state.cvx = -0.05f * xt::ones<float>({batches, timesteps});
+  state.cwz = 1.0f * xt::ones<float>({batches, timesteps});
+
+  model->predict(state);
+
+  // Every rolled-out (vx, wz) pair must satisfy the vehicle's turning limit
+  // once the acceleration chain has had time to reach the cone (t >= 3 here)
+  bool nonvacuous = false;
+  for (int b = 0; b != batches; b++) {
+    for (int t = 3; t != timesteps; t++) {
+      const float vx = state.vx(b, t);
+      const float wz = state.wz(b, t);
+      if (std::fabs(wz) > 1e-6f) {
+        nonvacuous = true;
+        EXPECT_GE(std::fabs(vx) / std::fabs(wz), r_min - 1e-4f) <<
+          "sampled rollout violates min turning radius at (" << b << "," << t << ")";
+      }
+    }
+  }
+  EXPECT_TRUE(nonvacuous);
+  // Direction of turn preserved
+  EXPECT_GT(state.wz(0, 5), 0.0f);
+  // Column 0 is the measured initial state — never edited (review amendment 3).
+  // NOTE: write-back into cwz (review amendments 1-2) was implemented and
+  // empirically falsified — see the predict() comment in motion_models.hpp.
+  EXPECT_FLOAT_EQ(state.wz(0, 0), 0.0f);
+}
