@@ -111,6 +111,7 @@ struct HybridMotionTable
    * @return Raw orientation in radians
    */
   float getAngleFromBin(const unsigned int & bin_idx);
+  float getAngleFromBin(const float & bin_idx);
 
   /**
    * @brief Get the angle scaled across bins from a raw orientation

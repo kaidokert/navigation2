@@ -402,15 +402,21 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
             "Goal Coordinates of(" + std::to_string(goal.pose.position.x) + ", " +
             std::to_string(goal.pose.position.y) + ") was outside bounds");
   }
-  orientation_bin = std::round(tf2::getYaw(goal.pose.orientation) / _angle_bin_size);
-  while (orientation_bin < 0.0) {
-    orientation_bin += static_cast<float>(_angle_quantizations);
+  double continuous_bin = tf2::getYaw(goal.pose.orientation) / _angle_bin_size;
+  while (continuous_bin < 0.0) {
+    continuous_bin += static_cast<double>(_angle_quantizations);
   }
+  while (continuous_bin >= static_cast<double>(_angle_quantizations)) {
+    continuous_bin -= static_cast<double>(_angle_quantizations);
+  }
+  orientation_bin = std::round(continuous_bin);
   // This is needed to handle precision issues
   if (orientation_bin >= static_cast<float>(_angle_quantizations)) {
     orientation_bin -= static_cast<float>(_angle_quantizations);
   }
-  _a_star->setGoal(mx_goal, my_goal, static_cast<unsigned int>(orientation_bin));
+  _a_star->setGoal(
+    mx_goal, my_goal, static_cast<unsigned int>(orientation_bin),
+    static_cast<float>(continuous_bin));
 
   // Setup message
   nav_msgs::msg::Path plan;

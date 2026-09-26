@@ -131,7 +131,8 @@ public:
   void setGoal(
     const float & mx,
     const float & my,
-    const unsigned int & dim_3);
+    const unsigned int & dim_3,
+    const float & continuous_dim_3 = -1.0f);
 
   /**
    * @brief Set the starting pose for planning, as a node index

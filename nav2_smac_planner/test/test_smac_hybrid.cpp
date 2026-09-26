@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. Reserved.
 
-#include <math.h>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,6 +23,7 @@
 #include "nav2_costmap_2d/costmap_subscriber.hpp"
 #include "nav2_util/lifecycle_node.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "tf2/utils.h"
 #include "nav2_smac_planner/node_hybrid.hpp"
 #include "nav2_smac_planner/a_star.hpp"
 #include "nav2_smac_planner/collision_checker.hpp"
@@ -169,4 +170,111 @@ TEST(SmacTest, test_smac_se2_reconfigure)
     nodeSE2->get_node_base_interface(),
     results2);
   EXPECT_EQ(nodeSE2->get_parameter("resolution").as_double(), 0.2);
+}
+
+TEST(SmacTest, test_smac_m5_terminal_density)
+{
+  rclcpp_lifecycle::LifecycleNode::SharedPtr nodeSE2 =
+    std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacM5DensityTest");
+
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
+    std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+
+  // Configure an empty costmap covering fixture bounds:
+  // resolution 0.05m, 200x200 cells (10m x 10m), origin (-5, -5)
+  costmap_ros->getCostmap()->resizeMap(200, 200, 0.05, -5.0, -5.0);
+
+  // Parameters mirroring nav2_params.yaml
+  nodeSE2->declare_parameter("test.downsample_costmap", false);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.downsample_costmap", false));
+  nodeSE2->declare_parameter("test.angle_quantization_bins", 72);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.angle_quantization_bins", 72));
+  nodeSE2->declare_parameter("test.minimum_turning_radius", 0.5);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.minimum_turning_radius", 0.5));
+  nodeSE2->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  nodeSE2->set_parameter(
+    rclcpp::Parameter("test.motion_model_for_search", std::string("REEDS_SHEPP")));
+  nodeSE2->declare_parameter("test.smooth_path", false);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.smooth_path", false));
+  nodeSE2->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.analytic_expansion_max_length", 3.0));
+  nodeSE2->declare_parameter("test.analytic_expansion_ratio", 2.0);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.analytic_expansion_ratio", 2.0));
+  nodeSE2->declare_parameter("test.lookup_table_size", 10.0);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.lookup_table_size", 10.0));
+
+  auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner->configure(nodeSE2, "test", nullptr, costmap_ros);
+  planner->activate();
+
+  auto dummy_cancel_checker = []() {
+      return false;
+    };
+
+  // M5 fixture geometry from test_fixtures/smac_m5_terminal_stub.yaml
+  // start: (-1.188, 0.843, 252.0 deg)
+  // goal:  (-1.18,  0.90,  270.0 deg)
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = "map";
+  start.pose.position.x = -1.188;
+  start.pose.position.y = 0.843;
+  double start_yaw = 252.0 * M_PI / 180.0;
+  start.pose.orientation.z = std::sin(start_yaw / 2.0);
+  start.pose.orientation.w = std::cos(start_yaw / 2.0);
+
+  goal.header.frame_id = "map";
+  goal.pose.position.x = -1.18;
+  goal.pose.position.y = 0.90;
+  double goal_yaw = 270.0 * M_PI / 180.0;
+  goal.pose.orientation.z = std::sin(goal_yaw / 2.0);
+  goal.pose.orientation.w = std::cos(goal_yaw / 2.0);
+
+  nav_msgs::msg::Path plan;
+  EXPECT_NO_THROW(plan = planner->createPlan(start, goal, dummy_cancel_checker));
+
+  // Assert path pose count >= 4
+  EXPECT_GE(plan.poses.size(), 4u) << "Plan only produced " << plan.poses.size() << " poses.";
+
+  auto ang_norm = [](double a) {
+      return std::atan2(std::sin(a), std::cos(a));
+    };
+
+  const double R_min = 0.5;
+
+  for (size_t i = 1; i < plan.poses.size(); ++i) {
+    double dx = plan.poses[i].pose.position.x - plan.poses[i - 1].pose.position.x;
+    double dy = plan.poses[i].pose.position.y - plan.poses[i - 1].pose.position.y;
+    double step = std::hypot(dx, dy);
+    double th0 = tf2::getYaw(plan.poses[i - 1].pose.orientation);
+    double th1 = tf2::getYaw(plan.poses[i].pose.orientation);
+    double dyaw = ang_norm(th1 - th0);
+    double r_implied = (std::abs(dyaw) > 1e-9) ? (step / std::abs(dyaw)) : 999.0;
+    if (step > 0.001) {
+      EXPECT_GE(r_implied, 0.9 * R_min)
+        << "Sub-feasible chord at step " << i << ": step=" << step
+        << " m, dyaw=" << (dyaw * 180.0 / M_PI) << " deg, r_implied=" << r_implied
+        << " m (must be >= " << (0.9 * R_min) << " m)";
+    }
+  }
+
+  // Verify that direction reversals (cusps) are faithfully preserved
+  size_t reversals = 0;
+  for (size_t i = 2; i < plan.poses.size(); ++i) {
+    double dx1 = plan.poses[i - 1].pose.position.x - plan.poses[i - 2].pose.position.x;
+    double dy1 = plan.poses[i - 1].pose.position.y - plan.poses[i - 2].pose.position.y;
+    double dx2 = plan.poses[i].pose.position.x - plan.poses[i - 1].pose.position.x;
+    double dy2 = plan.poses[i].pose.position.y - plan.poses[i - 1].pose.position.y;
+    if (dx1 * dx2 + dy1 * dy2 < 0.0) {
+      ++reversals;
+    }
+  }
+  EXPECT_GE(reversals, 1u) << "Plan should contain at least one direction reversal (cusp).";
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros.reset();
+  nodeSE2.reset();
 }

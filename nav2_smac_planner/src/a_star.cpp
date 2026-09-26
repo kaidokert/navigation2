@@ -192,7 +192,8 @@ template<>
 void AStarAlgorithm<Node2D>::setGoal(
   const float & mx,
   const float & my,
-  const unsigned int & dim_3)
+  const unsigned int & dim_3,
+  const float & /*continuous_dim_3*/)
 {
   if (dim_3 != 0) {
     throw std::runtime_error("Node type Node2D cannot be given non-zero goal dim 3.");
@@ -210,7 +211,8 @@ template<typename NodeT>
 void AStarAlgorithm<NodeT>::setGoal(
   const float & mx,
   const float & my,
-  const unsigned int & dim_3)
+  const unsigned int & dim_3,
+  const float & continuous_dim_3)
 {
   _goal = addToGraph(
     NodeT::getIndex(
@@ -218,7 +220,9 @@ void AStarAlgorithm<NodeT>::setGoal(
       static_cast<unsigned int>(my),
       dim_3));
 
-  typename NodeT::Coordinates goal_coords(mx, my, dim_3);
+  const float angle_bin = (continuous_dim_3 >= 0.0f) ?
+    continuous_dim_3 : static_cast<float>(dim_3);
+  typename NodeT::Coordinates goal_coords(mx, my, angle_bin);
 
   if (!_search_info.cache_obstacle_heuristic || goal_coords != _goal_coordinates) {
     if (!_start) {
