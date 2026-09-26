@@ -18,9 +18,11 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <cmath>
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
+#include "nav2_core/planner_exceptions.hpp"
 
 // #define BENCHMARK_TESTING
 
@@ -59,6 +61,9 @@ void SmacPlannerHybrid::configure(
   _clock = node->get_clock();
   _costmap = costmap_ros->getCostmap();
   _costmap_ros = costmap_ros;
+  _configured_resolution = _costmap->getResolution();
+  _configured_size_x = _costmap->getSizeInCellsX();
+  _configured_size_y = _costmap->getSizeInCellsY();
   _name = name;
   _global_frame = costmap_ros->getGlobalFrameID();
 
@@ -353,6 +358,21 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   steady_clock::time_point a = steady_clock::now();
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
+
+  if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5 ||
+    _costmap->getSizeInCellsX() != _configured_size_x ||
+    _costmap->getSizeInCellsY() != _configured_size_y)
+  {
+    throw nav2_core::PlannerException(
+      "SmacPlannerHybrid configuration invariant violation: costmap mutated post-configure! "
+      "Configured resolution: " + std::to_string(_configured_resolution) + " m/cell, "
+      "size: " + std::to_string(_configured_size_x) + "x" +
+      std::to_string(_configured_size_y) + "; "
+      "Current resolution: " + std::to_string(_costmap->getResolution()) + " m/cell, "
+      "size: " + std::to_string(_costmap->getSizeInCellsX()) + "x" +
+      std::to_string(_costmap->getSizeInCellsY()) + ". "
+      "Motion model primitives and heuristic tables are invalid for this grid.");
+  }
 
   // Downsample costmap, if required
   nav2_costmap_2d::Costmap2D * costmap = _costmap;
@@ -782,6 +802,10 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       _smoother = std::make_unique<Smoother>(params);
       _smoother->initialize(_minimum_turning_radius_global_coords);
     }
+
+    _configured_resolution = _costmap->getResolution();
+    _configured_size_x = _costmap->getSizeInCellsX();
+    _configured_size_y = _costmap->getSizeInCellsY();
   }
   result.successful = true;
   return result;

@@ -29,6 +29,7 @@
 #include "nav2_smac_planner/collision_checker.hpp"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
 #include "nav2_smac_planner/smac_planner_2d.hpp"
+#include "nav2_core/planner_exceptions.hpp"
 
 class RclCppFixture
 {
@@ -270,6 +271,86 @@ TEST(SmacTest, test_smac_m5_terminal_density)
     }
   }
   EXPECT_GE(reversals, 1u) << "Plan should contain at least one direction reversal (cusp).";
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros.reset();
+  nodeSE2.reset();
+}
+
+TEST(SmacTest, test_smac_costmap_mutation_throws)
+{
+  rclcpp_lifecycle::LifecycleNode::SharedPtr nodeSE2 =
+    std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacMutationTest");
+
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
+    std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+
+  // Set known initial dimensions and resolution (0.05m/cell, 100x100)
+  costmap_ros->getCostmap()->resizeMap(100, 100, 0.05, 0.0, 0.0);
+
+  nodeSE2->declare_parameter("test.downsample_costmap", false);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.downsample_costmap", false));
+  nodeSE2->declare_parameter("test.angle_quantization_bins", 72);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.angle_quantization_bins", 72));
+  nodeSE2->declare_parameter("test.minimum_turning_radius", 0.5);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.minimum_turning_radius", 0.5));
+  nodeSE2->declare_parameter("test.lookup_table_size", 4.0);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.lookup_table_size", 4.0));
+  nodeSE2->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  nodeSE2->set_parameter(
+    rclcpp::Parameter("test.motion_model_for_search", std::string("REEDS_SHEPP")));
+
+  auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner->configure(nodeSE2, "test", nullptr, costmap_ros);
+  planner->activate();
+
+  auto dummy_cancel_checker = []() {
+      return false;
+    };
+
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = "map";
+  start.pose.position.x = 0.5;
+  start.pose.position.y = 0.5;
+  start.pose.orientation.w = 1.0;
+  goal.header.frame_id = "map";
+  goal.pose.position.x = 1.0;
+  goal.pose.position.y = 1.0;
+  goal.pose.orientation.w = 1.0;
+
+  // Case 1: Resolution mutated (simulating StaticLayer receiving map with different resolution)
+  costmap_ros->getCostmap()->resizeMap(100, 100, 0.02, 0.0, 0.0);
+
+  try {
+    planner->createPlan(start, goal, dummy_cancel_checker);
+    FAIL() <<
+      "Expected nav2_core::PlannerException when costmap resolution mutated, but nothing thrown.";
+  } catch (const nav2_core::PlannerException & ex) {
+    std::string msg = ex.what();
+    EXPECT_NE(msg.find("resolution"), std::string::npos)
+      << "Exception message did not mention 'resolution': " << msg;
+  } catch (const std::exception & ex) {
+    FAIL() << "Expected nav2_core::PlannerException, but caught other: " << ex.what();
+  }
+
+  // Case 2: Mutate size_x/size_y while resolution matches original
+  costmap_ros->getCostmap()->resizeMap(200, 150, 0.05, 0.0, 0.0);
+  try {
+    planner->createPlan(start, goal, dummy_cancel_checker);
+    FAIL() <<
+      "Expected nav2_core::PlannerException when costmap dimensions mutated, but nothing thrown.";
+  } catch (const nav2_core::PlannerException & ex) {
+    std::string msg = ex.what();
+    EXPECT_TRUE(
+      msg.find("dimension") != std::string::npos || msg.find("size") != std::string::npos)
+      << "Exception message did not mention dimension or size: " << msg;
+  } catch (const std::exception & ex) {
+    FAIL() << "Expected nav2_core::PlannerException, but caught different exception: " << ex.what();
+  }
 
   planner->deactivate();
   planner->cleanup();

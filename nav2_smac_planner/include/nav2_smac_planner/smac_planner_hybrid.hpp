@@ -105,6 +105,9 @@ protected:
   nav2_costmap_2d::Costmap2D * _costmap;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> _costmap_ros;
   std::unique_ptr<CostmapDownsampler> _costmap_downsampler;
+  double _configured_resolution{0.0};
+  unsigned int _configured_size_x{0};
+  unsigned int _configured_size_y{0};
   std::string _global_frame, _name;
   float _lookup_table_dim;
   float _tolerance;
