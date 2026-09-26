@@ -359,19 +359,12 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
 
-  if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5 ||
-    _costmap->getSizeInCellsX() != _configured_size_x ||
-    _costmap->getSizeInCellsY() != _configured_size_y)
-  {
+  if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5) {
     throw nav2_core::PlannerException(
-      "SmacPlannerHybrid configuration invariant violation: costmap mutated post-configure! "
-      "Configured resolution: " + std::to_string(_configured_resolution) + " m/cell, "
-      "size: " + std::to_string(_configured_size_x) + "x" +
-      std::to_string(_configured_size_y) + "; "
-      "Current resolution: " + std::to_string(_costmap->getResolution()) + " m/cell, "
-      "size: " + std::to_string(_costmap->getSizeInCellsX()) + "x" +
-      std::to_string(_costmap->getSizeInCellsY()) + ". "
-      "Motion model primitives and heuristic tables are invalid for this grid.");
+      "SmacPlannerHybrid configuration invariant violation: costmap resolution mutated "
+      "post-configure! Configured resolution: " + std::to_string(_configured_resolution) +
+      " m/cell; Current resolution: " + std::to_string(_costmap->getResolution()) +
+      " m/cell. Motion model primitives and heuristic tables are invalid for this grid.");
   }
 
   // Downsample costmap, if required

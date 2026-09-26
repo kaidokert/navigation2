@@ -337,20 +337,11 @@ TEST(SmacTest, test_smac_costmap_mutation_throws)
     FAIL() << "Expected nav2_core::PlannerException, but caught other: " << ex.what();
   }
 
-  // Case 2: Mutate size_x/size_y while resolution matches original
+  // Case 2: Mutate size_x/size_y while resolution matches original (A* adapts, does NOT throw)
   costmap_ros->getCostmap()->resizeMap(200, 150, 0.05, 0.0, 0.0);
-  try {
+  EXPECT_NO_THROW({
     planner->createPlan(start, goal, dummy_cancel_checker);
-    FAIL() <<
-      "Expected nav2_core::PlannerException when costmap dimensions mutated, but nothing thrown.";
-  } catch (const nav2_core::PlannerException & ex) {
-    std::string msg = ex.what();
-    EXPECT_TRUE(
-      msg.find("dimension") != std::string::npos || msg.find("size") != std::string::npos)
-      << "Exception message did not mention dimension or size: " << msg;
-  } catch (const std::exception & ex) {
-    FAIL() << "Expected nav2_core::PlannerException, but caught different exception: " << ex.what();
-  }
+  });
 
   planner->deactivate();
   planner->cleanup();
