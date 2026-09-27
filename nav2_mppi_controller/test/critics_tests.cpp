@@ -760,6 +760,100 @@ TEST(CriticTests, PathAlignCritic)
   EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
 }
 
+TEST(CriticTests, PathAlignCriticShortPath)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  models::State state;
+  state.reset(100, 30);
+  models::ControlSequence control_sequence;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(100, 30);
+  models::Path path;
+  geometry_msgs::msg::Pose goal;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({100});
+  float model_dt = 0.1;
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+  TestGoalChecker goal_checker;
+  data.goal_checker = &goal_checker;
+
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  // 1. N = 0 (empty path -> no-op/zero cost, no crash)
+  path.reset(0);
+  data.furthest_reached_path_point.reset();
+  data.path_pts_valid.reset();
+  costs = xt::zeros<float>({100});
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
+
+  // 2. N = 1 (single point -> no-op/zero cost, no crash)
+  path.reset(1);
+  path.x(0) = 0.5;
+  path.y(0) = 0.0;
+  goal.position.x = 2.0;  // far from pose at origin (0, 0)
+  data.furthest_reached_path_point.reset();
+  data.path_pts_valid.reset();
+  costs = xt::zeros<float>({100});
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
+
+  // 3. N = 2 (two points -> valid alignment evaluation, no crash)
+  path.reset(2);
+  path.x(0) = 0.0;
+  path.x(1) = 0.5;
+  path.y(0) = 0.0;
+  path.y(1) = 0.0;
+  goal.position.x = 0.5;
+  goal.position.y = 0.0;
+  state.pose.pose.position.x = 0.0;
+  state.pose.pose.position.y = 0.0;
+  generated_trajectories.x = 0.25 * xt::ones<float>({100, 30});
+  generated_trajectories.y = 0.10 * xt::ones<float>({100, 30});
+  data.furthest_reached_path_point = 1;
+  data.path_pts_valid.reset();
+  costs = xt::zeros<float>({100});
+  critic.score(data);
+  EXPECT_GT(xt::sum(costs, immediate)(), 0.0);
+
+  // 4. N = 3 (three points -> valid evaluation)
+  path.reset(3);
+  path.x(0) = 0.0;
+  path.x(1) = 0.25;
+  path.x(2) = 0.5;
+  path.y(0) = 0.0;
+  path.y(1) = 0.0;
+  path.y(2) = 0.0;
+  goal.position.x = 0.5;
+  data.furthest_reached_path_point = 2;
+  data.path_pts_valid.reset();
+  costs = xt::zeros<float>({100});
+  critic.score(data);
+  EXPECT_GT(xt::sum(costs, immediate)(), 0.0);
+
+  // 5. N = 20, lookahead = 1 (normal path startup -> verify non-terminal short-path behavior is preserved)
+  path.reset(20);
+  for (unsigned int i = 0; i < 20; ++i) {
+    path.x(i) = static_cast<float>(i) * 0.1f;
+    path.y(i) = 0.0f;
+  }
+  goal.position.x = 2.0;  // far from state at (0, 0)
+  data.furthest_reached_path_point = 1;  // Lookahead = 1 < offset (default 20)
+  data.path_pts_valid.reset();
+  costs = xt::zeros<float>({100});
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
+}
+
 TEST(CriticTests, VelocityDeadbandCritic)
 {
   // Standard preamble

@@ -55,20 +55,36 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  // Don't apply when first getting bearing w.r.t. the path
+  if (data.path.x.shape(0) < 2) {
+    return;
+  }
+
+  // Don't apply when first getting bearing w.r.t. the path, unless on terminal approach
   utils::setPathFurthestPointIfNotSet(data);
-  // Up to furthest only, closest path point is always 0 from path handler
-  const size_t path_segments_count = *data.furthest_reached_path_point;
-  float path_segments_flt = static_cast<float>(path_segments_count);
-  if (path_segments_count < offset_from_furthest_) {
+  const size_t total_path_pts = data.path.x.shape(0);
+  const size_t total_segments = total_path_pts - 1;
+  const size_t path_segments_count =
+    std::min(*data.furthest_reached_path_point, total_segments);
+
+  if (path_segments_count == 0) {
+    return;
+  }
+
+  const bool is_terminal_path =
+    (path_segments_count >= total_segments) || (total_path_pts <= 4);
+
+  if (!is_terminal_path && path_segments_count < offset_from_furthest_) {
     auto node = parent_.lock();
     if (node) {
-      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+      RCLCPP_DEBUG_THROTTLE(
+        logger_, *node->get_clock(), 1000,
         "[PAC] SKIP: furthest_reached=%zu < offset=%zu",
         path_segments_count, static_cast<size_t>(offset_from_furthest_));
     }
     return;
   }
+
+  float path_segments_flt = static_cast<float>(path_segments_count);
 
   // Don't apply when dynamic obstacles are blocking significant proportions of the local path
   utils::setPathCostsIfNotSet(data, costmap_ros_);

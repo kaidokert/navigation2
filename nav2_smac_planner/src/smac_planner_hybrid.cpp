@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
@@ -548,6 +549,14 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   // Find how much time we have left to do smoothing
   steady_clock::time_point b = steady_clock::now();
   duration<double> time_span = duration_cast<duration<double>>(b - a);
+  if (_max_planning_time > 0.0 && time_span.count() >= _max_planning_time) {
+    RCLCPP_FATAL(
+      _logger,
+      "CRITICAL TIMING FAILURE: SmacPlannerHybrid search exceeded hard planning ceiling of "
+      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
+      _max_planning_time * 1000.0, time_span.count() * 1000.0);
+    std::abort();
+  }
   double time_remaining = _max_planning_time - static_cast<double>(time_span.count());
 
 #ifdef BENCHMARK_TESTING
@@ -558,6 +567,17 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   // Smooth plan
   if (_smoother && num_iterations > 1) {
     _smoother->smooth(plan, costmap, time_remaining);
+  }
+
+  steady_clock::time_point end_planning = steady_clock::now();
+  duration<double> total_time_span = duration_cast<duration<double>>(end_planning - a);
+  if (_max_planning_time > 0.0 && total_time_span.count() >= _max_planning_time) {
+    RCLCPP_FATAL(
+      _logger,
+      "CRITICAL TIMING FAILURE: SmacPlannerHybrid total planning exceeded hard ceiling of "
+      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
+      _max_planning_time * 1000.0, total_time_span.count() * 1000.0);
+    std::abort();
   }
 
 #ifdef BENCHMARK_TESTING
