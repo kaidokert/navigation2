@@ -551,10 +551,21 @@ void Optimizer::updateControlSequence(bool diag)
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   const builtin_interfaces::msg::Time & stamp)
 {
+  // Savitzky-Golay filtering follows optimization and can invalidate its
+  // bounds. In particular, signed vx can cancel while wz does not, violating
+  // the Ackermann cone. Re-project the final sequence before extracting output.
+  applyControlSequenceConstraints();
+
   unsigned int offset = settings_.shift_control_sequence ? 1 : 0;
 
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
+
+  // Filter history must contain the command actually sent, not the
+  // unconstrained filtered value that was recorded before this projection.
+  control_history_[3].vx = vx;
+  control_history_[3].vy = isHolonomic() ? control_sequence_.vy(offset) : 0.0f;
+  control_history_[3].wz = wz;
 
   if (isHolonomic()) {
     auto vy = control_sequence_.vy(offset);
