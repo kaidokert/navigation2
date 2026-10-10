@@ -283,7 +283,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
         appended, ghost_heading, ghost_heading * 180.0 / M_PI,
         real_tgp_length, tgp_length, cusp_dist);
     }
-  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_)
+  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_ &&
+    inversion_locale_ != 0u)
   {
     // Log WHY ghost didn't fire when TGP is short
     cusp_dist = getCuspDistance(global_pose);
@@ -312,7 +313,7 @@ bool PathHandler::shouldUseGhostPath(
   double & cusp_dist,
   double & heading) const
 {
-  if (!enforce_path_inversion_ || min_inversion_horizon_ <= 0.0) {
+  if (!enforce_path_inversion_ || min_inversion_horizon_ <= 0.0 || inversion_locale_ == 0u) {
     return false;
   }
 
