@@ -51,16 +51,32 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  // Don't apply close to goal, let the goal critics take over
-  if (utils::withinPositionGoalTolerance(
-      threshold_to_consider_, data.state.pose.pose, data.goal))
-  {
-    auto node = parent_.lock();
-    if (node) {
-      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-        "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
+  // If the robot is already within the goal checker's position AND yaw tolerances,
+  // do not penalize residual yaw error — let the robot decelerate cleanly to a stop.
+  if (data.goal_checker) {
+    geometry_msgs::msg::Pose pose_tolerance;
+    geometry_msgs::msg::Twist velocity_tolerance;
+    if (data.goal_checker->getTolerances(pose_tolerance, velocity_tolerance)) {
+      const double dx = data.state.pose.pose.position.x - data.goal.position.x;
+      const double dy = data.state.pose.pose.position.y - data.goal.position.y;
+      const double dist_sq = dx * dx + dy * dy;
+      const double max_early_exit_dist = static_cast<double>(pose_tolerance.position.x);
+      if (dist_sq <= max_early_exit_dist * max_early_exit_dist) {
+        const double yaw_tol = tf2::getYaw(pose_tolerance.orientation);
+        const double robot_yaw = tf2::getYaw(data.state.pose.pose.orientation);
+        const double goal_yaw = tf2::getYaw(data.goal.orientation);
+        const double dyaw = std::abs(angles::shortest_angular_distance(robot_yaw, goal_yaw));
+        if (dyaw <= yaw_tol) {
+          auto node = parent_.lock();
+          if (node) {
+            RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+              "[PAC] SKIP: within goal checker tolerances (dist=%.3f <= %.3f, dyaw=%.3f <= %.3f)",
+              std::sqrt(dist_sq), pose_tolerance.position.x, dyaw, yaw_tol);
+          }
+          return;
+        }
+      }
     }
-    return;
   }
 
   if (total_path_pts == 1) {
@@ -86,6 +102,18 @@ void PathAlignCritic::score(CriticData & data)
       data.costs += xt::pow(std::move(cost) * weight_, power_);
     } else {
       data.costs += std::move(cost) * weight_;
+    }
+    return;
+  }
+
+  // Don't apply close to goal, let the goal critics take over
+  if (utils::withinPositionGoalTolerance(
+      threshold_to_consider_, data.state.pose.pose, data.goal))
+  {
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
     }
     return;
   }

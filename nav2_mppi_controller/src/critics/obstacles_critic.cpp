@@ -149,25 +149,13 @@ void ObstaclesCritic::score(CriticData & data)
     repulsive_cost[i] = 0.0f;
 
     for (size_t j = 0; j < traj_len; j++) {
-      if (goal_truncation_distance_ > 0.0f) {
-        // The rollout has reached the goal: the executed robot stops here,
-        // everything past this point is fantasy — do not let a post-goal
-        // obstacle veto the trajectory (goal-near-wall standoff, M6).
-        const float dxg = traj.x(i, j) - static_cast<float>(data.goal.position.x);
-        const float dyg = traj.y(i, j) - static_cast<float>(data.goal.position.y);
-        if (dxg * dxg + dyg * dyg <
-          goal_truncation_distance_ * goal_truncation_distance_)
-        {
-          break;
-        }
-      }
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
-      if (pose_cost.cost < 1.0f) {continue;}  // In free space
-
       if (inCollision(pose_cost.cost)) {
         trajectory_collide = true;
         break;
       }
+
+      if (pose_cost.cost < 1.0f) {continue;}  // In free space
 
       // Cannot process repulsion if inflation layer does not exist
       if (inflation_radius_ == 0.0f || inflation_scale_factor_ == 0.0f) {
