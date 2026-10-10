@@ -42,26 +42,39 @@ void PathAlignCritic::initialize()
 
 void PathAlignCritic::score(CriticData & data)
 {
-  // Don't apply close to goal, let the goal critics take over
-  if (!enabled_ || utils::withinPositionGoalTolerance(
-      threshold_to_consider_, data.state.pose.pose, data.goal))
-  {
-    auto node = parent_.lock();
-    if (node) {
-      const char * reason = !enabled_ ? "disabled" : "within goal tolerance";
-      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-        "[PAC] SKIP: %s (threshold=%.3f)", reason, threshold_to_consider_);
-    }
+  if (!enabled_) {
     return;
   }
 
-  if (data.path.x.shape(0) < 2) {
+  const size_t total_path_pts = data.path.x.shape(0);
+  if (total_path_pts < 2) {
     return;
+  }
+
+  // Don't apply close to goal, let the goal critics take over, UNLESS we are in
+  // terminal approach where orientation alignment is required and still unresolved.
+  if (utils::withinPositionGoalTolerance(
+      threshold_to_consider_, data.state.pose.pose, data.goal))
+  {
+    if (use_path_orientations_ && total_path_pts <= 4) {
+      const float cur_yaw = tf2::getYaw(data.state.pose.pose.orientation);
+      const float goal_yaw = data.path.yaws(total_path_pts - 1);
+      const float yaw_err = fabsf(angles::shortest_angular_distance(cur_yaw, goal_yaw));
+      if (yaw_err <= 0.15f) {
+        return;
+      }
+    } else {
+      auto node = parent_.lock();
+      if (node) {
+        RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+          "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
+      }
+      return;
+    }
   }
 
   // Don't apply when first getting bearing w.r.t. the path, unless on terminal approach
   utils::setPathFurthestPointIfNotSet(data);
-  const size_t total_path_pts = data.path.x.shape(0);
   const size_t total_segments = total_path_pts - 1;
   size_t path_segments_count =
     std::min(*data.furthest_reached_path_point, total_segments);
@@ -88,34 +101,39 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  float path_segments_flt = static_cast<float>(path_segments_count);
+  // Number of points to include in local path vector.
+  // On terminal approach, retain all points to include the final goal pose.
+  const size_t num_pts = is_terminal_path ?
+    total_path_pts : std::min(*data.furthest_reached_path_point + 1, total_path_pts);
 
   // Don't apply when dynamic obstacles are blocking significant proportions of the local path
   utils::setPathCostsIfNotSet(data, costmap_ros_);
   std::vector<bool> & path_pts_valid = *data.path_pts_valid;
   float invalid_ctr = 0.0f;
-  for (size_t i = 0; i < path_segments_count; i++) {
+  const size_t check_pts = std::min(num_pts, path_pts_valid.size());
+  for (size_t i = 0; i < check_pts; i++) {
     if (!path_pts_valid[i]) {invalid_ctr += 1.0f;}
-    if (invalid_ctr / path_segments_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f) {
-      auto node = parent_.lock();
-      if (node) {
-        RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-          "[PAC] SKIP: path_occupancy %.1f%% > max %.1f%% (invalid=%d/%zu)",
-          100.0f * invalid_ctr / path_segments_flt, 100.0f * max_path_occupancy_ratio_,
-          static_cast<int>(invalid_ctr), path_segments_count);
-      }
-      return;
+  }
+  float check_pts_flt = static_cast<float>(check_pts);
+  if (check_pts_flt > 0.0f && invalid_ctr / check_pts_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f) {
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: path_occupancy %.1f%% > max %.1f%% (invalid=%d/%zu)",
+        100.0f * invalid_ctr / check_pts_flt, 100.0f * max_path_occupancy_ratio_,
+        static_cast<int>(invalid_ctr), check_pts);
     }
+    return;
   }
 
   const size_t batch_size = data.trajectories.x.shape(0);
   auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
 
   // Find integrated distance in the path
-  std::vector<float> path_integrated_distances(path_segments_count, 0.0f);
-  std::vector<utils::Pose2D> path(path_segments_count);
+  std::vector<float> path_integrated_distances(num_pts, 0.0f);
+  std::vector<utils::Pose2D> path(num_pts);
   float dx = 0.0f, dy = 0.0f;
-  for (unsigned int i = 1; i != path_segments_count; i++) {
+  for (unsigned int i = 1; i != num_pts; i++) {
     auto & pose = path[i - 1];
     pose.x = data.path.x(i - 1);
     pose.y = data.path.y(i - 1);
@@ -127,10 +145,10 @@ void PathAlignCritic::score(CriticData & data)
   }
 
   // Finish populating the path vector
-  auto & final_pose = path[path_segments_count - 1];
-  final_pose.x = data.path.x(path_segments_count - 1);
-  final_pose.y = data.path.y(path_segments_count - 1);
-  final_pose.theta = data.path.yaws(path_segments_count - 1);
+  auto & final_pose = path[num_pts - 1];
+  final_pose.x = data.path.x(num_pts - 1);
+  final_pose.y = data.path.y(num_pts - 1);
+  final_pose.theta = data.path.yaws(num_pts - 1);
 
   float summed_path_dist = 0.0f, dyaw = 0.0f;
   unsigned int num_samples = 0u;
@@ -167,9 +185,8 @@ void PathAlignCritic::score(CriticData & data)
       path_pt = utils::findClosestPathPt(
         path_integrated_distances, traj_integrated_distance, path_pt);
 
-      // The nearest path point to align to needs to be not in collision, else
-      // let the obstacle critic take over in this region due to dynamic obstacles
-      if (path_pts_valid[path_pt]) {
+      const bool is_valid = (path_pt < path_pts_valid.size()) ? path_pts_valid[path_pt] : true;
+      if (is_valid) {
         const auto & pose = path[path_pt];
         dx = pose.x - Tx;
         dy = pose.y - Ty;
@@ -180,6 +197,14 @@ void PathAlignCritic::score(CriticData & data)
         } else {
           summed_path_dist += sqrtf(dx * dx + dy * dy);
         }
+      }
+
+      // Truncate rollout evaluation once trajectory reaches the end of the available path.
+      // Points beyond the endpoint are post-arrival fantasy and must not penalize forward progress.
+      if (path_integrated_distances.back() > 0.0f &&
+          traj_integrated_distance >= path_integrated_distances.back())
+      {
+        break;
       }
     }
     if (num_samples > 0u) {
