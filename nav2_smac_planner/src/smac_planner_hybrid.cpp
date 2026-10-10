@@ -225,7 +225,7 @@ void SmacPlannerHybrid::configure(
   }
 
   // Initialize collision checker
-  _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node);
+  _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node, true);
   _collision_checker.setFootprint(
     _costmap_ros->getRobotFootprint(),
     _costmap_ros->getUseRadius(),
@@ -782,7 +782,7 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
 
     // Re-Initialize collision checker
     if (reinit_collision_checker) {
-      _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node);
+      _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node, true);
       _collision_checker.setFootprint(
         _costmap_ros->getRobotFootprint(),
         _costmap_ros->getUseRadius(),

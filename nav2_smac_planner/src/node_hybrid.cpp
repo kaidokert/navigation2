@@ -371,6 +371,7 @@ void NodeHybrid::reset()
   pose.x = 0.0f;
   pose.y = 0.0f;
   pose.theta = 0.0f;
+  _collision_checked_pose = {0.0f, 0.0f, 0.0f};
   _is_node_valid = false;
 }
 
@@ -378,14 +379,20 @@ bool NodeHybrid::isNodeValid(
   const bool & traverse_unknown,
   GridCollisionChecker * collision_checker)
 {
-  // Already found, we can return the result
-  if (!std::isnan(_cell_cost)) {
+  // A discretized graph index can be approached at multiple continuous poses.
+  // Cached footprint validity belongs to the checked pose, not just its index.
+  // Compare here because queue restoration and analytic expansion can also
+  // assign the public pose directly, bypassing setPose().
+  if (!std::isnan(_cell_cost) && pose.x == _collision_checked_pose.x &&
+    pose.y == _collision_checked_pose.y && pose.theta == _collision_checked_pose.theta)
+  {
     return _is_node_valid;
   }
 
   _is_node_valid = !collision_checker->inCollision(
     this->pose.x, this->pose.y, this->pose.theta /*bin number*/, traverse_unknown);
   _cell_cost = collision_checker->getCost();
+  _collision_checked_pose = pose;
   return _is_node_valid;
 }
 

@@ -47,7 +47,7 @@ void PathAlignCritic::score(CriticData & data)
   }
 
   const size_t total_path_pts = data.path.x.shape(0);
-  if (total_path_pts < 2) {
+  if (total_path_pts == 0) {
     return;
   }
 
@@ -59,6 +59,33 @@ void PathAlignCritic::score(CriticData & data)
     if (node) {
       RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
         "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
+    }
+    return;
+  }
+
+  if (total_path_pts == 1) {
+    if (!use_path_orientations_) {
+      return;
+    }
+    const size_t batch_size = data.trajectories.x.shape(0);
+    auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
+    const float goal_yaw = data.path.yaws(0);
+    const auto T_yaw = xt::view(
+      data.trajectories.yaws, xt::all(),
+      xt::range(0, _, trajectory_point_step_));
+    const auto traj_sampled_size = T_yaw.shape(1);
+    for (size_t t = 0; t < batch_size; ++t) {
+      float summed_yaw_err = 0.0f;
+      for (size_t p = 0; p < traj_sampled_size; ++p) {
+        float dyaw = angles::shortest_angular_distance(goal_yaw, T_yaw(t, p));
+        summed_yaw_err += fabsf(dyaw);
+      }
+      cost[t] = summed_yaw_err / static_cast<float>(traj_sampled_size);
+    }
+    if (power_ > 1u) {
+      data.costs += xt::pow(std::move(cost) * weight_, power_);
+    } else {
+      data.costs += std::move(cost) * weight_;
     }
     return;
   }
