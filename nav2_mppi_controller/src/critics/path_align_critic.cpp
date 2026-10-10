@@ -51,26 +51,16 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  // Don't apply close to goal, let the goal critics take over, UNLESS we are in
-  // terminal approach where orientation alignment is required and still unresolved.
+  // Don't apply close to goal, let the goal critics take over
   if (utils::withinPositionGoalTolerance(
       threshold_to_consider_, data.state.pose.pose, data.goal))
   {
-    if (use_path_orientations_ && total_path_pts <= 4) {
-      const float cur_yaw = tf2::getYaw(data.state.pose.pose.orientation);
-      const float goal_yaw = data.path.yaws(total_path_pts - 1);
-      const float yaw_err = fabsf(angles::shortest_angular_distance(cur_yaw, goal_yaw));
-      if (yaw_err <= 0.15f) {
-        return;
-      }
-    } else {
-      auto node = parent_.lock();
-      if (node) {
-        RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-          "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
-      }
-      return;
+    auto node = parent_.lock();
+    if (node) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
     }
+    return;
   }
 
   // Don't apply when first getting bearing w.r.t. the path, unless on terminal approach
@@ -200,10 +190,11 @@ void PathAlignCritic::score(CriticData & data)
       }
 
       // Truncate rollout evaluation once trajectory reaches the end of the available path.
-      // Points beyond the endpoint are post-arrival fantasy and must not penalize forward progress.
+      // Points beyond the endpoint are post-arrival dwell at the goal with zero path deviation.
       if (path_integrated_distances.back() > 0.0f &&
           traj_integrated_distance >= path_integrated_distances.back())
       {
+        num_samples += (traj_sampled_size - 1 - p);
         break;
       }
     }
