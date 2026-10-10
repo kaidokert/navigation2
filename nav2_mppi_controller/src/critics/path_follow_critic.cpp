@@ -34,26 +34,34 @@ void PathFollowCritic::initialize()
 
 void PathFollowCritic::score(CriticData & data)
 {
-  if (!enabled_ || data.path.x.shape(0) < 2 ||
+  if (!enabled_ || data.path.x.shape(0) == 0 ||
     utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal))
   {
     return;
   }
 
-  utils::setPathFurthestPointIfNotSet(data);
-  utils::setPathCostsIfNotSet(data, costmap_ros_);
-  const size_t path_size = data.path.x.shape(0) - 1;
+  const size_t real_points = data.path.x.shape(0);
+  const size_t path_size = real_points - 1;
+  size_t offseted_idx = 0;
 
-  auto offseted_idx = std::min(
-    *data.furthest_reached_path_point + offset_from_furthest_, path_size);
+  // Pruning can leave only the active endpoint before the robot reaches it.
+  // Retain its position cost: dropping it removes all longitudinal guidance
+  // when GoalCritic is disabled. A singleton has no segment/furthest index or
+  // validity search; in particular, path_size - 1 would underflow here.
+  if (path_size > 0) {
+    utils::setPathFurthestPointIfNotSet(data);
+    utils::setPathCostsIfNotSet(data, costmap_ros_);
+    offseted_idx = std::min(
+      *data.furthest_reached_path_point + offset_from_furthest_, path_size);
 
-  // Drive to the first valid path point, in case of dynamic obstacles on path
-  // we want to drive past it, not through it
-  bool valid = false;
-  while (!valid && offseted_idx < path_size - 1) {
-    valid = (*data.path_pts_valid)[offseted_idx];
-    if (!valid) {
-      offseted_idx++;
+    // Drive to the first valid path point, in case of dynamic obstacles on path
+    // we want to drive past it, not through it
+    bool valid = false;
+    while (!valid && offseted_idx < path_size - 1) {
+      valid = (*data.path_pts_valid)[offseted_idx];
+      if (!valid) {
+        offseted_idx++;
+      }
     }
   }
 
@@ -70,7 +78,7 @@ void PathFollowCritic::score(CriticData & data)
       RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 200,
         "[PFC] target_idx=%zu/%zu furthest=%zu dist_to_target=%.4fm",
         offseted_idx, path_size,
-        *data.furthest_reached_path_point, dist_to_target);
+        data.furthest_reached_path_point.value_or(0), dist_to_target);
     }
   }
 

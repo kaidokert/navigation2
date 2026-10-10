@@ -63,15 +63,19 @@ void PathAlignCritic::score(CriticData & data)
   utils::setPathFurthestPointIfNotSet(data);
   const size_t total_path_pts = data.path.x.shape(0);
   const size_t total_segments = total_path_pts - 1;
-  const size_t path_segments_count =
+  size_t path_segments_count =
     std::min(*data.furthest_reached_path_point, total_segments);
 
+  const bool short_segment = (total_path_pts <= 4);
   if (path_segments_count == 0) {
-    return;
+    if (!short_segment) {
+      return;
+    }
+    path_segments_count = 1;
   }
 
   const bool is_terminal_path =
-    (path_segments_count >= total_segments) || (total_path_pts <= 4);
+    (path_segments_count >= total_segments) || short_segment;
 
   if (!is_terminal_path && path_segments_count < offset_from_furthest_) {
     auto node = parent_.lock();

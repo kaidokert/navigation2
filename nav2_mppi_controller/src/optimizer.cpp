@@ -285,7 +285,8 @@ bool Optimizer::fallback(bool fail)
 
   if (++counter > settings_.retry_attempt_limit) {
     counter = 0;
-    throw nav2_core::NoValidControl("Optimizer fail to compute path");
+    throw nav2_core::FailedToMakeProgress(
+      "Optimizer fail to compute path; stopped recovery replan required");
   }
 
   return true;
