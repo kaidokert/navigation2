@@ -854,6 +854,81 @@ TEST(CriticTests, PathAlignCriticShortPath)
   EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
 }
 
+TEST(CriticTests, PathAlignCriticTerminalSingletonAlignment)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  models::State state;
+  state.reset(2, 30);
+  models::ControlSequence control_sequence;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(2, 30);
+  models::Path path;
+  path.reset(1);
+  path.x(0) = 1.0;
+  path.y(0) = 0.0;
+
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 1.0;
+  goal.position.y = 0.0;
+  // Goal yaw = pi/2 (1.5707963 rad)
+  goal.orientation.z = 0.7071068;
+  goal.orientation.w = 0.7071068;
+
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.1;
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+  TestGoalChecker goal_checker;
+  data.goal_checker = &goal_checker;
+
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  // 1. Achievable alignment vs Misaligned:
+  // Trajectory 0 achieves alignment with goal (yaw = pi/2 across horizon)
+  // Trajectory 1 remains misaligned (yaw = 0 across horizon)
+  for (unsigned int t = 0; t < 30; ++t) {
+    generated_trajectories.yaws(0, t) = 1.5707963f;
+    generated_trajectories.yaws(1, t) = 0.0f;
+  }
+  critic.score(data);
+
+  // Trajectory 0 must have zero heading error cost
+  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
+  // Trajectory 1 must have positive heading error cost (~1.57 * weight)
+  EXPECT_GT(costs(1), 10.0f);
+
+  // 2. Approach requiring repositioning:
+  // Robot state is at (0.85, 0.0) — inside threshold_to_consider (0.25m from goal)
+  // Verify heading alignment is actively evaluated inside threshold_to_consider!
+  state.pose.pose.position.x = 0.85;
+  state.pose.pose.position.y = 0.0;
+  costs = xt::zeros<float>({2});
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
+  EXPECT_GT(costs(1), 10.0f);
+
+  // 3. Already-satisfied goal:
+  // Robot pose already at goal with correct heading, and staying at goal
+  state.pose.pose.position.x = 1.0;
+  state.pose.pose.position.y = 0.0;
+  state.pose.pose.orientation = goal.orientation;
+  generated_trajectories.yaws = 1.5707963f * xt::ones<float>({2, 30});
+  costs = xt::zeros<float>({2});
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-4f);
+}
+
+
 TEST(CriticTests, VelocityDeadbandCritic)
 {
   // Standard preamble
@@ -971,13 +1046,13 @@ TEST(CriticTests, ApproachAngleCritic)
   EXPECT_GT(costs(1), costs_at_03);
 }
 
-TEST(CriticTests, ObstaclesCriticGoalTruncation)
+TEST(CriticTests, ObstaclesCriticFullRolloutCollision)
 {
-  // M6 regression (notes/cusp_handoff_fix_plan.md, 2026-09-25): rollout tails
-  // extend ~2s PAST the goal; when the goal sits near a wall, every
-  // progress-making sample "collides" beyond it and the optimizer parks at a
-  // standoff (critics_stats showed ObstaclesCritic 0 -> 5e10 at the brake
-  // moment). Points past the goal are fantasy — the executed robot stops.
+  // Verifies that ObstaclesCritic unconditionally evaluates every sampled pose
+  // across the full rollout horizon. Post-goal obstacles are NOT bypassed by
+  // goal proximity: a trajectory penetrating into a lethal obstacle past the goal
+  // is reliably flagged in collision, while a trajectory that cleanly arrests at
+  // the goal remains collision-free.
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "dummy_costmap", "", "dummy_costmap", true);
@@ -985,8 +1060,6 @@ TEST(CriticTests, ObstaclesCriticGoalTruncation)
   auto getParam = param_handler.getParamGetter("critic");
   bool consider_footprint;
   getParam(consider_footprint, "consider_footprint", false);
-  double trunc;
-  getParam(trunc, "goal_truncation_distance", 0.3);
 
   rclcpp_lifecycle::State lstate;
   costmap_ros->on_configure(lstate);
@@ -1003,20 +1076,27 @@ TEST(CriticTests, ObstaclesCriticGoalTruncation)
   models::State state;
   state.pose.pose.position.x = 1.0;
   models::Trajectories generated_trajectories;
-  generated_trajectories.reset(50, 30);
-  // One straight line from x=1.0 through the goal at 1.5 into the wall at 2.0
-  for (unsigned int i = 0; i != 50; i++) {
-    for (unsigned int t = 0; t != 30; t++) {
-      generated_trajectories.x(i, t) = 1.0 + 0.05 * static_cast<double>(t);
-      generated_trajectories.y(i, t) = 0.0;
-    }
+  generated_trajectories.reset(2, 30);
+
+  // Trajectory 0: Decelerates and stops cleanly at the goal (x = 1.5m, never reaches wall at 2.0m)
+  for (unsigned int t = 0; t < 30; ++t) {
+    double progress = std::min(1.5, 1.0 + 0.05 * static_cast<double>(t));
+    generated_trajectories.x(0, t) = progress;
+    generated_trajectories.y(0, t) = 0.0;
   }
+
+  // Trajectory 1: Penetrates through the goal into the lethal wall at x = 2.0m (progresses to 2.45m)
+  for (unsigned int t = 0; t < 30; ++t) {
+    generated_trajectories.x(1, t) = 1.0 + 0.05 * static_cast<double>(t);
+    generated_trajectories.y(1, t) = 0.0;
+  }
+
   models::Path path;
   path.reset(10);
   geometry_msgs::msg::Pose goal;
   goal.position.x = 1.5;
   goal.orientation.w = 1.0;
-  xt::xtensor<float, 1> costs = xt::zeros<float>({50});
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
   float model_dt = 0.1;
   CriticData data =
   {state, generated_trajectories, path, goal, costs, model_dt,
@@ -1027,8 +1107,15 @@ TEST(CriticTests, ObstaclesCriticGoalTruncation)
   critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
 
   critic.score(data);
-  // With goal truncation, the post-goal wall must not veto the trajectory
-  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6) <<
-    "post-goal obstacle vetoed a trajectory that stops at the goal";
-  EXPECT_FALSE(data.fail_flag);
+
+  // Trajectory 0 (stopping cleanly at goal before wall) must NOT collide
+  EXPECT_NEAR(costs(0), 0.0f, 1e-4f) <<
+    "trajectory cleanly stopping at goal falsely flagged in collision";
+
+  // Trajectory 1 (penetrating into lethal wall) MUST be flagged in collision with fail_flag set
+  EXPECT_GT(costs(1), 1e6f) <<
+    "trajectory penetrating into post-goal lethal obstacle failed to trigger collision cost";
+  EXPECT_TRUE(data.fail_flag) <<
+    "fail_flag was not set for trajectory colliding with obstacle";
 }
+
