@@ -857,6 +857,7 @@ TEST(CriticTests, PathAlignCriticShortPath)
 TEST(CriticTests, PathAlignCriticTerminalSingletonAlignment)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  node->declare_parameter("critic.use_path_orientations", true);
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
@@ -872,6 +873,7 @@ TEST(CriticTests, PathAlignCriticTerminalSingletonAlignment)
   path.reset(1);
   path.x(0) = 1.0;
   path.y(0) = 0.0;
+  path.yaws(0) = 1.5707963f;
 
   geometry_msgs::msg::Pose goal;
   goal.position.x = 1.0;
@@ -1112,10 +1114,20 @@ TEST(CriticTests, ObstaclesCriticFullRolloutCollision)
   EXPECT_NEAR(costs(0), 0.0f, 1e-4f) <<
     "trajectory cleanly stopping at goal falsely flagged in collision";
 
-  // Trajectory 1 (penetrating into lethal wall) MUST be flagged in collision with fail_flag set
+  // Trajectory 1 (penetrating into lethal wall) MUST be flagged in collision
   EXPECT_GT(costs(1), 1e6f) <<
     "trajectory penetrating into post-goal lethal obstacle failed to trigger collision cost";
+  EXPECT_FALSE(data.fail_flag) <<
+    "fail_flag should be false when at least one trajectory is collision-free";
+
+  // When ALL trajectories collide, fail_flag MUST be set to true
+  for (unsigned int t = 0; t < 30; ++t) {
+    generated_trajectories.x(0, t) = generated_trajectories.x(1, t);
+  }
+  costs = xt::zeros<float>({2});
+  data.fail_flag = false;
+  critic.score(data);
   EXPECT_TRUE(data.fail_flag) <<
-    "fail_flag was not set for trajectory colliding with obstacle";
+    "fail_flag was not set when all trajectories collide with obstacle";
 }
 

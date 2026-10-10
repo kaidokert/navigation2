@@ -85,7 +85,8 @@ void PathAlignCritic::score(CriticData & data)
     }
     const size_t batch_size = data.trajectories.x.shape(0);
     auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
-    const float goal_yaw = data.path.yaws(0);
+    const float goal_yaw = (data.path.yaws.shape(0) > 0) ?
+      data.path.yaws(0) : static_cast<float>(tf2::getYaw(data.goal.orientation));
     const auto T_yaw = xt::view(
       data.trajectories.yaws, xt::all(),
       xt::range(0, _, trajectory_point_step_));
