@@ -90,6 +90,9 @@ public:
    */
   nav_msgs::msg::Path transformPath(const geometry_msgs::msg::PoseStamped & robot_pose);
 
+  /** Whether the latest successful transform advanced across a direction cusp. */
+  bool didHandoff() const {return did_handoff_;}
+
   /**
    * @brief Get the global goal pose transformed to the local frame
    * @param stamp Time to get the goal pose at
@@ -246,6 +249,7 @@ protected:
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
   bool enforce_path_inversion_{false};
+  bool did_handoff_{false};
   unsigned int inversion_locale_{0u};
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as

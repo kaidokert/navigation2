@@ -90,6 +90,11 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
 
   nav_msgs::msg::Path transformed_plan = path_handler_.transformPath(robot_pose);
 
+  if (path_handler_.didHandoff()) {
+    reset();
+    RCLCPP_INFO(logger_, "[MPPI] Handoff cleared previous gear control history");
+  }
+
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*(costmap->getMutex()));
 

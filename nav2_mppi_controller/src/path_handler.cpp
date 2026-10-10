@@ -153,6 +153,7 @@ geometry_msgs::msg::PoseStamped PathHandler::transformToGlobalPlanFrame(
 nav_msgs::msg::Path PathHandler::transformPath(
   const geometry_msgs::msg::PoseStamped & robot_pose)
 {
+  did_handoff_ = false;
   // Find relevent bounds of path to use
   geometry_msgs::msg::PoseStamped global_pose =
     transformToGlobalPlanFrame(robot_pose);
@@ -197,6 +198,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
         getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
       transformed_plan = std::move(refreshed_plan);
       prunePlan(global_plan_up_to_inversion_, refreshed_bound);
+      did_handoff_ = true;
     }
   }
 
