@@ -167,6 +167,15 @@ nav_msgs::msg::Path PathHandler::transformPath(
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
+      is_current_segment_reverse_ = false;
+      if (global_plan_up_to_inversion_.poses.size() >= 2) {
+        const auto & p0 = global_plan_up_to_inversion_.poses[0].pose.position;
+        const auto & p1 = global_plan_up_to_inversion_.poses[1].pose.position;
+        double travel_dir = std::atan2(p1.y - p0.y, p1.x - p0.x);
+        double pose_yaw = tf2::getYaw(global_plan_up_to_inversion_.poses[0].pose.orientation);
+        is_current_segment_reverse_ =
+          (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2);
+      }
       {
         const auto & cusp_pose = global_plan_up_to_inversion_.poses.back();
         double dx = global_pose.pose.position.x - cusp_pose.pose.position.x;
@@ -343,21 +352,22 @@ bool PathHandler::estimateGhostHeading(
     double pose_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
 
     // Peek at the active segment plan to detect reverse travel direction.
-    // Use global_plan_up_to_inversion_ which is pruned near the robot each tick,
-    // so its first points reflect the local travel direction. global_plan_ is NOT
-    // pruned each tick and may retain points from the segment start, giving a stale
-    // direction on long curved segments (>90° arcs).
+    // Use global_plan_up_to_inversion_ if >=2 poses remain, otherwise fall back
+    // to the segment reversal state latched at segment creation.
+    bool is_reverse = is_current_segment_reverse_;
     if (global_plan_up_to_inversion_.poses.size() >= 2) {
       const auto & p0 = global_plan_up_to_inversion_.poses[0].pose.position;
       const auto & p1 = global_plan_up_to_inversion_.poses[1].pose.position;
       double travel_dir = std::atan2(p1.y - p0.y, p1.x - p0.x);
-      if (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2) {
-        pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
-        RCLCPP_INFO(logger_,
-          "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
-          tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
-          pose_yaw * 180.0 / M_PI);
-      }
+      is_reverse = (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2);
+    }
+
+    if (is_reverse) {
+      pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
+      RCLCPP_INFO(logger_,
+        "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
+        tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
+        pose_yaw * 180.0 / M_PI);
     }
 
     heading = pose_yaw;
@@ -450,7 +460,10 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  const double nose_heading = is_current_segment_reverse_
+    ? angles::normalize_angle(heading + M_PI)
+    : heading;
+  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(nose_heading);
 
   while (appended_length + 1e-4 < requested_extension) {
     const double step = std::min(
@@ -533,6 +546,15 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
+    is_current_segment_reverse_ = false;
+    if (global_plan_up_to_inversion_.poses.size() >= 2) {
+      const auto & p0 = global_plan_up_to_inversion_.poses[0].pose.position;
+      const auto & p1 = global_plan_up_to_inversion_.poses[1].pose.position;
+      double travel_dir = std::atan2(p1.y - p0.y, p1.x - p0.x);
+      double pose_yaw = tf2::getYaw(global_plan_up_to_inversion_.poses[0].pose.orientation);
+      is_current_segment_reverse_ =
+        (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2);
+    }
   }
 }
 

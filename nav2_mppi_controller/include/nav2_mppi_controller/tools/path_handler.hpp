@@ -253,6 +253,7 @@ protected:
   // all mutated in transformPath() and setPlan() which are called from
   // computeVelocityCommands() on the controller server's single thread.
   double current_segment_length_{std::numeric_limits<double>::infinity()};
+  bool is_current_segment_reverse_{false};
 };
 }  // namespace mppi
 
