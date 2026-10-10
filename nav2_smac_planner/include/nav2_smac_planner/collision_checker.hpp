@@ -45,8 +45,7 @@ public:
   GridCollisionChecker(
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap,
     unsigned int num_quantizations,
-    rclcpp_lifecycle::LifecycleNode::SharedPtr node,
-    bool continuous_world_coordinates = false);
+    rclcpp_lifecycle::LifecycleNode::SharedPtr node);
 
   /**
    * @brief A constructor for nav2_smac_planner::GridCollisionChecker
@@ -129,7 +128,6 @@ protected:
   nav2_costmap_2d::Footprint unoriented_footprint_;
   float center_cost_;
   bool footprint_is_radius_{false};
-  bool continuous_world_coordinates_{false};
   std::vector<float> angles_;
   float possible_collision_cost_{-1};
   rclcpp::Logger logger_{rclcpp::get_logger("SmacPlannerCollisionChecker")};
