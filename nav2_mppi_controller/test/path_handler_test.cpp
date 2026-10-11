@@ -812,15 +812,49 @@ TEST(PathHandlerTests, TestMicroCuspRetainsInversionXYToleranceRegression)
   // Total segment length is 0.0067m (micro-cusp < 0.15m)
   handler.setCurrentSegmentLength(0.0067);
 
-  // Robot is at (0.341, 0.440), heading 30.0 deg (0.523 rad).
-  // Distance to cusp (0.350, 0.445) is sqrt((0.350-0.341)^2 + (0.445-0.440)^2) = 0.0103m (10.3mm).
+  // Robot is at (0.300, 0.445), heading 30.0 deg (0.523 rad).
+  // Distance to cusp (0.350, 0.445) is 0.050m (50mm).
   // Yaw error to cusp is 30.0° - 29.2° = 0.8° = 0.014 rad (well within 0.25*2.0 = 0.50 rad).
-  auto robot_pose = makePose(0.341, 0.440, 0.523);
+  auto robot_pose = makePose(0.300, 0.445, 0.523);
 
-  // Since 10.3mm <= 67.6mm (inversion_xy_tolerance_), handoff MUST be ready.
-  // Under the defective code: effective_xy_tol = min(0.0676, 0.5 * 0.0067) = 0.0033m (3.3mm).
-  // Since 10.3mm > 3.3mm, the defective code returned FALSE and deadlocked.
+  // Since 50mm <= 67.6mm (inversion_xy_tolerance_), micro-cusp handoff MUST be ready.
+  // Under the defective 2.5cm clamp: effective_xy_tol = max(0.025, min(0.0676, 0.5 * 0.0067)) = 0.025m.
+  // Since 50mm > 25mm, the clamped code returned FALSE and deadlocked.
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(robot_pose)) <<
-    "Micro-cusp handoff failed because effective_xy_tol was improperly scaled to 3.3mm!";
+    "Micro-cusp handoff failed because effective_xy_tol was clamped to 25mm!";
+}
+
+// ── Incident 007 regression: M6 micro-cusp 2.8cm segment lockout ────────────
+// In M6, Smac generated a 2.8cm micro-segment at (0.320, -0.640). The vehicle
+// approached at (0.240, -0.710) with distance 0.1063m. Under the 2.5cm clamp,
+// handoff was rejected and 20cm ghost path in reverse stalled the vehicle.
+// Micro-cusp must retain the full 0.15m inversion_xy_tolerance.
+TEST(PathHandlerTests, TestIncident007MicroCuspLockoutRegression)
+{
+  nav_msgs::msg::Path path;
+  geometry_msgs::msg::PoseStamped p0, p1;
+  p0.pose.position.x = 0.300;
+  p0.pose.position.y = -0.620;
+  p0.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(1.10);
+  p1.pose.position.x = 0.320;
+  p1.pose.position.y = -0.640;
+  p1.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(1.10);
+  path.poses.push_back(p0);
+  path.poses.push_back(p1);
+
+  PathHandlerWrapper handler;
+  handler.setGlobalPlanUpToInversion(path);
+  handler.setInversionXYTolerance(0.15f);
+  handler.setInversionYawTolerance(0.38f);
+  handler.setMicroCuspLengthThreshold(0.25);
+  handler.setMicroCuspYawScale(2.0);
+  handler.setCurrentSegmentLength(0.028);
+
+  // Robot at Incident 007 coordinates: (0.240, -0.710), distance = 0.1063m
+  auto robot_pose = makePose(0.240, -0.710, 1.10);
+
+  // Distance 0.1063m <= 0.15m: must succeed
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(robot_pose)) <<
+    "Incident 007 micro-cusp handoff failed at 0.1063m distance!";
 }
 

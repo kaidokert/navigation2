@@ -270,10 +270,13 @@ nav_msgs::msg::Path PathHandler::transformPath(
       // For micro-segments (e.g. 11cm), extending by ghost_max_extension_ (70cm)
       // overwhelms the actual maneuver — MPPI commits to a long trajectory in the
       // wrong direction.  Instead, extend by at most the real TGP length (doubling
-      // the visible path) with a floor of ghost_point_spacing_ * 4 so even a fully
-      // consumed segment gets a minimal gradient signal.
+      // the visible path). For micro-segments (< micro_cusp_length_threshold_),
+      // do not floor at 4 points (20cm) which pulls the robot away from the cusp.
+      const double min_ext = (current_segment_length_ < micro_cusp_length_threshold_) ?
+        std::min(real_tgp_length, ghost_point_spacing_) :
+        (ghost_point_spacing_ * 4.0);
       const double proportional_ext = std::max(
-        ghost_point_spacing_ * 4.0,
+        min_ext,
         std::min(real_tgp_length, ghost_max_extension_));
       const double target_total_length = std::min(
         min_inversion_horizon_,
@@ -626,13 +629,15 @@ bool PathHandler::isWithinInversionTolerances(
   // A fixed handoff radius can encompass an entire short segment, consuming
   // its cusp before any of the required motion takes place. Restrict that
   // radius to half the original segment length (cached before pruning).
-  // Longer segments retain the configured gate. Micro-segments are floored
-  // at half the costmap resolution (2.5 cm) so sub-centimeter precision is
-  // never demanded of non-holonomic Ackermann steering.
+  // Longer segments retain the configured gate. Micro-segments (< micro_cusp_length_threshold_)
+  // are planner artifacts that must retain the full inversion_xy_tolerance_ so the
+  // Ackermann vehicle is not locked into sub-centimeter deadlocks.
   const double min_handoff_radius = std::min<double>(inversion_xy_tolerance_, 0.025);
-  const double effective_xy_tol = std::max(
-    min_handoff_radius,
-    std::min<double>(inversion_xy_tolerance_, 0.5 * current_segment_length_));
+  const double effective_xy_tol = is_micro_cusp ?
+    inversion_xy_tolerance_ :
+    std::max(
+      min_handoff_radius,
+      std::min<double>(inversion_xy_tolerance_, 0.5 * current_segment_length_));
 
   bool result = distance <= effective_xy_tol &&
     std::fabs(angle_distance) <= relaxed_yaw_tol;
