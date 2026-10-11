@@ -162,18 +162,7 @@ void ObstaclesCritic::score(CriticData & data)
         trajectory_collide = true;
         break;
       }
-      if (j > 0 && data.active_cusp_direction == 0 && goal_truncation_distance_ > 0.0f) {
-        // Only a collision-free entry on the final segment may truncate its
-        // post-goal tail. A nearby global goal is not an intermediate cusp's
-        // stopping target. This heuristic does not certify physical braking.
-        const float dxg = traj.x(i, j) - static_cast<float>(data.goal.position.x);
-        const float dyg = traj.y(i, j) - static_cast<float>(data.goal.position.y);
-        if (dxg * dxg + dyg * dyg <
-          goal_truncation_distance_ * goal_truncation_distance_)
-        {
-          break;
-        }
-      }
+
       if (pose_cost.cost < 1.0f) {continue;}  // In free space
 
       // Cannot process repulsion if inflation layer does not exist
