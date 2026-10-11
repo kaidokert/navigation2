@@ -89,6 +89,31 @@ public:
     return inversion_locale_;
   }
 
+  void setCurrentSegmentLength(double length)
+  {
+    current_segment_length_ = length;
+  }
+
+  void setInversionXYTolerance(float tol)
+  {
+    inversion_xy_tolerance_ = tol;
+  }
+
+  void setInversionYawTolerance(float tol)
+  {
+    inversion_yaw_tolerance_ = tol;
+  }
+
+  void setMicroCuspLengthThreshold(double thresh)
+  {
+    micro_cusp_length_threshold_ = thresh;
+  }
+
+  void setMicroCuspYawScale(double scale)
+  {
+    micro_cusp_yaw_scale_ = scale;
+  }
+
   bool estimateGhostHeadingWrapper(
     const nav_msgs::msg::Path & transformed_plan,
     double & heading,
@@ -756,3 +781,46 @@ TEST(PathHandlerTests, TestHandoffRelaxationCapHolds)
     }
   }
 }
+
+// ── Micro-cusp xy tolerance retention regression (Incident 003) ────────────
+// In M8 lateral shift right, Smac generated a micro-segment of 6.7mm before
+// reversing. When effective_xy_tol was scaled by 0.5 * current_segment_length_,
+// tolerance shrank to 3.3mm, creating a deadlock where Ackermann kinematics
+// could not satisfy the sub-centimeter tolerance, stalling the robot for 15s.
+// Micro-cusps must retain inversion_xy_tolerance_ so the robot is not trapped.
+TEST(PathHandlerTests, TestMicroCuspRetainsInversionXYToleranceRegression)
+{
+  nav_msgs::msg::Path path;
+  // A tiny 6.7mm segment: (0.344, 0.442) -> (0.350, 0.445)
+  geometry_msgs::msg::PoseStamped p0, p1;
+  p0.pose.position.x = 0.344;
+  p0.pose.position.y = 0.442;
+  p0.pose.orientation.w = 1.0;
+  p1.pose.position.x = 0.350;
+  p1.pose.position.y = 0.445;
+  // heading ~ 29.2 deg = 0.51 rad
+  p1.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(0.51);
+  path.poses.push_back(p0);
+  path.poses.push_back(p1);
+
+  PathHandlerWrapper handler;
+  handler.setGlobalPlanUpToInversion(path);
+  handler.setInversionXYTolerance(0.0676f);
+  handler.setInversionYawTolerance(0.25f);
+  handler.setMicroCuspLengthThreshold(0.15);
+  handler.setMicroCuspYawScale(2.0);
+  // Total segment length is 0.0067m (micro-cusp < 0.15m)
+  handler.setCurrentSegmentLength(0.0067);
+
+  // Robot is at (0.341, 0.440), heading 30.0 deg (0.523 rad).
+  // Distance to cusp (0.350, 0.445) is sqrt((0.350-0.341)^2 + (0.445-0.440)^2) = 0.0103m (10.3mm).
+  // Yaw error to cusp is 30.0° - 29.2° = 0.8° = 0.014 rad (well within 0.25*2.0 = 0.50 rad).
+  auto robot_pose = makePose(0.341, 0.440, 0.523);
+
+  // Since 10.3mm <= 67.6mm (inversion_xy_tolerance_), handoff MUST be ready.
+  // Under the defective code: effective_xy_tol = min(0.0676, 0.5 * 0.0067) = 0.0033m (3.3mm).
+  // Since 10.3mm > 3.3mm, the defective code returned FALSE and deadlocked.
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(robot_pose)) <<
+    "Micro-cusp handoff failed because effective_xy_tol was improperly scaled to 3.3mm!";
+}
+

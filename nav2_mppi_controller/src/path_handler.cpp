@@ -626,9 +626,13 @@ bool PathHandler::isWithinInversionTolerances(
   // A fixed handoff radius can encompass an entire short segment, consuming
   // its cusp before any of the required motion takes place. Restrict that
   // radius to half the original segment length (cached before pruning).
-  // Longer segments retain the configured gate.
-  const double effective_xy_tol = std::min<double>(
-    inversion_xy_tolerance_, 0.5 * current_segment_length_);
+  // Longer segments retain the configured gate. Micro-segments are floored
+  // at half the costmap resolution (2.5 cm) so sub-centimeter precision is
+  // never demanded of non-holonomic Ackermann steering.
+  const double min_handoff_radius = std::min<double>(inversion_xy_tolerance_, 0.025);
+  const double effective_xy_tol = std::max(
+    min_handoff_radius,
+    std::min<double>(inversion_xy_tolerance_, 0.5 * current_segment_length_));
 
   bool result = distance <= effective_xy_tol &&
     std::fabs(angle_distance) <= relaxed_yaw_tol;
