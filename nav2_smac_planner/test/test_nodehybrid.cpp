@@ -35,6 +35,38 @@ public:
 };
 RclCppFixture g_rclcppfixture;
 
+TEST(NodeHybridTest, changed_continuous_pose_invalidates_collision_cache)
+{
+  // Both poses occupy discretized x/y/heading index (21, 24, 0), but this
+  // revision's checker rounds the reference cell with x + 0.5. Its actual
+  // clear/blocked results must not be replaced by a cached result for the index.
+  nav2_costmap_2d::Costmap2D grid(60, 60, 0.02, 0.0, 0.0, 0);
+  grid.setCost(22, 24, nav2_costmap_2d::LETHAL_OBSTACLE);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("pose_cache_regression");
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node);
+  checker.setCostmap(&grid);
+  checker.setFootprint(nav2_costmap_2d::Footprint{}, true, 0.0);
+  using Hybrid = nav2_smac_planner::NodeHybrid;
+  const Hybrid::Coordinates clear(21.05f, 24.05f, 0.0f);
+  const Hybrid::Coordinates blocked(21.75f, 24.05f, 0.0f);
+  ASSERT_EQ(static_cast<unsigned int>(clear.x), static_cast<unsigned int>(blocked.x));
+  ASSERT_FALSE(checker.inCollision(clear.x, clear.y, clear.theta, false));
+  ASSERT_TRUE(checker.inCollision(blocked.x, blocked.y, blocked.theta, false));
+  const auto index = Hybrid::getIndex(21u, 24u, 0u, 60u, 72u);
+  Hybrid candidate(index);
+  candidate.setPose(clear);
+  ASSERT_TRUE(candidate.isNodeValid(false, &checker));
+  EXPECT_TRUE(candidate.isNodeValid(false, &checker));  // Same-pose cache control.
+  candidate.setPose(blocked);
+  EXPECT_FALSE(candidate.isNodeValid(false, &checker));
+  candidate.setPose(clear);
+  EXPECT_TRUE(candidate.isNodeValid(false, &checker));
+  candidate.pose = blocked;  // Analytic and queue code can bypass setPose().
+  EXPECT_FALSE(candidate.isNodeValid(false, &checker));
+  candidate.pose = clear;
+  EXPECT_TRUE(candidate.isNodeValid(false, &checker));
+}
+
 TEST(NodeHybridTest, test_node_hybrid)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("test");

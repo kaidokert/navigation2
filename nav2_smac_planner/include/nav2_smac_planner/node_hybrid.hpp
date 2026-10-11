@@ -491,6 +491,7 @@ public:
 
 private:
   float _cell_cost;
+  Coordinates _collision_checked_pose{0.0f, 0.0f, 0.0f};
   float _accumulated_cost;
   uint64_t _index;
   bool _was_visited;

@@ -378,14 +378,18 @@ bool NodeHybrid::isNodeValid(
   const bool & traverse_unknown,
   GridCollisionChecker * collision_checker)
 {
-  // Already found, we can return the result
-  if (!std::isnan(_cell_cost)) {
+  // Cached validity belongs to the checked continuous pose, not only the
+  // graph index. Queue restoration can assign pose directly without setPose().
+  if (!std::isnan(_cell_cost) && pose.x == _collision_checked_pose.x &&
+    pose.y == _collision_checked_pose.y && pose.theta == _collision_checked_pose.theta)
+  {
     return _is_node_valid;
   }
 
   _is_node_valid = !collision_checker->inCollision(
     this->pose.x, this->pose.y, this->pose.theta /*bin number*/, traverse_unknown);
   _cell_cost = collision_checker->getCost();
+  _collision_checked_pose = pose;
   return _is_node_valid;
 }
 
