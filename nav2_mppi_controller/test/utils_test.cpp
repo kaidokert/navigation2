@@ -21,6 +21,7 @@
 #pragma GCC diagnostic pop
 
 #include "gtest/gtest.h"
+#include "settled_costmap.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_mppi_controller/models/path.hpp"
@@ -299,8 +300,11 @@ TEST(UtilsTests, findPathCosts)
   {state, generated_trajectories, path, goal, costs, model_dt, false, nullptr, nullptr,
     std::nullopt, std::nullopt};  /// Caution, keep references
 
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
+  // This unit test writes its entire grid below. Loading sensor/map plugins adds
+  // asynchronous lifecycle teardown without contributing to the tested input.
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   rclcpp_lifecycle::State lstate;
   costmap_ros->on_configure(lstate);
   auto * costmap = costmap_ros->getCostmap();
@@ -344,7 +348,9 @@ TEST(UtilsTests, SmootherTest)
   noisey_sequence.wz = 0.3 * xt::ones<float>({30});
 
   // Make the sequence noisy
-  auto noises = xt::random::randn<float>({30}, 0.0, 0.2);
+  // Fixed alternating disturbance: repeatable across RNG state and gtest repeats.
+  xt::xtensor<float, 1> noises = xt::zeros<float>({30});
+  for (size_t i = 0; i < 30; ++i) {noises(i) = i % 2 == 0 ? 0.2f : -0.2f;}
   noisey_sequence.vx += noises;
   noisey_sequence.vy += noises;
   noisey_sequence.wz += noises;
@@ -376,9 +382,13 @@ TEST(UtilsTests, SmootherTest)
   EXPECT_NEAR(history_init[3].wz, history[2].wz, 0.02);
 
   // Check history element is updated for first command
-  EXPECT_NEAR(history[3].vx, 0.2, 0.05);
-  EXPECT_NEAR(history[3].vy, 0.0, 0.035);
-  EXPECT_NEAR(history[3].wz, 0.23, 0.02);
+  // Independent first-window quadratic SG oracle (9 points, divisor 231).
+  // Windows: vx=[0,.1,.1,.1,.4,0,.4,0,.4],
+  // vy=[0,0,0,0,.2,-.2,.2,-.2,.2],
+  // wz=[0,.3,.3,.3,.5,.1,.5,.1,.5].
+  EXPECT_NEAR(history[3].vx, 41.5 / 231.0, 1e-6);
+  EXPECT_NEAR(history[3].vy, 1.8 / 231.0, 1e-6);
+  EXPECT_NEAR(history[3].wz, 77.4 / 231.0, 1e-6);
 
   // Check that path is smoother
   float smoothed_val{0}, original_val{0};
@@ -424,6 +434,36 @@ TEST(UtilsTests, FindPathInversionTest)
     path.poses.push_back(pose);
   }
   EXPECT_EQ(utils::findFirstPathInversion(path), 11u);
+}
+
+TEST(UtilsTests, DuplicateCuspPreservesInversionTest)
+{
+  nav_msgs::msg::Path path;
+  for (double x : {0.0, 0.1, 0.1, 0.1, 0.0}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = x;
+    path.poses.push_back(pose);
+  }
+  EXPECT_EQ(utils::findFirstPathInversion(path), 4u);
+  EXPECT_EQ(utils::removePosesAfterFirstInversion(path), 4u);
+  ASSERT_EQ(path.poses.size(), 4u);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.x, 0.1);
+}
+
+TEST(UtilsTests, DuplicateEdgesWithoutInversionTest)
+{
+  nav_msgs::msg::Path path;
+  for (double x : {0.0, 0.0, 0.1, 0.1, 0.2, 0.2}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.pose.position.x = x;
+    path.poses.push_back(pose);
+  }
+  EXPECT_EQ(utils::findFirstPathInversion(path), path.poses.size());
+  EXPECT_EQ(utils::removePosesAfterFirstInversion(path), 0u);
+  for (auto & pose : path.poses) {
+    pose.pose.position.x = 0.0;
+  }
+  EXPECT_EQ(utils::findFirstPathInversion(path), path.poses.size());
 }
 
 TEST(UtilsTests, RemovePosesAfterPathInversionTest)

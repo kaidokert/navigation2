@@ -16,7 +16,11 @@
 #define NAV2_MPPI_CONTROLLER__MOTION_MODELS_HPP_
 
 #include <cstdint>
+#include <cstring>
 #include <string>
+#include <stdexcept>
+#include <optional>
+#include "nav2_core/controller_exceptions.hpp"
 
 #include "nav2_mppi_controller/models/control_sequence.hpp"
 #include "nav2_mppi_controller/models/state.hpp"
@@ -153,6 +157,67 @@ public:
   {
     auto getParam = param_handler->getParamGetter(name + ".AckermannConstraints");
     getParam(min_turning_r_, "min_turning_r", 0.2);
+    // Optional measured plant response, not a change to command constraints.
+    // Configure before activation; zero preserves the existing model exactly.
+    getParam(response_radius_offset_, "response_radius_offset", 0.0, ParameterType::Static);
+    if (response_radius_offset_ < 0.0f) {
+      throw std::invalid_argument("Ackermann response_radius_offset must be nonnegative");
+    }
+    getParam(predict_steering_conditioning_, "predict_steering_conditioning", false,
+      ParameterType::Static);
+    if (predict_steering_conditioning_) {
+      getParam(wheelbase_, "steering_wheelbase", 0.213, ParameterType::Static);
+      getParam(steering_max_angle_, "steering_max_angle", 0.576, ParameterType::Static);
+      getParam(steering_vx_threshold_, "steering_vx_threshold", 0.05, ParameterType::Static);
+      getParam(steering_rate_base_, "steering_rate_base", 0.5, ParameterType::Static);
+      getParam(steering_rate_gain_, "steering_rate_gain", 10.0, ParameterType::Static);
+      getParam(steering_rate_max_, "steering_rate_max", 6.0, ParameterType::Static);
+      getParam(steering_update_period_, "steering_update_period", 0.1, ParameterType::Static);
+      // Separate actuator slew from the command conditioning filter. Zero
+      // preserves the legacy predictor; configure from measured plant limits.
+      getParam(steering_actuator_rate_, "steering_actuator_rate", 0.0, ParameterType::Static);
+      if (wheelbase_ <= 0 || steering_max_angle_ <= 0 || steering_max_angle_ >= M_PI_2 ||
+        steering_vx_threshold_ < 0 || steering_rate_base_ < 0 || steering_rate_gain_ < 0 ||
+        steering_rate_max_ <= 0 || steering_update_period_ <= 0 || steering_actuator_rate_ < 0)
+      {
+        throw std::invalid_argument("Invalid Ackermann steering prediction parameters");
+      }
+    }
+  }
+
+  // Explicit feedback takes precedence over the moving-state kinematic estimate.
+  // Clear on stale/missing feedback; standstill cannot infer steering from yaw/vx.
+  void setInitialSteering(const std::optional<float> & angle)
+  {
+    // The build uses -ffast-math: inspect IEEE bits rather than isfinite.
+    if (angle) {
+      uint32_t bits;
+      std::memcpy(&bits, &*angle, sizeof(bits));
+      if ((bits & 0x7f800000u) == 0x7f800000u || std::abs(*angle) > steering_max_angle_) {
+        initial_steering_.reset();
+        throw nav2_core::NoValidControl("Invalid measured steering feedback");
+      }
+    }
+    initial_steering_ = angle;
+  }
+
+  bool predictsSteeringConditioning() const {return predict_steering_conditioning_;}
+  std::optional<float> initialSteering() const {return initial_steering_;}
+  std::optional<float> initialConditionedSteering() const {return initial_conditioned_steering_;}
+  bool requiresConditionedSteering() const
+  {return predict_steering_conditioning_ && steering_actuator_rate_ > 0;}
+
+  void setInitialConditionedSteering(const std::optional<float> & angle)
+  {
+    initial_conditioned_steering_.reset();
+    if (angle) {
+      uint32_t bits;
+      std::memcpy(&bits, &*angle, sizeof(bits));
+      if ((bits & 0x7f800000u) == 0x7f800000u || std::abs(*angle) > steering_max_angle_) {
+        throw nav2_core::NoValidControl("Invalid conditioned steering feedback");
+      }
+    }
+    initial_conditioned_steering_ = angle;
   }
 
   /**
@@ -178,6 +243,21 @@ public:
   }
 
   /**
+   * @brief Predict a calibrated excess turning radius without altering commands.
+   * For commanded radius |vx/wz|, the predicted radius is that radius plus
+   * the measured offset. Zero-speed/zero-yaw pairs remain finite. Callers
+   * exclude measured initial state; raw sampled commands are never rewritten.
+   */
+  template<typename VelocityX, typename VelocityYaw>
+  void applyResponse(VelocityX && vx, VelocityYaw && wz) const
+  {
+    if (response_radius_offset_ > 0.0f) {
+      wz = wz * xt::fabs(vx) / xt::maximum(
+        xt::fabs(vx) + response_radius_offset_ * xt::fabs(wz), 1e-9f);
+    }
+  }
+
+  /**
    * @brief Predict rollout velocities with the Ackermann turning limit
    * enforced per step. Upstream applied the limit only to the winning
    * control sequence, so the optimizer scored pivot fantasies
@@ -192,6 +272,54 @@ public:
   void predict(models::State & state) override
   {
     MotionModel::predict(state);
+
+    if (predict_steering_conditioning_) {
+      const float dt = std::clamp(model_dt_, 0.005f, 0.15f);
+      const float command_limit = std::min(steering_max_angle_, std::atan(wheelbase_ / min_turning_r_));
+      for (unsigned int b = 0; b < state.vx.shape(0); ++b) {
+        float angle;
+        if (initial_steering_) {
+          angle = *initial_steering_;
+        } else if (std::abs(state.vx(b, 0)) > 0.001f) {
+          angle = std::atan(wheelbase_ * state.wz(b, 0) / state.vx(b, 0));
+        } else {
+          throw nav2_core::NoValidControl("Steering prediction requires feedback at standstill");
+        }
+        float physical_angle = angle;
+        if (requiresConditionedSteering()) {
+          if (!initial_conditioned_steering_) {
+            throw nav2_core::NoValidControl("Actuator prediction requires conditioned target feedback");
+          }
+          angle = *initial_conditioned_steering_;
+        }
+        for (unsigned int j = 1; j < state.vx.shape(1); ++j) {
+          const float speed = std::abs(state.vx(b, j - 1));
+          const float requested = std::abs(state.cvx(b, j - 1)) > 1e-9f ?
+            std::atan(wheelbase_ * state.cwz(b, j - 1) / state.cvx(b, j - 1)) : 0.0f;
+          const float raw = std::clamp(requested, -command_limit, command_limit);
+          const float alpha = steering_vx_threshold_ > 0 ?
+            std::min(1.0f, speed / steering_vx_threshold_) : 1.0f;
+          // Match the hardware update at its period; fractional model steps
+          // use an equivalent exponential blend, not extra full-strength ticks.
+          const float blend = 1.0f - std::pow(1.0f - alpha, model_dt_ / steering_update_period_);
+          const float target = std::clamp(blend * raw + (1.0f - blend) * angle,
+              -steering_max_angle_, steering_max_angle_);
+          const float rate = std::min(steering_rate_max_, steering_rate_base_ + steering_rate_gain_ * speed);
+          angle += std::clamp(target - angle, -rate * dt, rate * dt);
+          if (steering_actuator_rate_ > 0) {
+            const float servo_delta = steering_actuator_rate_ * model_dt_;
+            physical_angle += std::clamp(angle - physical_angle, -servo_delta, servo_delta);
+          } else {
+            physical_angle = angle;
+          }
+          state.wz(b, j) = state.vx(b, j) * std::tan(physical_angle) / wheelbase_;
+        }
+      }
+      using namespace xt::placeholders;  // NOLINT
+      applyResponse(xt::view(state.vx, xt::all(), xt::range(1, _)),
+        xt::view(state.wz, xt::all(), xt::range(1, _)));
+      return;
+    }
 
     // Project ROLLOUT wz (columns 1+; column 0 is the measured state) onto
     // the feasible Ackermann cone so scoring only rewards executable motion.
@@ -213,6 +341,7 @@ public:
 
     auto view = xt::masked_view(wz, (xt::fabs(vx) / xt::fabs(wz)) < min_turning_r_);
     view = xt::sign(wz) * xt::fabs(vx) / min_turning_r_;
+    applyResponse(vx, wz);
   }
 
   /**
@@ -223,6 +352,18 @@ public:
 
 private:
   float min_turning_r_{0};
+  float response_radius_offset_{0};
+  bool predict_steering_conditioning_{false};
+  float wheelbase_{0.213f};
+  float steering_max_angle_{0.576f};
+  float steering_vx_threshold_{0.05f};
+  float steering_rate_base_{0.5f};
+  float steering_rate_gain_{10.0f};
+  float steering_rate_max_{6.0f};
+  float steering_update_period_{0.1f};
+  float steering_actuator_rate_{0.0f};
+  std::optional<float> initial_steering_;
+  std::optional<float> initial_conditioned_steering_;
 };
 
 /**

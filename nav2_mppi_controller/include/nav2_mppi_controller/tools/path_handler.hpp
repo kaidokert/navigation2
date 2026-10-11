@@ -21,7 +21,9 @@
 #include <utility>
 #include <string>
 #include <memory>
-#include <limits>
+#include <optional>
+#include <functional>
+#include <cstdint>
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "tf2_ros/buffer.h"
@@ -33,6 +35,7 @@
 #include "nav2_core/controller_exceptions.hpp"
 
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
+#include "nav2_mppi_controller/models/path_binding.hpp"
 
 namespace mppi
 {
@@ -89,24 +92,41 @@ public:
    * @param robot_pose Pose of robot
    * @return global plan in local frame
    */
-  nav_msgs::msg::Path transformPath(const geometry_msgs::msg::PoseStamped & robot_pose);
+  using DepartureValidator = std::function<bool(
+      const geometry_msgs::msg::PoseStamped &, const nav_msgs::msg::Path &, double, double, bool)>;
+  nav_msgs::msg::Path transformPath(
+    const geometry_msgs::msg::PoseStamped & robot_pose,
+    const DepartureValidator & departure_validator = {});
 
   /** Whether the latest successful transform advanced across a direction cusp. */
   bool didHandoff() const {return did_handoff_;}
 
+  struct RetainedDepartureApproach
+  {
+    geometry_msgs::msg::PoseStamped cusp;
+    double stop_margin;
+  };
+  std::optional<RetainedDepartureApproach> getRetainedDepartureApproach() const
+  {
+    return retained_departure_approach_;
+  }
+
   /** Number of real transformed poses before any ghost extension. */
   size_t getRealPathPointCount() const {return real_path_point_count_;}
+  std::optional<PathBinding> getPathBinding() const {return path_binding_;}
+  /** Gear cached before pruning, only while a direction cusp remains active. */
+  /** Cached real segment gear, including the final segment after pruning. */
+  int getPathDirection() const {
+    return enforce_path_inversion_ ? current_segment_direction_ : 0;
+  }
 
-  /**
-   * Direction cached before pruning, only while an intermediate direction cusp
-   * remains active (0 on final segment).
-   */
-  int getActiveCuspDirection() const
-  {
-    if (!enforce_path_inversion_ || inversion_locale_ == 0u) {
-      return 0;
-    }
-    return is_current_segment_reverse_ ? -1 : 1;
+  int getActiveCuspDirection() const {
+    return enforce_path_inversion_ && inversion_locale_ != 0u ? current_segment_direction_ : 0;
+  }
+
+  std::optional<std::pair<double, double>> getCuspTolerances() const {
+    if (getActiveCuspDirection() == 0) {return std::nullopt;}
+    return effectiveInversionTolerances();
   }
 
   /**
@@ -117,6 +137,10 @@ public:
   geometry_msgs::msg::PoseStamped getTransformedGoal(const builtin_interfaces::msg::Time & stamp);
 
 protected:
+  bool retainRejectedShortDeparture(
+    const geometry_msgs::msg::PoseStamped & pose,
+    const geometry_msgs::msg::PoseStamped & local_cusp, double xy_gate);
+  std::pair<double, double> effectiveInversionTolerances() const;
   /**
     * @brief Transform a pose to another frame
     * @param frame Frame to transform to
@@ -237,6 +261,11 @@ protected:
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   ParametersHandler * parameters_handler_;
 
+  std::optional<PathBinding> path_binding_;
+  std::shared_ptr<const nav_msgs::msg::Path> canonical_plan_;
+  uint64_t plan_generation_{0}, segment_generation_{0};
+  size_t global_source_offset_{0}, inversion_source_offset_{0};
+  size_t segment_source_begin_{0}, segment_source_end_{0};
   nav_msgs::msg::Path global_plan_;
   nav_msgs::msg::Path global_plan_up_to_inversion_;
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
@@ -260,21 +289,37 @@ protected:
   double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
   int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
                                                 // <=0 DISABLES escape (default: off until the
-                                                // oscillation latch is done - review 2026-09-25)
+                                                // oscillation latch is implemented â€” review 2026-09-25)
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
   bool enforce_path_inversion_{false};
   bool did_handoff_{false};
+  size_t real_path_point_count_{0u};
+  int current_segment_direction_{0};
   unsigned int inversion_locale_{0u};
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
-  // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
+  // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ â€”
   // all mutated in transformPath() and setPlan() which are called from
   // computeVelocityCommands() on the controller server's single thread.
   double current_segment_length_{std::numeric_limits<double>::infinity()};
-  bool is_current_segment_reverse_{false};
-  size_t real_path_point_count_{0u};
+  double next_segment_length_{std::numeric_limits<double>::infinity()};
+  bool bound_handoff_by_next_segment_{false};
+  bool validate_long_forward_departure_{false};
+  bool validate_short_forward_departure_{false};
+  bool preserve_cusp_direction_edge_{false};
+  bool replan_on_cusp_overrun_{false};
+  bool cusp_overrun_snapshot_written_{false};
+  struct DepartureApproachBudget
+  {
+    int64_t started_ns, last_ns, progress_ns;
+    double first_remaining, best_remaining, best_distance, progress_remaining;
+    unsigned int calls;
+    bool exhausted{false};
+  };
+  std::optional<DepartureApproachBudget> departure_approach_budget_;
+  std::optional<RetainedDepartureApproach> retained_departure_approach_;
 };
 }  // namespace mppi
 

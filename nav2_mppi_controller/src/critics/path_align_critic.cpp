@@ -29,7 +29,9 @@ void PathAlignCritic::initialize()
   getParam(max_path_occupancy_ratio_, "max_path_occupancy_ratio", 0.07f);
   getParam(offset_from_furthest_, "offset_from_furthest", 20);
   getParam(trajectory_point_step_, "trajectory_point_step", 4);
-  getParam(threshold_to_consider_, "threshold_to_consider", 0.5f);
+  getParam(
+    threshold_to_consider_,
+    "threshold_to_consider", 0.5f);
   getParam(use_path_orientations_, "use_path_orientations", false);
   getParam(cusp_terminal_heading_weight_, "cusp_terminal_heading_weight", 0.0f);
   if (cusp_terminal_heading_weight_ < 0.0f) {
@@ -44,42 +46,19 @@ void PathAlignCritic::initialize()
 
 void PathAlignCritic::score(CriticData & data)
 {
-  if (!enabled_) {
-    return;
-  }
-
-  const size_t total_path_pts = data.path.x.shape(0);
-  if (total_path_pts == 0) {
-    return;
-  }
-
-  // If the robot is already within the goal checker's position AND yaw tolerances,
-  // do not penalize residual yaw error — let the robot decelerate cleanly to a stop.
   // Final-goal proximity must not disable a required intermediate cusp.
-  if (data.active_cusp_direction == 0 && data.goal_checker) {
-    geometry_msgs::msg::Pose pose_tolerance;
-    geometry_msgs::msg::Twist velocity_tolerance;
-    if (data.goal_checker->getTolerances(pose_tolerance, velocity_tolerance)) {
-      const double dx = data.state.pose.pose.position.x - data.goal.position.x;
-      const double dy = data.state.pose.pose.position.y - data.goal.position.y;
-      const double dist_sq = dx * dx + dy * dy;
-      const double max_early_exit_dist = static_cast<double>(pose_tolerance.position.x);
-      if (dist_sq <= max_early_exit_dist * max_early_exit_dist) {
-        const double yaw_tol = tf2::getYaw(pose_tolerance.orientation);
-        const double robot_yaw = tf2::getYaw(data.state.pose.pose.orientation);
-        const double goal_yaw = tf2::getYaw(data.goal.orientation);
-        const double dyaw = std::abs(angles::shortest_angular_distance(robot_yaw, goal_yaw));
-        if (dyaw <= yaw_tol) {
-          auto node = parent_.lock();
-          if (node) {
-            RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-              "[PAC] SKIP: within goal checker tolerances (dist=%.3f <= %.3f, dyaw=%.3f <= %.3f)",
-              std::sqrt(dist_sq), pose_tolerance.position.x, dyaw, yaw_tol);
-          }
-          return;
-        }
-      }
+  // On the final segment, preserve the usual handoff to goal critics.
+  if (!enabled_ || (data.active_cusp_direction == 0 &&
+    utils::withinPositionGoalTolerance(
+      threshold_to_consider_, data.state.pose.pose, data.goal)))
+  {
+    auto node = parent_.lock();
+    if (node) {
+      const char * reason = !enabled_ ? "disabled" : "within goal tolerance";
+      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+        "[PAC] SKIP: %s (threshold=%.3f)", reason, threshold_to_consider_);
     }
+    return;
   }
 
   // Averaged tracking cost can prefer an exact-position, wrong-yaw stop over
@@ -88,7 +67,7 @@ void PathAlignCritic::score(CriticData & data)
   // must not pull the heading through intervening path curvature; final goals
   // keep their existing goal critic. Default zero preserves previous scoring.
   const size_t real_cusp_pts = std::min(
-    data.real_path_point_count.value_or(data.path.yaws.size()), data.path.yaws.size());
+    data.real_path_point_count.value_or(0), data.path.yaws.size());
   if (cusp_terminal_heading_weight_ > 0.0f && data.active_cusp_direction != 0 &&
     real_cusp_pts > 0 && real_cusp_pts <= 4 && data.trajectories.yaws.shape(1) > 0)
   {
@@ -98,67 +77,44 @@ void PathAlignCritic::score(CriticData & data)
     data.costs += cusp_terminal_heading_weight_ * error;
   }
 
-  if (total_path_pts == 1) {
-    if (!use_path_orientations_) {
-      return;
-    }
-    const size_t batch_size = data.trajectories.x.shape(0);
-    auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
-    const float goal_yaw = (data.path.yaws.shape(0) > 0) ?
-      data.path.yaws(0) : static_cast<float>(tf2::getYaw(data.goal.orientation));
-    const auto T_yaw = xt::view(
-      data.trajectories.yaws, xt::all(),
-      xt::range(0, _, trajectory_point_step_));
-    const auto traj_sampled_size = T_yaw.shape(1);
-    for (size_t t = 0; t < batch_size; ++t) {
-      float summed_yaw_err = 0.0f;
-      for (size_t p = 0; p < traj_sampled_size; ++p) {
-        float dyaw = angles::shortest_angular_distance(goal_yaw, T_yaw(t, p));
-        summed_yaw_err += fabsf(dyaw);
-      }
-      cost[t] = summed_yaw_err / static_cast<float>(traj_sampled_size);
-    }
-    if (power_ > 1u) {
-      data.costs += xt::pow(std::move(cost) * weight_, power_);
-    } else {
-      data.costs += std::move(cost) * weight_;
-    }
-    return;
-  }
-
-  // Don't apply close to goal, let the goal critics take over (final segment only)
-  if (data.active_cusp_direction == 0 && utils::withinPositionGoalTolerance(
-      threshold_to_consider_, data.state.pose.pose, data.goal))
-  {
-    auto node = parent_.lock();
-    if (node) {
-      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-        "[PAC] SKIP: within goal tolerance (threshold=%.3f)", threshold_to_consider_);
-    }
+  if (data.path.x.shape(0) < 2) {
     return;
   }
 
   // Don't apply when first getting bearing w.r.t. the path, unless on terminal approach
   utils::setPathFurthestPointIfNotSet(data);
+  const size_t total_path_pts = data.path.x.shape(0);
   const size_t total_segments = total_path_pts - 1;
   size_t path_segments_count =
     std::min(*data.furthest_reached_path_point, total_segments);
 
-  const bool active_real_cusp = (data.active_cusp_direction != 0 && real_cusp_pts > 0);
+  // Preview ghosts must not turn a short real segment into a long-path startup.
+  // Keep their orientation geometry, but classify the segment before extension.
+  const size_t real_path_pts = std::min(
+    data.real_path_point_count.value_or(total_path_pts), total_path_pts);
+  // A required cusp segment already has a known outgoing bearing. Suppressing
+  // alignment until the random batch makes progress loses curvature guidance
+  // exactly during the steering reversal. Match travelled distance against the
+  // complete real segment; preview ghosts must not extend this reference.
+  const bool active_real_cusp = data.active_cusp_direction != 0 &&
+    data.real_path_point_count.has_value() && real_path_pts > 0;
   if (active_real_cusp) {
-    path_segments_count = real_cusp_pts;
+    path_segments_count = real_path_pts;
   }
-
-  const bool short_segment = (total_path_pts <= 4);
+  const bool short_real_segment =
+    data.real_path_point_count.has_value() && real_path_pts > 0 && real_path_pts <= 4;
   if (path_segments_count == 0) {
-    if (!short_segment) {
+    if (!short_real_segment) {
       return;
     }
+    // A stationary rollout at a pruned cusp still needs endpoint heading cost.
+    // One path sample suffices; retaining zero would both disable alignment and
+    // underflow the final-pose index below. Long-path startup remains unchanged.
     path_segments_count = 1;
   }
-
   const bool is_terminal_path =
-    (path_segments_count >= total_segments) || short_segment;
+    active_real_cusp || (path_segments_count >= total_segments) ||
+    (real_path_pts > 0 && real_path_pts <= 4);
 
   if (!is_terminal_path && path_segments_count < offset_from_furthest_) {
     auto node = parent_.lock();
@@ -171,41 +127,34 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  // Number of points to include in local path vector.
-  // On terminal approach, retain all points to include the final goal pose.
-  const size_t num_pts = is_terminal_path ?
-    total_path_pts : std::min(*data.furthest_reached_path_point + 1, total_path_pts);
+  float path_segments_flt = static_cast<float>(path_segments_count);
 
   // Don't apply when dynamic obstacles are blocking significant proportions of the local path
   utils::setPathCostsIfNotSet(data, costmap_ros_);
   std::vector<bool> & path_pts_valid = *data.path_pts_valid;
   float invalid_ctr = 0.0f;
-  const size_t check_pts = std::min(num_pts, path_pts_valid.size());
-  for (size_t i = 0; i < check_pts; i++) {
+  for (size_t i = 0; i < path_segments_count; i++) {
     if (!path_pts_valid[i]) {invalid_ctr += 1.0f;}
-  }
-  float check_pts_flt = static_cast<float>(check_pts);
-  if (check_pts_flt > 0.0f && invalid_ctr / check_pts_flt > max_path_occupancy_ratio_ &&
-    invalid_ctr > 2.0f)
-  {
-    auto node = parent_.lock();
-    if (node) {
-      RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
-        "[PAC] SKIP: path_occupancy %.1f%% > max %.1f%% (invalid=%d/%zu)",
-        100.0f * invalid_ctr / check_pts_flt, 100.0f * max_path_occupancy_ratio_,
-        static_cast<int>(invalid_ctr), check_pts);
+    if (invalid_ctr / path_segments_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f) {
+      auto node = parent_.lock();
+      if (node) {
+        RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
+          "[PAC] SKIP: path_occupancy %.1f%% > max %.1f%% (invalid=%d/%zu)",
+          100.0f * invalid_ctr / path_segments_flt, 100.0f * max_path_occupancy_ratio_,
+          static_cast<int>(invalid_ctr), path_segments_count);
+      }
+      return;
     }
-    return;
   }
 
   const size_t batch_size = data.trajectories.x.shape(0);
   auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
 
   // Find integrated distance in the path
-  std::vector<float> path_integrated_distances(num_pts, 0.0f);
-  std::vector<utils::Pose2D> path(num_pts);
+  std::vector<float> path_integrated_distances(path_segments_count, 0.0f);
+  std::vector<utils::Pose2D> path(path_segments_count);
   float dx = 0.0f, dy = 0.0f;
-  for (unsigned int i = 1; i != num_pts; i++) {
+  for (unsigned int i = 1; i != path_segments_count; i++) {
     auto & pose = path[i - 1];
     pose.x = data.path.x(i - 1);
     pose.y = data.path.y(i - 1);
@@ -217,10 +166,10 @@ void PathAlignCritic::score(CriticData & data)
   }
 
   // Finish populating the path vector
-  auto & final_pose = path[num_pts - 1];
-  final_pose.x = data.path.x(num_pts - 1);
-  final_pose.y = data.path.y(num_pts - 1);
-  final_pose.theta = data.path.yaws(num_pts - 1);
+  auto & final_pose = path[path_segments_count - 1];
+  final_pose.x = data.path.x(path_segments_count - 1);
+  final_pose.y = data.path.y(path_segments_count - 1);
+  final_pose.theta = data.path.yaws(path_segments_count - 1);
 
   float summed_path_dist = 0.0f, dyaw = 0.0f;
   unsigned int num_samples = 0u;
@@ -257,8 +206,9 @@ void PathAlignCritic::score(CriticData & data)
       path_pt = utils::findClosestPathPt(
         path_integrated_distances, traj_integrated_distance, path_pt);
 
-      const bool is_valid = (path_pt < path_pts_valid.size()) ? path_pts_valid[path_pt] : true;
-      if (is_valid) {
+      // The nearest path point to align to needs to be not in collision, else
+      // let the obstacle critic take over in this region due to dynamic obstacles
+      if (path_pts_valid[path_pt]) {
         const auto & pose = path[path_pt];
         dx = pose.x - Tx;
         dy = pose.y - Ty;
@@ -269,15 +219,6 @@ void PathAlignCritic::score(CriticData & data)
         } else {
           summed_path_dist += sqrtf(dx * dx + dy * dy);
         }
-      }
-
-      // Truncate rollout evaluation once trajectory reaches the end of the available path.
-      // Points beyond the endpoint are post-arrival dwell at the goal with zero path deviation.
-      if (path_integrated_distances.back() > 0.0f &&
-        traj_integrated_distance >= path_integrated_distances.back())
-      {
-        num_samples += (traj_sampled_size - 1 - p);
-        break;
       }
     }
     if (num_samples > 0u) {

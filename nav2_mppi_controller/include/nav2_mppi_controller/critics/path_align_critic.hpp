@@ -50,9 +50,11 @@ protected:
   float threshold_to_consider_{0};
   float max_path_occupancy_ratio_{0};
   bool use_path_orientations_{false};
-  float cusp_terminal_heading_weight_{0.0f};
   unsigned int power_{0};
   float weight_{0};
+  // Opt-in terminal yaw objective for a short, required intermediate segment.
+  // Unlike preview geometry, its target is always the last real cusp pose.
+  float cusp_terminal_heading_weight_{0};
 };
 
 }  // namespace mppi::critics

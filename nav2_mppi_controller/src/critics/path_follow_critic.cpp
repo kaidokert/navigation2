@@ -35,12 +35,20 @@ void PathFollowCritic::initialize()
 void PathFollowCritic::score(CriticData & data)
 {
   if (!enabled_ || data.path.x.shape(0) == 0 ||
-    utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal))
+    (data.active_cusp_direction == 0 &&
+    utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal)))
   {
     return;
   }
 
-  const size_t real_points = data.path.x.shape(0);
+  // Ghosts preserve rollout preview/orientation but are not planner destinations.
+  // Rewarding their endpoint pulls the robot past a real direction cusp, where
+  // inversion handoff still requires the original endpoint (office regression).
+  const size_t real_points = std::min(
+    data.real_path_point_count.value_or(data.path.x.shape(0)), data.path.x.shape(0));
+  if (real_points == 0) {
+    return;
+  }
   const size_t path_size = real_points - 1;
   size_t offseted_idx = 0;
 

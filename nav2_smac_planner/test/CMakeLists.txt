@@ -123,7 +123,28 @@ target_link_libraries(test_smoother
 
 #Test Lattice node
 ament_add_gtest(test_lattice_node test_nodelattice.cpp)
+foreach(office_native_test test_utils test_costmap_downsampler test_node2d
+    test_nodehybrid test_nodebasic test_collision_checker test_a_star
+    test_smac_hybrid test_smac_2d test_smac_lattice test_smoother test_lattice_node)
+  set_tests_properties(${office_native_test} PROPERTIES
+    LABELS "gtest;office_regression" TIMEOUT 120)
+endforeach()
 
 ament_target_dependencies(test_lattice_node ${dependencies})
 
 target_link_libraries(test_lattice_node ${library_name})
+
+# Recorded locked-grid start cases use this build's native collision checker.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(office_smac_start_probe ../../probe_smac_start.cpp)
+ament_target_dependencies(office_smac_start_probe ${dependencies})
+target_link_libraries(office_smac_start_probe ${library_name})
+
+add_test(NAME office_start_start_occupied_20261009_162545 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../test_smac_recorded_start.py --helper $<TARGET_FILE:office_smac_start_probe> --fixture ${CMAKE_CURRENT_SOURCE_DIR}/../../regressions/start_occupied_20261009_162545 --output ${CMAKE_CURRENT_BINARY_DIR}/office_regression_results/start_occupied_20261009_162545)
+set_tests_properties(office_start_start_occupied_20261009_162545 PROPERTIES LABELS "office_regression;recorded_reduction" TIMEOUT 60)
+
+add_test(NAME office_start_start_occupied_20261009_193627 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../test_smac_recorded_start.py --helper $<TARGET_FILE:office_smac_start_probe> --fixture ${CMAKE_CURRENT_SOURCE_DIR}/../../regressions/start_occupied_20261009_193627 --output ${CMAKE_CURRENT_BINARY_DIR}/office_regression_results/start_occupied_20261009_193627)
+set_tests_properties(office_start_start_occupied_20261009_193627 PROPERTIES LABELS "office_regression;recorded_reduction" TIMEOUT 60)
+
+add_test(NAME office_start_smac_start_heading_20261010_135807 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../test_smac_recorded_start.py --helper $<TARGET_FILE:office_smac_start_probe> --fixture ${CMAKE_CURRENT_SOURCE_DIR}/../../regressions/smac_start_heading_20261010_135807 --output ${CMAKE_CURRENT_BINARY_DIR}/office_regression_results/smac_start_heading_20261010_135807)
+set_tests_properties(office_start_smac_start_heading_20261010_135807 PROPERTIES LABELS "office_regression;recorded_reduction" TIMEOUT 60)

@@ -17,6 +17,9 @@
 
 #include <string>
 #include <memory>
+#include <mutex>
+#include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/float64.hpp"
 
 #include "nav2_mppi_controller/tools/path_handler.hpp"
 #include "nav2_mppi_controller/optimizer.hpp"
@@ -102,6 +105,9 @@ public:
   void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
 
 protected:
+  void receiveSteeringFeedback(sensor_msgs::msg::JointState::ConstSharedPtr message);
+  void receiveConditionedSteering(std_msgs::msg::Float64::ConstSharedPtr message);
+  void updateSteeringFeedback();
   /**
     * @brief Visualize trajectories
     * @param transformed_plan Transformed input plan
@@ -122,6 +128,14 @@ protected:
   TrajectoryVisualizer trajectory_visualizer_;
 
   bool visualize_;
+  bool reset_on_path_handoff_{false};
+  double steering_feedback_timeout_{0.3};
+  std::mutex steering_feedback_mutex_;
+  sensor_msgs::msg::JointState::ConstSharedPtr steering_feedback_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr steering_subscription_;
+  std::optional<float> conditioned_steering_;
+  std::optional<rclcpp::Time> conditioned_steering_receipt_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr conditioned_steering_subscription_;
 };
 
 }  // namespace nav2_mppi_controller

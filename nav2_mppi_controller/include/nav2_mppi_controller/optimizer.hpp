@@ -17,6 +17,9 @@
 
 #include <string>
 #include <memory>
+#include <optional>
+#include <utility>
+#include <cmath>
 
 // xtensor creates warnings that needs to be ignored as we are building with -Werror
 #pragma GCC diagnostic push
@@ -38,6 +41,7 @@
 #include "nav_msgs/msg/path.hpp"
 
 #include "nav2_mppi_controller/models/optimizer_settings.hpp"
+#include "nav2_mppi_controller/models/path_binding.hpp"
 #include "nav2_mppi_controller/motion_models.hpp"
 #include "nav2_mppi_controller/critic_manager.hpp"
 #include "nav2_mppi_controller/models/state.hpp"
@@ -61,6 +65,20 @@ public:
     * @brief Constructor for mppi::Optimizer
     */
   Optimizer() = default;
+
+  /** Bounded diagnostic departure forecast; never changes optimizer memory or emits controls. */
+  bool longCuspDepartureAvailable(
+    const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & speed,
+    const nav_msgs::msg::Path & outgoing, double xy_gate, double yaw_gate,
+    bool terminal_endpoint = false) const;
+
+  /** Check the actual final command during a retained reverse approach.
+   * Caller holds the costmap lock. Forecast only; never modifies controls.
+   */
+  bool retainedDepartureCommandSafe(
+    const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & speed,
+    const geometry_msgs::msg::Twist & command,
+    const geometry_msgs::msg::PoseStamped & cusp, double stop_margin) const;
 
   /**
    * @brief Destructor for mppi::Optimizer
@@ -94,6 +112,69 @@ public:
    * @brief Deactivate optimizer (deactivate critic manager publishers)
    */
   void on_deactivate();
+
+  /** Real path prefix, excluding virtual preview points, for position scoring. */
+  void setPathBinding(const std::optional<PathBinding> & binding)
+  {path_binding_required_=true;path_binding_=binding;}
+  void setRealPathPointCount(size_t count) {critics_data_.real_path_point_count = count;}
+  /** Effective internal gates supplied by the path handler, not final-goal tolerances. */
+  void setCuspTolerances(std::optional<std::pair<double, double>> gates)
+  {
+    if (gates && (!(gates->first > 0.0) || !(gates->second > 0.0) ||
+      !std::isfinite(gates->first) || !std::isfinite(gates->second)))
+    {
+      throw nav2_core::InvalidPath("Invalid effective internal cusp tolerances");
+    }
+    effective_cusp_tolerances_ = gates;
+  }
+  /** Request one optional mean initialization after an actual path handoff. */
+  void requestShortCuspSeed() {
+    clearCuspCompletion();
+    short_cusp_seed_requested_ = true;
+    long_entry_seed_requested_ = true;
+  }
+  void requestPlanEntrySeed() {
+    clearCuspCompletion();
+    if (initialize_long_cusp_entry_) {short_cusp_seed_requested_ = true;}
+  }
+  /** Unpruned active cusp segment gear; zero for an unconstrained final goal. */
+  /** Keep final segment gear separate from active-cusp critic metadata. */
+  void setPathDirection(int direction) {path_direction_ = direction;}
+
+  void setActiveCuspDirection(int direction)
+  {
+    if (direction != active_cusp_direction_ || direction == 0) {clearCuspCompletion();}
+    active_cusp_direction_ = direction;
+    critics_data_.active_cusp_direction = direction;
+    if (direction == 0) {effective_cusp_tolerances_.reset();}
+  }
+
+  bool requiresSteeringFeedback() const
+  {
+    auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    return model && model->predictsSteeringConditioning();
+  }
+
+  void setInitialSteering(const std::optional<float> & angle)
+  {
+    auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    // Controller refresh provisionally clears then reinstalls both measurements.
+    // Validate the completed refresh in prepare/final emission, not midway through it.
+    if (model) {model->setInitialSteering(angle);}
+  }
+
+  bool requiresConditionedSteering() const
+  {
+    auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    return model && model->requiresConditionedSteering();
+  }
+
+  void setInitialConditionedSteering(const std::optional<float> & angle)
+  {
+    auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    if (model) {model->setInitialConditionedSteering(angle);}
+  }
+
 
   /**
    * @brief Compute control using MPPI algorithm
@@ -133,33 +214,10 @@ public:
    */
   void reset(bool reset_dynamic_speed_limits = true);
 
-  void setActiveCuspDirection(int direction)
-  {
-    active_cusp_direction_ = direction;
-    critics_data_.active_cusp_direction = direction;
-  }
-
-  int getActiveCuspDirection() const
-  {
-    return active_cusp_direction_;
-  }
-
-  void setRealPathPointCount(std::optional<size_t> count)
-  {
-    critics_data_.real_path_point_count = count;
-  }
-
-  std::optional<size_t> getRealPathPointCount() const
-  {
-    return critics_data_.real_path_point_count;
-  }
-
-  const CriticData & getCriticData() const
-  {
-    return critics_data_;
-  }
-
 protected:
+  std::optional<std::pair<double, double>> effective_cusp_tolerances_;
+  std::pair<double, double> cuspTolerances() const;
+  std::string serializedCuspTolerances() const;
   /**
    * @brief Main function to generate, score, and return trajectories
    */
@@ -200,6 +258,10 @@ protected:
    * from the last cycle's optimal control
    */
   void generateNoisedTrajectories();
+
+  // Keep bounded short-cusp sampling and mean controls in the same gear domain.
+  int shortCuspControlDirection() const;
+  void constrainShortCuspSampleDirections();
 
   /**
    * @brief Apply hard vehicle constraints on control sequence
@@ -249,6 +311,9 @@ protected:
    */
   void updateControlSequence(bool diag = false);
 
+  /// Experimental conditioning on the gear of real path geometry; default off.
+  bool conditionControlExponents(xt::xtensor<float, 1> & exponents);
+
   /**
    * @brief Convert control sequence to a twist commant
    * @param stamp Timestamp to use
@@ -256,6 +321,11 @@ protected:
    */
   geometry_msgs::msg::TwistStamped
   getControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
+    geometry_msgs::msg::TwistStamped getControlFromSequenceAsTwist(
+      const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start);
+  geometry_msgs::msg::TwistStamped getControlFromSequenceAsTwist(
+    const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start,
+    const models::ControlSequence * before_filter);
 
   /**
    * @brief Whether the motion model is holonomic
@@ -274,6 +344,72 @@ protected:
    * @param fail Whether the system failed to recover from
    */
   bool fallback(bool fail);
+  bool fallback(bool fail, const models::ControlSequence * warm_start);
+
+  /// Optional diagnostic isolation of the existing control-sequence filter.
+  void smoothControlSequence();
+
+  /// Screen finite arc means with the same native predictor, critics and grid.
+  bool initializeShortCuspMean();
+  bool initializeLongCuspPrefixMean();
+
+  /// Opt-in check of the actual constrained mean, after optimization/filtering.
+  void enforceShortCuspMeanFeasibility();
+    void enforceShortCuspMeanFeasibility(const models::ControlSequence * warm_start);
+  bool shortCuspSequenceFeasible() const;
+  bool cuspSequenceFeasible(const models::ControlSequence & sequence) const;
+  bool actualCuspStreamFeasible(const models::ControlSequence & sequence) const;
+  void enforceGentleCuspEmission();
+  bool gentle_short_cusp_required_{false};
+  void clearCuspCompletion() {
+    gentle_short_cusp_required_ = false;
+    clearLongEntryCertificate();
+    cusp_completion_.reset();
+    cusp_completion_attempted_ = false;
+    cusp_completion_shifts_ = 0;
+  }
+  // Separate local-entry proof: never uses the distant path endpoint.
+  struct LongEntryCertificate {
+    models::ControlSequence controls;
+    geometry_msgs::msg::Pose target;
+    double anchor_x{0}, anchor_y{0}, edge{0};
+    std::pair<double,double> gates;
+    std::string frame;
+    int64_t stamp_ns{0}, last_stamp_ns{0};
+    uint64_t epoch{0};
+    size_t shifts{0};
+    std::shared_ptr<const nav_msgs::msg::Path> canonical_plan;
+    uint64_t plan_generation{0}, segment_generation{0};
+    size_t source_id{0};
+    geometry_msgs::msg::Pose canonical_anchor;
+
+  };
+  void clearLongEntryCertificate() {
+    long_entry_.reset();long_entry_required_=false;long_entry_seed_requested_=false;
+    ++long_entry_epoch_;
+  }
+  bool initializeLongEntryCertificate();
+  bool validateLongEntrySequence(models::ControlSequence & sequence,
+    size_t & first_hit, bool select_target = false);
+  void enforceLongEntryCertificate(bool allow_optimized);
+  bool longEntryStateValid() const;
+  bool refreshLongEntryBinding();
+  bool longEntryIdentityValid() const;
+  bool pathBindingValid() const;
+  bool longEntryMeasuredAligned() const;
+  std::optional<PathBinding> path_binding_;
+  bool path_binding_required_{false};
+  std::optional<LongEntryCertificate> long_entry_;
+  bool long_entry_required_{false};
+  bool long_entry_seed_requested_{false};
+  uint64_t long_entry_epoch_{0};
+  bool tryExtendedShortCuspContinuation(bool initialize);
+  bool extend_short_cusp_completion_{false};
+  bool cusp_completion_attempted_{false};
+  std::optional<models::ControlSequence> cusp_completion_;
+  size_t cusp_completion_shifts_{0};
+  bool controlSequenceCollisionFree() const;
+  void preserveFilteredCollisionFeasibility(const models::ControlSequence * before_filter);
 
 protected:
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_;
@@ -301,10 +437,22 @@ protected:
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,
     costs_, settings_.model_dt, false, nullptr, nullptr,
-    std::nullopt, std::nullopt, std::nullopt, 0};  /// Caution, keep references
+    std::nullopt, std::nullopt};  /// Caution, keep references
 
-  int active_cusp_direction_{0};
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
+  bool smooth_control_sequence_{true};
+  bool condition_control_on_path_direction_{false};
+  bool allow_path_direction_braking_{false};
+  int active_cusp_direction_{0};
+  int path_direction_{0};
+  bool condition_terminal_path_direction_{false};
+  bool seed_short_cusp_on_handoff_{false};
+  bool short_cusp_seed_requested_{false};
+  bool preserve_short_cusp_feasibility_{false};
+  bool initialize_long_cusp_entry_{false};
+  bool repair_long_cusp_warm_start_{false};
+  bool preserve_filtered_collision_feasibility_{false};
+  bool retain_collision_free_long_path_sample_{false};
 };
 
 }  // namespace mppi

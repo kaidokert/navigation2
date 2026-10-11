@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "gtest/gtest.h"
+#include "settled_costmap.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_mppi_controller/motion_models.hpp"
@@ -61,7 +62,7 @@ TEST(CriticTests, ConstraintsCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -132,7 +133,7 @@ TEST(CriticTests, ConstraintsCritic)
 
 TEST(CriticTests, ObstacleCriticMisalignedParams) {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   auto getParam = param_handler.getParamGetter("critic");
@@ -152,7 +153,7 @@ TEST(CriticTests, ObstacleCriticMisalignedParams) {
 
 TEST(CriticTests, ObstacleCriticAlignedParams) {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   auto getParam = param_handler.getParamGetter("critic");
@@ -171,7 +172,7 @@ TEST(CriticTests, ObstacleCriticAlignedParams) {
 TEST(CriticTests, CostCriticMisAlignedParams) {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -191,7 +192,7 @@ TEST(CriticTests, CostCriticMisAlignedParams) {
 TEST(CriticTests, CostCriticAlignedParams) {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -209,7 +210,7 @@ TEST(CriticTests, GoalAngleCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -259,11 +260,53 @@ TEST(CriticTests, GoalAngleCritic)
   EXPECT_NEAR(costs(0), 9.42, 0.02);  // (3.14 - 0.0) * 3.0 weight
 }
 
+TEST(CriticTests, GoalAngleFinalSegmentOnly)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  node->declare_parameter("critic.final_segment_only", true);
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state;
+  models::Trajectories trajectories;
+  trajectories.reset(2, 3);
+  models::Path path;
+  path.reset(1);
+  path.x(0) = .03;
+  path.yaws(0) = -.30657;
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = .03;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float dt = .05;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  GoalAngleCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  for (int direction : {-1, 1}) {
+    data.active_cusp_direction = direction;
+    critic.score(data);
+    EXPECT_FLOAT_EQ(costs(0), 0.0f);
+    EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  }
+  data.active_cusp_direction = 0;
+  // Same endpoint position, but only one rollout aligns its heading.
+  xt::view(trajectories.yaws, 1, xt::all()) = -.30657f;
+  critic.score(data);
+  EXPECT_NEAR(costs(0), .91971f, 1e-5);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-5);
+  costs.fill(0.0f);
+  path.reset(0);
+  EXPECT_NO_THROW(critic.score(data));
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+}
+
 TEST(CriticTests, GoalAngleSymmetricCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -314,7 +357,7 @@ TEST(CriticTests, GoalCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -366,7 +409,7 @@ TEST(CriticTests, PathAngleCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -484,7 +527,7 @@ TEST(CriticTests, PreferForwardCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -540,7 +583,7 @@ TEST(CriticTests, TwirlingCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -593,17 +636,19 @@ TEST(CriticTests, TwirlingCritic)
   EXPECT_NEAR(costs(0), 100.0, 1e-6);  // (mean(10.0) * 10.0 weight
   costs = xt::zeros<float>({1000});
 
-  // Now try again with some wiggling noise
-  traj_view = xt::random::randn<float>({30}, 0.0, 0.5);
+  // Equal positive/negative yaw rates have zero signed mean but nonzero
+  // twirling cost: mean absolute rate .5 times weight 10 is exactly 5.
+  for (size_t i = 0; i < 30; ++i) {traj_view(i) = i % 2 == 0 ? 0.5f : -0.5f;}
   critic.score(data);
-  EXPECT_NEAR(costs(0), 3.3, 4e-1);  // (mean of noise with mu=0, sigma=0.5 * 10.0 weight
+  EXPECT_NEAR(costs(0), 5.0, 1e-6);
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 5.0, 1e-6);
 }
 
 TEST(CriticTests, PathFollowCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -650,11 +695,108 @@ TEST(CriticTests, PathFollowCritic)
   EXPECT_NEAR(xt::sum(costs, immediate)(), 750.0, 1e-2);  // 0.15 * 5 weight * 1000
 }
 
+TEST(CriticTests, PathFollowSingletonRetainsActiveEndpointCost)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("singleton_test");
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "singleton_costmap", "", "singleton_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state;
+  state.reset(2, 3);
+  models::Trajectories trajectories;
+  trajectories.reset(2, 3);
+  models::Path path;
+  path.reset(1);
+  path.x(0) = 0.2f;
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 5.0;  // A later global goal must not replace this endpoint.
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  PathFollowCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  trajectories.x(0, 2) = 0.2f;
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 1.0f, 1e-6);  // 5 * 0.2 m, despite one remaining point.
+  EXPECT_FALSE(data.furthest_reached_path_point.has_value());
+  EXPECT_FALSE(data.path_pts_valid.has_value());
+
+  costs.fill(0.0f);
+  trajectories.x(1, 2) = 0.1f;
+  critic.score(data);
+  EXPECT_NEAR(costs(1), 0.5f, 1e-6);  // Progress toward that point lowers cost.
+
+  costs.fill(0.0f);
+  state.pose.pose.position.x = goal.position.x;
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs)(), 0.0f, 1e-6);  // Existing near-goal gate retained.
+
+  state.pose.pose.position.x = 0.0;
+  path.reset(0);
+  critic.score(data);
+  EXPECT_NEAR(xt::sum(costs)(), 0.0f, 1e-6);  // Empty paths remain safe.
+}
+
+TEST(CriticTests, PathFollowDoesNotRewardGhostOvershootAtCusp)
+{
+  // Recorded office control: one real endpoint plus four 5cm ghost points.
+  // Stopping at the actual cusp must beat continuing 20cm past the reversal.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ghost_endpoint_test");
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "ghost_endpoint_costmap", "", "ghost_endpoint_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state;
+  state.reset(2, 3);
+  models::Trajectories trajectories;
+  trajectories.reset(2, 3);
+  models::Path path;
+  path.reset(5);
+  for (size_t i = 0; i < 5; ++i) {path.x(i) = 0.05f * i;}
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 5.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.real_path_point_count = 1;
+  trajectories.x(0, 2) = 0.0f;  // Physical cusp.
+  trajectories.x(1, 2) = 0.2f;  // Ghost endpoint past the cusp.
+  PathFollowCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  critic.score(data);
+  EXPECT_LT(costs(0), costs(1));
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 1.0f, 1e-6);
+
+  // A longer real prefix clamps to its own endpoint, not to the ghost tail.
+  costs.fill(0.0f);
+  data.real_path_point_count = 3;
+  trajectories.x(0, 2) = 0.1f;
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 0.5f, 1e-6);
+
+  // Ordinary paths without metadata retain their previous endpoint objective.
+  costs.fill(0.0f);
+  data.real_path_point_count.reset();
+  trajectories.x(0, 2) = 0.0f;
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 1.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-6);
+}
+
 TEST(CriticTests, PathAlignCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -763,7 +905,7 @@ TEST(CriticTests, PathAlignCritic)
 TEST(CriticTests, PathAlignCriticShortPath)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -840,8 +982,7 @@ TEST(CriticTests, PathAlignCriticShortPath)
   critic.score(data);
   EXPECT_GT(xt::sum(costs, immediate)(), 0.0);
 
-  // 5. N = 20, lookahead = 1 (normal path startup:
-  // verify non-terminal short-path behavior is preserved)
+  // 5. N = 20, lookahead = 1 (normal path startup -> verify non-terminal short-path behavior is preserved)
   path.reset(20);
   for (unsigned int i = 0; i < 20; ++i) {
     path.x(i) = static_cast<float>(i) * 0.1f;
@@ -855,88 +996,149 @@ TEST(CriticTests, PathAlignCriticShortPath)
   EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
 }
 
-TEST(CriticTests, PathAlignCriticTerminalSingletonAlignment)
+TEST(CriticTests, PathAlignPreviewGhostsDoNotHideShortRealSegment)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("preview_align_node");
+  node->declare_parameter("critic.offset_from_furthest", 3);
   node->declare_parameter("critic.use_path_orientations", true);
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
-    "dummy_costmap", "", "dummy_costmap", true);
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "preview_costmap", "", "preview_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
   costmap_ros->on_configure(lstate);
-
   models::State state;
-  state.reset(2, 30);
-  models::ControlSequence control_sequence;
-  models::Trajectories generated_trajectories;
-  generated_trajectories.reset(2, 30);
+  state.reset(2, 12);
+  models::Trajectories trajectories;
+  trajectories.reset(2, 12);
+  trajectories.x.fill(0.0f);
+  trajectories.y.fill(0.0f);
+  trajectories.yaws.fill(0.0f);
+  for (size_t i = 0; i < 12; ++i) {
+    trajectories.yaws(1, i) = 0.4f;
+  }
   models::Path path;
-  path.reset(1);
-  path.x(0) = 1.0;
-  path.y(0) = 0.0;
-  path.yaws(0) = 1.5707963f;
-
+  path.reset(7);
+  for (size_t i = 0; i < 7; ++i) {
+    path.x(i) = static_cast<float>(i) * 0.01f;
+    path.y(i) = 0.0f;
+    path.yaws(i) = 0.0f;
+  }
   geometry_msgs::msg::Pose goal;
-  goal.position.x = 1.0;
-  goal.position.y = 0.0;
-  // Goal yaw = pi/2 (1.5707963 rad)
-  goal.orientation.z = 0.7071068;
-  goal.orientation.w = 0.7071068;
-
+  goal.position.x = 5.0;
   xt::xtensor<float, 1> costs = xt::zeros<float>({2});
-  float model_dt = 0.1;
-  CriticData data =
-  {state, generated_trajectories, path, goal, costs, model_dt,
+  float dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
     false, nullptr, nullptr, std::nullopt, std::nullopt};
-  data.motion_model = std::make_shared<DiffDriveMotionModel>();
-  TestGoalChecker goal_checker;
-  data.goal_checker = &goal_checker;
-
+  data.real_path_point_count = 3;
+  data.furthest_reached_path_point = 1;
   PathAlignCritic critic;
   critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
-
-  // 1. Achievable alignment vs Misaligned:
-  // Trajectory 0 achieves alignment with goal (yaw = pi/2 across horizon)
-  // Trajectory 1 remains misaligned (yaw = 0 across horizon)
-  for (unsigned int t = 0; t < 30; ++t) {
-    generated_trajectories.yaws(0, t) = 1.5707963f;
-    generated_trajectories.yaws(1, t) = 0.0f;
-  }
   critic.score(data);
+  EXPECT_GT(costs(1), costs(0)) << "preview ghosts disabled short-segment yaw guidance";
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 4.0f, 1e-5);
 
-  // Trajectory 0 must have zero heading error cost
-  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
-  // Trajectory 1 must have positive heading error cost (~1.57 * weight)
-  EXPECT_GT(costs(1), 10.0f);
-
-  // 2. Approach requiring repositioning:
-  // Robot state is at (0.85, 0.0) — inside threshold_to_consider (0.25m from goal)
-  // Verify heading alignment is actively evaluated inside threshold_to_consider!
-  state.pose.pose.position.x = 0.85;
-  state.pose.pose.position.y = 0.0;
-  costs = xt::zeros<float>({2});
+  // Preserve the ordinary long-path startup bearing gate without short-path metadata.
+  data.real_path_point_count.reset();
+  costs.fill(0.0f);
   critic.score(data);
-  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
-  EXPECT_GT(costs(1), 10.0f);
-
-  // 3. Already-satisfied goal:
-  // Robot pose already at goal with correct heading, and staying at goal
-  state.pose.pose.position.x = 1.0;
-  state.pose.pose.position.y = 0.0;
-  state.pose.pose.orientation = goal.orientation;
-  generated_trajectories.yaws = 1.5707963f * xt::ones<float>({2, 30});
-  costs = xt::zeros<float>({2});
-  critic.score(data);
-  EXPECT_NEAR(costs(0), 0.0f, 1e-4f);
-  EXPECT_NEAR(costs(1), 0.0f, 1e-4f);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-6);
 }
 
+TEST(CriticTests, PathAlignShortRealEndpointKeepsYawCostAtZeroProgress)
+{
+  // Office first-cusp stall: pruning leaves one real endpoint and preview ghosts,
+  // while stationary rollouts report furthest=0. Heading guidance must survive.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("zero_progress_align");
+  node->declare_parameter("critic.offset_from_furthest", 3);
+  node->declare_parameter("critic.use_path_orientations", true);
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "zero_progress_costmap", "", "zero_progress_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state; state.reset(2, 12);
+  models::Trajectories trajectories; trajectories.reset(2, 12);
+  trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
+  for (size_t i = 0; i < 12; ++i) {trajectories.yaws(1, i) = 0.4f;}
+  models::Path path; path.reset(5);
+  for (size_t i = 0; i < 5; ++i) {
+    path.x(i) = static_cast<float>(i) * 0.05f;
+    path.y(i) = 0.0f; path.yaws(i) = 0.0f;
+  }
+  geometry_msgs::msg::Pose goal; goal.position.x = 5.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.real_path_point_count = 1; data.furthest_reached_path_point = 0;
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+  EXPECT_NEAR(costs(1), 4.0f, 1e-5) << "stationary endpoint lost its orientation cost";
+  // The normal long-path startup gate remains unchanged.
+  data.real_path_point_count.reset(); costs.fill(0.0f); critic.score(data);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-6);
+}
+
+TEST(CriticTests, ShortCuspTerminalHeadingRejectsWrongYawStopAndPreservesFinalGoal)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("cusp_terminal_heading");
+  node->declare_parameter("critic.cost_weight", 0.0);
+  node->declare_parameter("critic.cusp_terminal_heading_weight", 30.0);
+  auto cm = std::make_shared<SettledTestCostmap>(
+    "cusp_terminal_heading_costmap", "", "cusp_terminal_heading_costmap", true);
+  ParametersHandler params(node);
+  rclcpp_lifecycle::State lstate; cm->on_configure(lstate);
+  models::State state; state.reset(2, 12);
+  models::Trajectories trajectories; trajectories.reset(2, 12);
+  trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(-0.7f);
+  trajectories.yaws(1, 11) = -0.63f;
+  models::Path path; path.reset(9);
+  for (size_t i = 0; i < 9; ++i) {
+    path.x(i) = 0.05f * i; path.y(i) = 0.0f; path.yaws(i) = 1.5f;
+  }
+  path.yaws(1) = -0.7f;  // Real cusp; ghosts deliberately point elsewhere.
+  geometry_msgs::msg::Pose goal; goal.position.x = 5.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.real_path_point_count = 2; data.furthest_reached_path_point = 0;
+  PathAlignCritic critic; critic.on_configure(node, "mppi", "critic", cm, &params);
+  for (int gear : {-1, 1}) {
+    data.active_cusp_direction = gear; costs.fill(0.0f); critic.score(data);
+    EXPECT_NEAR(costs(0), 0.0f, 1e-5);
+    EXPECT_NEAR(costs(1), 2.1f, 1e-5);
+  }
+  // Reduced 174419 counterfactual: the averaged costs prefer an exact-position
+  // stop with 0.0693rad yaw error over a gate-reaching arc at 0.03956rad.
+  // Reproduce that ranking, then require the explicit terminal objective to
+  // reverse it. This tests cost ranking, not physical trajectory generation.
+  trajectories.yaws(0, 11) = -0.7f + 0.069298267f;
+  trajectories.yaws(1, 11) = -0.7f + 0.039562702f;
+  node->declare_parameter("baseline.cost_weight", 0.0);
+  PathAlignCritic baseline;
+  baseline.on_configure(node, "mppi", "baseline", cm, &params);
+  costs(0) = 1.260418415f; costs(1) = 1.469377041f;
+  baseline.score(data);
+  EXPECT_LT(costs(0), costs(1)) << "Default scoring should retain the negative control";
+  costs(0) = 1.260418415f; costs(1) = 1.469377041f;
+  critic.score(data);
+  EXPECT_LT(costs(1), costs(0)) << "Wrong-yaw positional stop still wins";
+  data.active_cusp_direction = 0; costs.fill(0.0f); critic.score(data);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-5) << "Final goal behavior changed";
+  data.active_cusp_direction = -1; data.real_path_point_count = 5;
+  costs.fill(0.0f); critic.score(data);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-5) << "Long approach was pulled toward a distant cusp";
+  data.real_path_point_count.reset(); costs.fill(0.0f); critic.score(data);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-5) << "Missing real-prefix metadata enabled the objective";
+}
 
 TEST(CriticTests, VelocityDeadbandCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   auto getParam = param_handler.getParamGetter("critic");
@@ -986,7 +1188,7 @@ TEST(CriticTests, ApproachAngleCritic)
 {
   // Standard preamble
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State lstate;
@@ -1049,90 +1251,6 @@ TEST(CriticTests, ApproachAngleCritic)
   EXPECT_GT(costs(1), costs_at_03);
 }
 
-TEST(CriticTests, ObstaclesCriticFullRolloutCollision)
-{
-  // Verifies that ObstaclesCritic unconditionally evaluates every sampled pose
-  // across the full rollout horizon. Post-goal obstacles are NOT bypassed by
-  // goal proximity: a trajectory penetrating into a lethal obstacle past the goal
-  // is reliably flagged in collision, while a trajectory that cleanly arrests at
-  // the goal remains collision-free.
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
-    "dummy_costmap", "", "dummy_costmap", true);
-  ParametersHandler param_handler(node);
-  auto getParam = param_handler.getParamGetter("critic");
-  bool consider_footprint;
-  getParam(consider_footprint, "consider_footprint", false);
-
-  rclcpp_lifecycle::State lstate;
-  costmap_ros->on_configure(lstate);
-
-  // Lethal wall at x = 2.0m, beyond the goal at (1.5, 0)
-  auto * cm = costmap_ros->getCostmap();
-  unsigned int mx, my;
-  for (double y = -1.0; y <= 1.0; y += 0.05) {
-    if (cm->worldToMap(2.0, y, mx, my)) {
-      cm->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
-    }
-  }
-
-  models::State state;
-  state.pose.pose.position.x = 1.0;
-  models::Trajectories generated_trajectories;
-  generated_trajectories.reset(2, 30);
-
-  // Trajectory 0: Decelerates and stops cleanly at the goal (x = 1.5m, never reaches wall at 2.0m)
-  for (unsigned int t = 0; t < 30; ++t) {
-    double progress = std::min(1.5, 1.0 + 0.05 * static_cast<double>(t));
-    generated_trajectories.x(0, t) = progress;
-    generated_trajectories.y(0, t) = 0.0;
-  }
-
-  // Trajectory 1: Penetrates through the goal into the lethal wall at x = 2.0m
-  // (progresses to 2.45m)
-  for (unsigned int t = 0; t < 30; ++t) {
-    generated_trajectories.x(1, t) = 1.0 + 0.05 * static_cast<double>(t);
-    generated_trajectories.y(1, t) = 0.0;
-  }
-
-  models::Path path;
-  path.reset(10);
-  geometry_msgs::msg::Pose goal;
-  goal.position.x = 1.5;
-  goal.orientation.w = 1.0;
-  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
-  float model_dt = 0.1;
-  CriticData data =
-  {state, generated_trajectories, path, goal, costs, model_dt,
-    false, nullptr, nullptr, std::nullopt, std::nullopt};
-  data.motion_model = std::make_shared<DiffDriveMotionModel>();
-
-  ObstaclesCritic critic;
-  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
-
-  critic.score(data);
-
-  // Trajectory 0 (stopping cleanly at goal before wall) must NOT collide
-  EXPECT_NEAR(costs(0), 0.0f, 1e-4f) <<
-    "trajectory cleanly stopping at goal falsely flagged in collision";
-
-  // Trajectory 1 (penetrating into lethal wall) MUST be flagged in collision
-  EXPECT_GT(costs(1), 1e6f) <<
-    "trajectory penetrating into post-goal lethal obstacle failed to trigger collision cost";
-  EXPECT_FALSE(data.fail_flag) <<
-    "fail_flag should be false when at least one trajectory is collision-free";
-
-  // When ALL trajectories collide, fail_flag MUST be set to true
-  for (unsigned int t = 0; t < 30; ++t) {
-    generated_trajectories.x(0, t) = generated_trajectories.x(1, t);
-  }
-  costs = xt::zeros<float>({2});
-  data.fail_flag = false;
-  critic.score(data);
-  EXPECT_TRUE(data.fail_flag) <<
-    "fail_flag was not set when all trajectories collide with obstacle";
-}
-
 class FootprintThresholdWitness : public ObstaclesCritic
 {
 public:
@@ -1141,11 +1259,14 @@ public:
 
 TEST(CriticTests, HardFootprintVetoBelowInflationThreshold)
 {
+  // Run222626, filter capture1660.95, filtered forecast step31. Three
+  // recorded cells isolate the raster corner/center-threshold disagreement.
+  // This is a frozen scoring reduction, not proof of a live escape trajectory.
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("raster_footprint");
   node->declare_parameter("critic.consider_footprint", false);
   node->declare_parameter("critic.collision_check_footprint_only", true);
   node->declare_parameter("critic.repulsion_weight", 0.0);
-  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto cm = std::make_shared<SettledTestCostmap>(
     "raster_footprint_map", "", "raster_footprint_map", true);
   cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{"inflation_layer"}));
   cm->declare_parameter("inflation_layer.plugin", std::string("nav2_costmap_2d::InflationLayer"));
@@ -1207,10 +1328,11 @@ TEST(CriticTests, HardFootprintVetoBelowInflationThreshold)
 
 TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
 {
+  // Office correction: rear reference is free while a front corner touches a wall.
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("hard_footprint");
   node->declare_parameter("critic.consider_footprint", false);
   node->declare_parameter("critic.collision_check_footprint_only", true);
-  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+  auto cm = std::make_shared<SettledTestCostmap>(
     "hard_footprint_map", "", "hard_footprint_map", true);
   cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   cm->set_parameter(rclcpp::Parameter("footprint", std::string(
@@ -1229,9 +1351,7 @@ TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
   models::State state; state.reset(2, 10);
   models::Trajectories trajectories; trajectories.reset(2, 10);
   trajectories.x.fill(0.0); trajectories.y.fill(1.0); trajectories.yaws.fill(0.0);
-  for (size_t t = 0; t < 10; ++t) {
-    trajectories.x(0, t) = 1.0;
-                                                              }
+  for (size_t t = 0; t < 10; ++t) {trajectories.x(0, t) = 1.0;}
   models::Path path; path.reset(2);
   geometry_msgs::msg::Pose goal; goal.position.x = 100.0;
   xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05;
@@ -1244,6 +1364,18 @@ TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
   EXPECT_GT(costs(0), 1000.0);
   EXPECT_FLOAT_EQ(costs(1), 0.0);
   EXPECT_FALSE(data.fail_flag);  // The second rollout remains clear.
+  // Same footprint collision with a free reference point inside the goal
+  // truncation radius: proximity must not bypass the physical corner veto.
+  node->set_parameter(rclcpp::Parameter("critic.goal_truncation_distance", 0.22));
+  ObstaclesCritic near_goal;
+  near_goal.on_configure(node, "mppi", "critic", cm, &handler);
+  goal.position.x = 1.15; goal.position.y = 1.0;
+  costs.fill(0.0); data.fail_flag = false;
+  near_goal.score(data);
+  EXPECT_GT(costs(0), 1000.0);
+  EXPECT_FLOAT_EQ(costs(1), 0.0);
+  EXPECT_FALSE(data.fail_flag);
+  goal.position.x = 100.0;
   node->set_parameter(rclcpp::Parameter("critic.collision_check_footprint_only", false));
   ObstaclesCritic point;
   point.on_configure(node, "mppi", "critic", cm, &handler);
@@ -1252,76 +1384,295 @@ TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
   cm->on_cleanup(lifecycle);
 }
 
-TEST(CriticTests, PathAlignCriticIntermediateCuspAlignment)
+class NearGoalCollisionReduction : public ::testing::Test
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("test_node_intermediate_cusp");
+protected:
+  void SetUp() override
+  {
+    node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("near_goal_collision");
+    node->declare_parameter("critic.consider_footprint", false);
+    node->declare_parameter("critic.goal_truncation_distance", 0.22);
+    cm = std::make_shared<SettledTestCostmap>(
+      "near_goal_map", "", "near_goal_map", true);
+    cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+    cm->on_configure(lifecycle);
+    cm->getLayeredCostmap()->resizeMap(80, 80, 0.05, -1.0, -1.0);
+    std::fill(cm->getCostmap()->getCharMap(), cm->getCostmap()->getCharMap() + 6400, 0);
+    handler = std::make_unique<ParametersHandler>(node);
+    critic.on_configure(node, "mppi", "critic", cm, handler.get());
+  }
+  void TearDown() override {cm->on_cleanup(lifecycle);}
+  void lethal(double x, double y)
+  {
+    unsigned int mx, my;
+    ASSERT_TRUE(cm->getCostmap()->worldToMap(x, y, mx, my));
+    cm->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+  }
+  void score(const std::vector<float> & xs, bool expect_collision, int cusp = 0)
+  {
+    models::State state; state.reset(2, xs.size());
+    models::Trajectories trajectories; trajectories.reset(2, xs.size());
+    trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
+    for (size_t j = 0; j < xs.size(); ++j) {
+      trajectories.x(0, j) = xs[j];
+      trajectories.x(1, j) = xs[j];
+      trajectories.y(1, j) = 0.50f;  // Clear positive control outside truncation radius.
+    }
+    models::Path path; path.reset(3);
+    geometry_msgs::msg::Pose goal; goal.position.x = 1.0; goal.orientation.w = 1.0;
+    xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05;
+    CriticData data{state, trajectories, path, goal, costs, dt,
+      false, nullptr, nullptr, std::nullopt, std::nullopt};
+    data.active_cusp_direction = cusp;
+    critic.score(data);
+    if (expect_collision) {EXPECT_GT(costs(0), 1000.0f);} else {EXPECT_FLOAT_EQ(costs(0), 0.0f);}
+    EXPECT_FLOAT_EQ(costs(1), 0.0f);
+    EXPECT_FALSE(data.fail_flag);  // Mixed batch: a clear alternative exists.
+    if (expect_collision) {
+      for (size_t j = 0; j < xs.size(); ++j) {trajectories.y(1, j) = 0.0f;}
+      costs.fill(0.0f);
+      critic.score(data);
+      EXPECT_TRUE(data.fail_flag);  // All-colliding batch must request fallback.
+    }
+  }
+  std::shared_ptr<rclcpp_lifecycle::LifecycleNode> node;
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> cm;
+  rclcpp_lifecycle::State lifecycle;
+  std::unique_ptr<ParametersHandler> handler;
+  ObstaclesCritic critic;
+};
+
+TEST_F(NearGoalCollisionReduction, LethalInitialPoseInsideGoalRadiusIsNotIgnored)
+{
+  lethal(0.875, 0.0);
+  score({0.875f, 0.9375f, 1.0f}, true);
+}
+
+TEST_F(NearGoalCollisionReduction, LethalFirstEntryInsideGoalRadiusIsNotIgnored)
+{
+  lethal(0.875, 0.0);
+  score({0.60f, 0.875f, 1.0f}, true);
+}
+
+TEST_F(NearGoalCollisionReduction, InitialFreePoseInsideRadiusDoesNotHideImmediateCollision)
+{
+  // Binary-exact sample coordinates avoid an unrelated float/double cell-edge
+  // discrepancy between setting the grid and evaluating the float rollout.
+  lethal(0.9375, 0.0);
+  score({0.8125f, 0.9375f, 1.0f}, true);
+}
+
+TEST_F(NearGoalCollisionReduction, IntermediateCuspNearGlobalGoalDoesNotTruncateCollisionChecks)
+{
+  lethal(1.3125, 0.0);
+  score({0.60f, 0.875f, 1.3125f}, true, -1);
+  score({0.60f, 0.875f, 1.3125f}, true, 1);
+}
+
+TEST_F(NearGoalCollisionReduction, ClearTerminalEntryRetainsPostGoalWallTruncation)
+{
+  lethal(1.3125, 0.0);
+  score({0.60f, 0.875f, 1.3125f}, false);
+  score({0.60f, 0.875f, 1.0f}, false);
+}
+
+TEST(CriticTests, TerminalStubRanksArrivalAboveStoppedAndOvershotForBothGears)
+{
+  // Reduction of the reported 3-point/7.5cm terminal stall. This tests the real
+  // critic ranking, not whole-controller convergence or a braking guarantee.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stub_ranking");
+  node->declare_parameter("critic.threshold_to_consider", 0.0);
+  auto cm = std::make_shared<SettledTestCostmap>(
+    "terminal_stub_map", "", "terminal_stub_map", true);
+  rclcpp_lifecycle::State lifecycle; cm->on_configure(lifecycle);
+  ParametersHandler handler(node);
+  PathFollowCritic critic; critic.on_configure(node, "mppi", "critic", cm, &handler);
+  for (int gear : {-1, 1}) {
+    for (size_t points : {1u, 2u, 3u}) {
+      models::State state; state.reset(3, 41);
+      models::Trajectories trajectories; trajectories.reset(3, 41);
+      trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
+      for (size_t j = 0; j < 41; ++j) {
+        trajectories.x(1, j) = gear * 0.075f * j / 40.0f;
+        trajectories.x(2, j) = gear * 0.150f * j / 40.0f;
+      }
+      models::Path path; path.reset(points);
+      for (size_t j = 0; j < points; ++j) {
+        path.x(j) = gear * 0.075f * (j + 1) / points;
+        path.y(j) = 0.0f; path.yaws(j) = 0.0f;
+      }
+      geometry_msgs::msg::Pose goal; goal.position.x = gear * 0.075;
+      xt::xtensor<float, 1> costs = xt::zeros<float>({3}); float dt = 0.05;
+      CriticData data{state, trajectories, path, goal, costs, dt,
+        false, nullptr, nullptr, std::nullopt, std::nullopt};
+      critic.score(data);
+      EXPECT_NEAR(costs(1), 0.0f, 1e-6);
+      EXPECT_GT(costs(0), costs(1) + 0.3f);  // Stopped short must lose.
+      EXPECT_GT(costs(2), costs(1) + 0.3f);  // Overshoot must also lose.
+      EXPECT_NEAR(costs(0), costs(2), 1e-5);
+    }
+  }
+  cm->on_cleanup(lifecycle);
+}
+
+TEST(CriticTests, ObstaclesCriticGoalTruncation)
+{
+  // M6 regression (notes/cusp_handoff_fix_plan.md, 2026-09-25): rollout tails
+  // extend ~2s PAST the goal; when the goal sits near a wall, every
+  // progress-making sample "collides" beyond it and the optimizer parks at a
+  // standoff (critics_stats showed ObstaclesCritic 0 -> 5e10 at the brake
+  // moment). Points past the goal are fantasy — the executed robot stops.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<SettledTestCostmap>(
+    "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
+  auto getParam = param_handler.getParamGetter("critic");
+  bool consider_footprint;
+  getParam(consider_footprint, "consider_footprint", false);
+  double trunc;
+  getParam(trunc, "goal_truncation_distance", 0.3);
 
-  node->declare_parameter("critic.threshold_to_consider", 1.0f);
-  node->declare_parameter("critic.use_path_orientations", true);
-  node->declare_parameter("critic.offset_from_furthest", 0);
-  node->declare_parameter("critic.cusp_terminal_heading_weight", 30.0f);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
 
-  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
-    "costmap_for_path_align_intermediate_cusp", "", "costmap_for_path_align_intermediate_cusp",
-    true);
-  rclcpp_lifecycle::State state_lifecycle;
-  costmap_ros->on_configure(state_lifecycle);
-
-  models::State state;
-  state.reset(2, 10);
-  state.pose.pose.position.x = 0.1;  // Within 1.0m of goal (0,0)
-  state.pose.pose.position.y = 0.0;
-
-  models::Trajectories generated_trajectories;
-  generated_trajectories.reset(2, 10);
-  // Trajectory 0: terminal yaw aligned with path cusp (yaw = 0.0)
-  generated_trajectories.x.fill(0.0);
-  generated_trajectories.y.fill(0.0);
-  generated_trajectories.yaws.fill(0.0);
-
-  // Trajectory 1: terminal yaw misaligned with path cusp (yaw = M_PI_2)
-  for (unsigned int t = 0; t < 10; ++t) {
-    generated_trajectories.yaws(1, t) = static_cast<float>(M_PI_2);
+  // Lethal wall at x = 2.0m, beyond the goal at (1.5, 0)
+  auto * cm = costmap_ros->getCostmap();
+  unsigned int mx, my;
+  for (double y = -1.0; y <= 1.0; y += 0.05) {
+    if (cm->worldToMap(2.0, y, mx, my)) {
+      cm->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
   }
 
+  models::State state;
+  state.pose.pose.position.x = 1.0;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(50, 30);
+  // One straight line from x=1.0 through the goal at 1.5 into the wall at 2.0
+  for (unsigned int i = 0; i != 50; i++) {
+    for (unsigned int t = 0; t != 30; t++) {
+      generated_trajectories.x(i, t) = 1.0 + 0.05 * static_cast<double>(t);
+      generated_trajectories.y(i, t) = 0.0;
+    }
+  }
   models::Path path;
-  path.reset(3);
-  path.x(0) = 0.0; path.y(0) = 0.0; path.yaws(0) = 0.0;
-  path.x(1) = 0.05; path.y(1) = 0.0; path.yaws(1) = 0.0;
-  path.x(2) = 0.10; path.y(2) = 0.0; path.yaws(2) = 0.0;
-
+  path.reset(10);
   geometry_msgs::msg::Pose goal;
-  goal.position.x = 0.0;  // Robot is within threshold_to_consider (1.0m) of this goal
-  goal.position.y = 0.0;
-
-  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
-  float model_dt = 0.05f;
-
+  goal.position.x = 1.5;
+  goal.orientation.w = 1.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({50});
+  float model_dt = 0.1;
   CriticData data =
   {state, generated_trajectories, path, goal, costs, model_dt,
     false, nullptr, nullptr, std::nullopt, std::nullopt};
   data.motion_model = std::make_shared<DiffDriveMotionModel>();
 
-  PathAlignCritic critic;
+  ObstaclesCritic critic;
   critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
 
-  // Case 1: active_cusp_direction == 0 (final goal approach)
-  // Inside threshold_to_consider, PathAlignCritic skips scoring so goal critic can take over.
-  data.active_cusp_direction = 0;
   critic.score(data);
-  EXPECT_FLOAT_EQ(costs(0), 0.0f);
-  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  // With goal truncation, the post-goal wall must not veto the trajectory
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6) <<
+    "post-goal obstacle vetoed a trajectory that stops at the goal";
+  EXPECT_FALSE(data.fail_flag);
+}
 
-  // Case 2: active_cusp_direction == 1 (intermediate forward cusp segment)
-  // Even though within threshold_to_consider of the final goal, critic MUST NOT skip!
-  // And cusp_terminal_heading_weight penalizes yaw error on trajectory 1.
-  costs.fill(0.0f);
-  data.active_cusp_direction = 1;
-  data.real_path_point_count = 3;
-  critic.score(data);
-  EXPECT_GT(costs(1), costs(0));
-  EXPECT_GT(costs(1), 20.0f);  // 30.0 * M_PI_2 ~= 47.1
+TEST(CriticTests, IntermediateCuspKeepsPathCostsNearFinalGoal)
+{
+  // A turnaround ends near its start, but its intermediate cusp is still ahead.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("cusp_near_goal");
+  node->declare_parameter("align.use_path_orientations", true);
+  node->declare_parameter("align.offset_from_furthest", 3);
+  auto cm = std::make_shared<SettledTestCostmap>(
+    "cusp_costmap", "", "cusp_costmap", true);
+  ParametersHandler handler(node);
+  rclcpp_lifecycle::State lstate;
+  cm->on_configure(lstate);
+  models::State state; state.reset(2, 12);
+  models::Trajectories trajectories; trajectories.reset(2, 12);
+  trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
+  for (size_t i = 0; i < 12; ++i) {trajectories.yaws(1, i) = 0.4f;}
+  models::Path path; path.reset(5);
+  geometry_msgs::msg::Pose goal; goal.position.x = 0.008;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.real_path_point_count = 1; data.furthest_reached_path_point = 0;
+  PathAlignCritic align;
+  align.on_configure(node, "mppi", "align", cm, &handler);
+  PathFollowCritic follow;
+  follow.on_configure(node, "mppi", "follow", cm, &handler);
+  for (int gear : {-1, 1}) {
+    for (size_t i = 0; i < 5; ++i) {
+      path.x(i) = gear * (0.15f + static_cast<float>(i) * 0.05f);
+      path.y(i) = 0.0f; path.yaws(i) = 0.0f;
+    }
+    data.active_cusp_direction = gear;
+    data.path_pts_valid = std::vector<bool>(5, true);
+    costs.fill(0.0f); align.score(data);
+    EXPECT_NEAR(costs(0), 1.5f, 1e-5);
+    EXPECT_NEAR(costs(1), 10.0f * std::sqrt(0.15f * 0.15f + 0.4f * 0.4f), 1e-5)
+      << "active cusp lost yaw guidance";
+    trajectories.x.fill(0.0f);
+    trajectories.x(1, 11) = gear * 0.10f;
+    costs.fill(0.0f); follow.score(data);
+    EXPECT_NEAR(costs(0), 0.75f, 1e-5);
+    EXPECT_NEAR(costs(1), 0.25f, 1e-5) << "active cusp lost endpoint guidance";
+    // Final approach retains existing proximity suppression for both critics.
+    data.active_cusp_direction = 0;
+    costs.fill(0.0f); align.score(data); follow.score(data);
+    EXPECT_NEAR(costs(0), 0.0f, 1e-6); EXPECT_NEAR(costs(1), 0.0f, 1e-6);
+    trajectories.x.fill(0.0f);
+  }
+}
 
-  costmap_ros->on_cleanup(state_lifecycle);
+TEST(CriticTests, PathAlignActiveCuspRetainsCurvedRealReferenceBeforeOffset)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("cusp_start_align");
+  node->declare_parameter("critic.offset_from_furthest", 3);
+  node->declare_parameter("critic.trajectory_point_step", 1);
+  node->declare_parameter("critic.use_path_orientations", true);
+  auto cm = std::make_shared<SettledTestCostmap>(
+    "cusp_start_map", "", "cusp_start_map", true);
+  ParametersHandler params(node);
+  rclcpp_lifecycle::State lifecycle; cm->on_configure(lifecycle);
+  PathAlignCritic critic; critic.on_configure(node, "mppi", "critic", cm, &params);
+  for (int gear : {1, -1}) {
+    SCOPED_TRACE(gear);
+    models::State state; state.reset(2, 7);
+    models::Trajectories trajectories; trajectories.reset(2, 7);
+    models::Path path; path.reset(11);
+    for (size_t k = 0; k < 7; ++k) {
+      const float angle = static_cast<float>(k) * 0.1f;
+      path.x(k) = gear * 0.55f * std::sin(angle);
+      path.y(k) = gear * 0.55f * (std::cos(angle) - 1.0f);
+      path.yaws(k) = -angle;
+      for (size_t b = 0; b < 2; ++b) {
+        trajectories.x(b, k) = path.x(k); trajectories.y(b, k) = path.y(k);
+        trajectories.yaws(b, k) = b == 0 ? path.yaws(k) : 0.0f;
+      }
+    }
+    for (size_t k = 7; k < 11; ++k) {
+      path.x(k) = 5.0f; path.y(k) = -5.0f; path.yaws(k) = 2.0f;
+    }
+    geometry_msgs::msg::Pose goal; goal.position.x = 10.0;
+    xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05f;
+    CriticData data = {state, trajectories, path, goal, costs, dt,
+      false, nullptr, nullptr, std::nullopt, std::nullopt};
+    data.real_path_point_count = 7; data.furthest_reached_path_point = 1;
+    data.path_pts_valid = std::vector<bool>(11, true);
+    data.active_cusp_direction = gear;
+    critic.score(data);
+    EXPECT_NEAR(costs(0), 0.0f, 1e-5) << "exact curved reference must not be penalized";
+    EXPECT_GT(costs(1), costs(0) + 0.1f) << "startup gate discarded required cusp heading";
+    const auto reference_costs = costs;
+    for (size_t k = 7; k < 11; ++k) {
+      path.x(k) = -20.0f; path.y(k) = 20.0f; path.yaws(k) = -2.0f;
+    }
+    costs.fill(0.0f); critic.score(data);
+    EXPECT_EQ(costs, reference_costs) << "preview ghosts changed the active real reference";
+    data.active_cusp_direction = 0; costs.fill(0.0f); critic.score(data);
+    EXPECT_NEAR(costs(1), 0.0f, 1e-6) << "ordinary startup bearing policy changed";
+  }
+  cm->on_cleanup(lifecycle);
 }

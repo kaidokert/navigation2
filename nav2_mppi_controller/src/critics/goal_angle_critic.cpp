@@ -26,6 +26,7 @@ void GoalAngleCritic::initialize()
 
   getParam(threshold_to_consider_, "threshold_to_consider", 0.5f);
   getParam(symmetric_yaw_tolerance_, "symmetric_yaw_tolerance", false);
+  getParam(final_segment_only_, "final_segment_only", false);
 
   RCLCPP_INFO(
     logger_,
@@ -36,7 +37,12 @@ void GoalAngleCritic::initialize()
 
 void GoalAngleCritic::score(CriticData & data)
 {
-  if (!enabled_ || !utils::withinPositionGoalTolerance(
+  // A short multi-cusp plan can pass near its final goal before the final
+  // segment. Proximity alone must not activate terminal guidance there.
+  // Opt-in preserves existing users which intentionally score cusp headings.
+  if (!enabled_ || data.path.x.size() == 0 ||
+    (final_segment_only_ && data.active_cusp_direction != 0) ||
+    !utils::withinPositionGoalTolerance(
       threshold_to_consider_, data.state.pose.pose, data.goal))
   {
     return;

@@ -155,12 +155,25 @@ void ObstaclesCritic::score(CriticData & data)
     repulsive_cost[i] = 0.0f;
 
     for (size_t j = 0; j < traj_len; j++) {
+      // Check the initial and entry footprint before any terminal truncation.
+      // Near-goal proximity cannot turn a lethal sample into a valid rollout.
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
       if (inCollision(pose_cost.cost)) {
         trajectory_collide = true;
         break;
       }
-
+      if (j > 0 && data.active_cusp_direction == 0 && goal_truncation_distance_ > 0.0f) {
+        // Only a collision-free entry on the final segment may truncate its
+        // post-goal tail. A nearby global goal is not an intermediate cusp's
+        // stopping target. This heuristic does not certify physical braking.
+        const float dxg = traj.x(i, j) - static_cast<float>(data.goal.position.x);
+        const float dyg = traj.y(i, j) - static_cast<float>(data.goal.position.y);
+        if (dxg * dxg + dyg * dyg <
+          goal_truncation_distance_ * goal_truncation_distance_)
+        {
+          break;
+        }
+      }
       if (pose_cost.cost < 1.0f) {continue;}  // In free space
 
       // Cannot process repulsion if inflation layer does not exist
