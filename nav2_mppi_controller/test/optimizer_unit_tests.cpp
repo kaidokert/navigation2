@@ -1971,6 +1971,47 @@ public:
       EXPECT_NEAR(command.twist.linear.x, 0.1086f, 1e-6f);
     }
   }
+
+  void testMotorDeadbandFloor()
+  {
+    motor_deadband_floor_ = 0.050f;
+    motor_deadband_terminal_radius_ = 0.06f;
+
+    // 1. Cusp forward intent floored
+    active_cusp_direction_ = 1;
+    control_sequence_.vx.fill(0.010f);
+    control_sequence_.wz.fill(0.0f);
+    auto cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_GE(cmd.twist.linear.x, 0.050f);
+
+    // 2. Cusp reverse intent floored
+    active_cusp_direction_ = -1;
+    control_sequence_.vx.fill(-0.010f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_LE(cmd.twist.linear.x, -0.050f);
+
+    // 3. Final segment outside terminal radius floored
+    active_cusp_direction_ = 0;
+    path_direction_ = 1;
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    goal_.position.x = 0.15;
+    goal_.position.y = 0.0;
+    control_sequence_.vx.fill(0.015f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_GE(cmd.twist.linear.x, 0.050f);
+
+    // 4. Final segment inside terminal radius -> floor released to decelerate/stop
+    state_.pose.pose.position.x = 0.12;
+    state_.pose.pose.position.y = 0.0;
+    goal_.position.x = 0.15; // 3 cm away <= 6 cm radius
+    control_sequence_.vx.fill(0.015f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
+  }
 };
 
 TEST(OptimizerTests, ExitCuspContinuationPreservesHorizonAndNeverRestartsDelay)
@@ -3185,3 +3226,24 @@ TEST(OptimizerTests, RecordedBlockedForwardEntryRetainsClearHoldAndRejectsCorner
   optimizer.initialize(node,"mppi",cm,&parameters);optimizer.testRecordedBlockedForwardEntry();
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
+
+TEST(OptimizerTests, motorDeadbandFloorTests)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("deadband_test_node");
+  OptimizerTester optimizer_tester;
+  node->declare_parameter("controller_frequency", rclcpp::ParameterValue(20.0));
+  node->declare_parameter("mppic.batch_size", rclcpp::ParameterValue(100));
+  node->declare_parameter("mppic.time_steps", rclcpp::ParameterValue(20));
+  node->declare_parameter("mppic.vx_max", rclcpp::ParameterValue(1.0));
+  node->declare_parameter("mppic.vx_min", rclcpp::ParameterValue(-1.0));
+  node->declare_parameter("mppic.wz_max", rclcpp::ParameterValue(2.0));
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  optimizer_tester.initialize(node, "mppic", costmap_ros, &param_handler);
+
+  optimizer_tester.testMotorDeadbandFloor();
+}
+

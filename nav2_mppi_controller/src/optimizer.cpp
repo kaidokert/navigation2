@@ -183,6 +183,8 @@ void Optimizer::getParams()
     throw nav2_core::ControllerException(
             "preserve_short_cusp_feasibility requires seed_short_cusp_on_handoff");
   }
+  getParam(motor_deadband_floor_, "motor_deadband_floor", 0.0f);
+  getParam(motor_deadband_terminal_radius_, "motor_deadband_terminal_radius", 0.06f);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -3022,6 +3024,39 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
 
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
+
+  if (motor_deadband_floor_ > 0.0f) {
+    if (active_cusp_direction_ != 0) {
+      if (std::abs(vx) > 1e-4f) {
+        if (vx > 0.0f) {
+          vx = std::max(vx, motor_deadband_floor_);
+        } else if (vx < 0.0f) {
+          vx = std::min(vx, -motor_deadband_floor_);
+        }
+      } else {
+        const float sign = (active_cusp_direction_ > 0) ? 1.0f : -1.0f;
+        vx = sign * motor_deadband_floor_;
+      }
+    } else {
+      const float dist_to_goal = std::hypot(
+        state_.pose.pose.position.x - goal_.position.x,
+        state_.pose.pose.position.y - goal_.position.y);
+      if (dist_to_goal > motor_deadband_terminal_radius_) {
+        if (std::abs(vx) > 1e-4f) {
+          if (vx > 0.0f) {
+            vx = std::max(vx, motor_deadband_floor_);
+          } else if (vx < 0.0f) {
+            vx = std::min(vx, -motor_deadband_floor_);
+          }
+        } else if (path_direction_ != 0) {
+          const float sign = (path_direction_ > 0) ? 1.0f : -1.0f;
+          vx = sign * motor_deadband_floor_;
+        }
+      }
+    }
+  }
+
+  control_sequence_.vx(offset) = vx;
 
   // Filter history must contain the command actually sent, not the
   // unconstrained filtered value that was recorded before this projection.
