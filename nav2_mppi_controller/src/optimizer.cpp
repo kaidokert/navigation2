@@ -164,6 +164,10 @@ void Optimizer::reset(bool reset_dynamic_speed_limits)
   noise_generator_.reset(settings_, isHolonomic());
   motion_model_->initialize(settings_.constraints, settings_.model_dt);
 
+  active_cusp_direction_ = 0;
+  critics_data_.active_cusp_direction = 0;
+  critics_data_.real_path_point_count = std::nullopt;
+
   RCLCPP_INFO(logger_, "Optimizer reset");
 }
 

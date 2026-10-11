@@ -133,6 +133,32 @@ public:
    */
   void reset(bool reset_dynamic_speed_limits = true);
 
+  void setActiveCuspDirection(int direction)
+  {
+    active_cusp_direction_ = direction;
+    critics_data_.active_cusp_direction = direction;
+  }
+
+  int getActiveCuspDirection() const
+  {
+    return active_cusp_direction_;
+  }
+
+  void setRealPathPointCount(std::optional<size_t> count)
+  {
+    critics_data_.real_path_point_count = count;
+  }
+
+  std::optional<size_t> getRealPathPointCount() const
+  {
+    return critics_data_.real_path_point_count;
+  }
+
+  const CriticData & getCriticData() const
+  {
+    return critics_data_;
+  }
+
 protected:
   /**
    * @brief Main function to generate, score, and return trajectories
@@ -275,8 +301,9 @@ protected:
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,
     costs_, settings_.model_dt, false, nullptr, nullptr,
-    std::nullopt, std::nullopt};  /// Caution, keep references
+    std::nullopt, std::nullopt, std::nullopt, 0};  /// Caution, keep references
 
+  int active_cusp_direction_{0};
   rclcpp::Logger logger_{rclcpp::get_logger("MPPIController")};
 };
 

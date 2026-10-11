@@ -23,6 +23,7 @@ foreach(name IN LISTS TEST_NAMES)
 
   target_link_libraries(${name}
     mppi_controller
+    mppi_critics
   )
 
   if(${TEST_DEBUG_INFO})

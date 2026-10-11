@@ -25,6 +25,7 @@ void ObstaclesCritic::initialize()
 {
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(consider_footprint_, "consider_footprint", false);
+  getParam(collision_check_footprint_only_, "collision_check_footprint_only", false);
   getParam(power_, "cost_power", 1);
   getParam(repulsion_weight_, "repulsion_weight", 1.5f);
   getParam(critical_weight_, "critical_weight", 20.0f);
@@ -36,6 +37,11 @@ void ObstaclesCritic::initialize()
 
   collision_checker_.setCostmap(costmap_);
   possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
+
+  if (collision_check_footprint_only_ && costmap_ros_->getUseRadius()) {
+    throw nav2_core::ControllerException(
+      "Hard footprint collision checking requires a configured robot footprint.");
+  }
 
   if (possible_collision_cost_ < 1.0f) {
     RCLCPP_ERROR(
@@ -124,7 +130,7 @@ void ObstaclesCritic::score(CriticData & data)
     return;
   }
 
-  if (consider_footprint_) {
+  if (consider_footprint_ || collision_check_footprint_only_) {
     // footprint may have changed since initialization if user has dynamic footprints
     possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
   }
@@ -232,12 +238,24 @@ CollisionCost ObstaclesCritic::costAtPose(float x, float y, float theta)
   }
   cost = collision_checker_.pointCost(x_i, y_i);
 
-  if (consider_footprint_ &&
-    (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f))
+  // The continuous circumscribed-radius threshold is not conservative for
+  // rasterized footprint edges. A corner can visit a lethal cell while the
+  // reference cell is one inflation-cost bin below that threshold. Hard-only
+  // checking must agree with the unconditional final-output footprint guard.
+  if (collision_check_footprint_only_ || (consider_footprint_ &&
+    (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f)))
   {
-    cost = static_cast<float>(collision_checker_.footprintCostAtPose(
+    const float footprint_cost = static_cast<float>(collision_checker_.footprintCostAtPose(
         x, y, theta, costmap_ros_->getRobotFootprint()));
-    collision_cost.using_footprint = true;
+    // Full-footprint soft scoring remains unchanged. In hard-only mode, preserve
+    // the existing point cost unless the perimeter is lethal or outside the map.
+    // An inscribed inflation cost on the perimeter is not a physical collision.
+    if (consider_footprint_ || footprint_cost == nav2_costmap_2d::LETHAL_OBSTACLE ||
+      footprint_cost == nav2_costmap_2d::NO_INFORMATION)
+    {
+      cost = footprint_cost;
+      collision_cost.using_footprint = true;
+    }
   }
 
   return collision_cost;

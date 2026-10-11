@@ -95,6 +95,9 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
     RCLCPP_INFO(logger_, "[MPPI] Handoff cleared previous gear control history");
   }
 
+  optimizer_.setRealPathPointCount(path_handler_.getRealPathPointCount());
+  optimizer_.setActiveCuspDirection(path_handler_.getActiveCuspDirection());
+
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*(costmap->getMutex()));
 

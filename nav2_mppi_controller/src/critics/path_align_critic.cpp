@@ -29,10 +29,12 @@ void PathAlignCritic::initialize()
   getParam(max_path_occupancy_ratio_, "max_path_occupancy_ratio", 0.07f);
   getParam(offset_from_furthest_, "offset_from_furthest", 20);
   getParam(trajectory_point_step_, "trajectory_point_step", 4);
-  getParam(
-    threshold_to_consider_,
-    "threshold_to_consider", 0.5f);
+  getParam(threshold_to_consider_, "threshold_to_consider", 0.5f);
   getParam(use_path_orientations_, "use_path_orientations", false);
+  getParam(cusp_terminal_heading_weight_, "cusp_terminal_heading_weight", 0.0f);
+  if (cusp_terminal_heading_weight_ < 0.0f) {
+    throw std::invalid_argument("Cusp terminal heading weight must be nonnegative");
+  }
 
   RCLCPP_INFO(
     logger_,
@@ -53,7 +55,8 @@ void PathAlignCritic::score(CriticData & data)
 
   // If the robot is already within the goal checker's position AND yaw tolerances,
   // do not penalize residual yaw error — let the robot decelerate cleanly to a stop.
-  if (data.goal_checker) {
+  // Final-goal proximity must not disable a required intermediate cusp.
+  if (data.active_cusp_direction == 0 && data.goal_checker) {
     geometry_msgs::msg::Pose pose_tolerance;
     geometry_msgs::msg::Twist velocity_tolerance;
     if (data.goal_checker->getTolerances(pose_tolerance, velocity_tolerance)) {
@@ -77,6 +80,22 @@ void PathAlignCritic::score(CriticData & data)
         }
       }
     }
+  }
+
+  // Averaged tracking cost can prefer an exact-position, wrong-yaw stop over
+  // the transient motion needed to satisfy an intermediate cusp. Apply this
+  // separate terminal objective only to a short real prefix. A distant cusp
+  // must not pull the heading through intervening path curvature; final goals
+  // keep their existing goal critic. Default zero preserves previous scoring.
+  const size_t real_cusp_pts = std::min(
+    data.real_path_point_count.value_or(data.path.yaws.size()), data.path.yaws.size());
+  if (cusp_terminal_heading_weight_ > 0.0f && data.active_cusp_direction != 0 &&
+    real_cusp_pts > 0 && real_cusp_pts <= 4 && data.trajectories.yaws.shape(1) > 0)
+  {
+    auto error = xt::fabs(utils::shortest_angular_distance(
+      xt::view(data.trajectories.yaws, xt::all(), -1),
+      data.path.yaws(real_cusp_pts - 1)));
+    data.costs += cusp_terminal_heading_weight_ * error;
   }
 
   if (total_path_pts == 1) {
@@ -107,8 +126,8 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
-  // Don't apply close to goal, let the goal critics take over
-  if (utils::withinPositionGoalTolerance(
+  // Don't apply close to goal, let the goal critics take over (final segment only)
+  if (data.active_cusp_direction == 0 && utils::withinPositionGoalTolerance(
       threshold_to_consider_, data.state.pose.pose, data.goal))
   {
     auto node = parent_.lock();
@@ -124,6 +143,11 @@ void PathAlignCritic::score(CriticData & data)
   const size_t total_segments = total_path_pts - 1;
   size_t path_segments_count =
     std::min(*data.furthest_reached_path_point, total_segments);
+
+  const bool active_real_cusp = (data.active_cusp_direction != 0 && real_cusp_pts > 0);
+  if (active_real_cusp) {
+    path_segments_count = real_cusp_pts;
+  }
 
   const bool short_segment = (total_path_pts <= 4);
   if (path_segments_count == 0) {
@@ -161,7 +185,9 @@ void PathAlignCritic::score(CriticData & data)
     if (!path_pts_valid[i]) {invalid_ctr += 1.0f;}
   }
   float check_pts_flt = static_cast<float>(check_pts);
-  if (check_pts_flt > 0.0f && invalid_ctr / check_pts_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f) {
+  if (check_pts_flt > 0.0f && invalid_ctr / check_pts_flt > max_path_occupancy_ratio_ &&
+    invalid_ctr > 2.0f)
+  {
     auto node = parent_.lock();
     if (node) {
       RCLCPP_DEBUG_THROTTLE(logger_, *node->get_clock(), 1000,
@@ -248,7 +274,7 @@ void PathAlignCritic::score(CriticData & data)
       // Truncate rollout evaluation once trajectory reaches the end of the available path.
       // Points beyond the endpoint are post-arrival dwell at the goal with zero path deviation.
       if (path_integrated_distances.back() > 0.0f &&
-          traj_integrated_distance >= path_integrated_distances.back())
+        traj_integrated_distance >= path_integrated_distances.back())
       {
         num_samples += (traj_sampled_size - 1 - p);
         break;

@@ -21,6 +21,7 @@
 #include <utility>
 #include <string>
 #include <memory>
+#include <limits>
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "tf2_ros/buffer.h"
@@ -92,6 +93,21 @@ public:
 
   /** Whether the latest successful transform advanced across a direction cusp. */
   bool didHandoff() const {return did_handoff_;}
+
+  /** Number of real transformed poses before any ghost extension. */
+  size_t getRealPathPointCount() const {return real_path_point_count_;}
+
+  /**
+   * Direction cached before pruning, only while an intermediate direction cusp
+   * remains active (0 on final segment).
+   */
+  int getActiveCuspDirection() const
+  {
+    if (!enforce_path_inversion_ || inversion_locale_ == 0u) {
+      return 0;
+    }
+    return is_current_segment_reverse_ ? -1 : 1;
+  }
 
   /**
    * @brief Get the global goal pose transformed to the local frame
@@ -244,7 +260,7 @@ protected:
   double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
   int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
                                                 // <=0 DISABLES escape (default: off until the
-                                                // oscillation latch is implemented — review 2026-09-25)
+                                                // oscillation latch is done - review 2026-09-25)
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
@@ -258,6 +274,7 @@ protected:
   // computeVelocityCommands() on the controller server's single thread.
   double current_segment_length_{std::numeric_limits<double>::infinity()};
   bool is_current_segment_reverse_{false};
+  size_t real_path_point_count_{0u};
 };
 }  // namespace mppi
 

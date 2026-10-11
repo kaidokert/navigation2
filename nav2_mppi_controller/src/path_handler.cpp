@@ -202,6 +202,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
   }
 
+  real_path_point_count_ = transformed_plan.poses.size();
   const double real_tgp_length = static_cast<double>(utils::pathLength(transformed_plan));
   double tgp_length = real_tgp_length;
   double cusp_dist = std::numeric_limits<double>::infinity();
@@ -260,39 +261,41 @@ nav_msgs::msg::Path PathHandler::transformPath(
     // appended == 0 (escape direction blocked by cost): fall through to the
     // normal ghost branch below (review finding 8).
   }
-  if (!escape_handled && shouldUseGhostPath(
-      transformed_plan, global_pose, real_tgp_length, cusp_dist,
-      ghost_heading))
-  {
-    // Cap ghost extension proportional to remaining segment length.
-    // For micro-segments (e.g. 11cm), extending by ghost_max_extension_ (70cm)
-    // overwhelms the actual maneuver — MPPI commits to a long trajectory in the
-    // wrong direction.  Instead, extend by at most the real TGP length (doubling
-    // the visible path) with a floor of ghost_point_spacing_ * 4 so even a fully
-    // consumed segment gets a minimal gradient signal.
-    const double proportional_ext = std::max(
-      ghost_point_spacing_ * 4.0,
-      std::min(real_tgp_length, ghost_max_extension_));
-    const double target_total_length = std::min(
-      min_inversion_horizon_,
-      real_tgp_length + proportional_ext);
-    const size_t appended = appendGhostPath(
-      transformed_plan, ghost_heading, target_total_length, tgp_length);
-    if (appended > 0) {
-      RCLCPP_INFO(logger_,
-        "[GHOST_PATH] appended %zu pts heading=%.3frad(%.0fdeg) "
-        "real=%.4fm total=%.4fm cusp=%.4fm",
-        appended, ghost_heading, ghost_heading * 180.0 / M_PI,
-        real_tgp_length, tgp_length, cusp_dist);
+  if (!escape_handled) {
+    if (shouldUseGhostPath(
+        transformed_plan, global_pose, real_tgp_length, cusp_dist,
+        ghost_heading))
+    {
+      // Cap ghost extension proportional to remaining segment length.
+      // For micro-segments (e.g. 11cm), extending by ghost_max_extension_ (70cm)
+      // overwhelms the actual maneuver — MPPI commits to a long trajectory in the
+      // wrong direction.  Instead, extend by at most the real TGP length (doubling
+      // the visible path) with a floor of ghost_point_spacing_ * 4 so even a fully
+      // consumed segment gets a minimal gradient signal.
+      const double proportional_ext = std::max(
+        ghost_point_spacing_ * 4.0,
+        std::min(real_tgp_length, ghost_max_extension_));
+      const double target_total_length = std::min(
+        min_inversion_horizon_,
+        real_tgp_length + proportional_ext);
+      const size_t appended = appendGhostPath(
+        transformed_plan, ghost_heading, target_total_length, tgp_length);
+      if (appended > 0) {
+        RCLCPP_INFO(
+          logger_,
+          "[GHOST_PATH] appended %zu pts heading=%.3frad(%.0fdeg) "
+          "real=%.4fm total=%.4fm cusp=%.4fm",
+          appended, ghost_heading, ghost_heading * 180.0 / M_PI,
+          real_tgp_length, tgp_length, cusp_dist);
+      }
+    } else if (real_tgp_length < min_inversion_horizon_ && inversion_locale_ != 0u) {
+      // Log WHY ghost didn't fire when TGP is short
+      cusp_dist = getCuspDistance(global_pose);
+      RCLCPP_INFO_THROTTLE(
+        logger_, *clock_, 500,
+        "[GHOST_SKIP] tgp=%.4fm pts=%zu inv=%u cusp=%.3fm",
+        real_tgp_length, transformed_plan.poses.size(), inversion_locale_, cusp_dist);
     }
-  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_ &&
-    inversion_locale_ != 0u)
-  {
-    // Log WHY ghost didn't fire when TGP is short
-    cusp_dist = getCuspDistance(global_pose);
-    RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
-      "[GHOST_SKIP] tgp=%.4fm pts=%zu inv=%u cusp=%.3fm",
-      real_tgp_length, transformed_plan.poses.size(), inversion_locale_, cusp_dist);
   }
 
   if (transformed_plan.poses.empty()) {
@@ -462,9 +465,9 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  const double nose_heading = is_current_segment_reverse_
-    ? angles::normalize_angle(heading + M_PI)
-    : heading;
+  const double nose_heading = is_current_segment_reverse_ ?
+    angles::normalize_angle(heading + M_PI) :
+    heading;
   next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(nose_heading);
 
   while (appended_length + 1e-4 < requested_extension) {
@@ -601,9 +604,9 @@ bool PathHandler::isWithinInversionTolerances(
   // alignment on a 4cm segment overconstrains the Ackermann controller.
   const bool is_micro_cusp =
     current_segment_length_ < micro_cusp_length_threshold_;
-  const double effective_yaw_tol = is_micro_cusp
-    ? inversion_yaw_tolerance_ * micro_cusp_yaw_scale_
-    : inversion_yaw_tolerance_;
+  const double effective_yaw_tol = is_micro_cusp ?
+    inversion_yaw_tolerance_ * micro_cusp_yaw_scale_ :
+    inversion_yaw_tolerance_;
 
   // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
   // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
@@ -620,10 +623,17 @@ bool PathHandler::isWithinInversionTolerances(
       effective_yaw_tol +
       handoff_yaw_relax_per_cycle_ * static_cast<double>(handoff_blocked_cycles_)));
 
-  bool result = distance <= inversion_xy_tolerance_ &&
-         std::fabs(angle_distance) <= relaxed_yaw_tol;
+  // A fixed handoff radius can encompass an entire short segment, consuming
+  // its cusp before any of the required motion takes place. Restrict that
+  // radius to half the original segment length (cached before pruning).
+  // Longer segments retain the configured gate.
+  const double effective_xy_tol = std::min<double>(
+    inversion_xy_tolerance_, 0.5 * current_segment_length_);
 
-  if (!result && distance <= inversion_xy_tolerance_) {
+  bool result = distance <= effective_xy_tol &&
+    std::fabs(angle_distance) <= relaxed_yaw_tol;
+
+  if (!result && distance <= effective_xy_tol) {
     ++handoff_blocked_cycles_;
     // clock_ is only set by initialize(); guard so the tolerance check stays
     // callable on a bare PathHandler (unit tests construct it without a node —
@@ -632,7 +642,7 @@ bool PathHandler::isWithinInversionTolerances(
       RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
         "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) "
         "seg_len=%.3fm blocked=%u",
-        distance, inversion_xy_tolerance_,
+        distance, effective_xy_tol,
         std::fabs(angle_distance), relaxed_yaw_tol,
         is_micro_cusp ? " MICRO" : "",
         current_segment_length_, handoff_blocked_cycles_);

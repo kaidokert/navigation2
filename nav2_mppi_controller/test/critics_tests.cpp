@@ -840,7 +840,8 @@ TEST(CriticTests, PathAlignCriticShortPath)
   critic.score(data);
   EXPECT_GT(xt::sum(costs, immediate)(), 0.0);
 
-  // 5. N = 20, lookahead = 1 (normal path startup -> verify non-terminal short-path behavior is preserved)
+  // 5. N = 20, lookahead = 1 (normal path startup:
+  // verify non-terminal short-path behavior is preserved)
   path.reset(20);
   for (unsigned int i = 0; i < 20; ++i) {
     path.x(i) = static_cast<float>(i) * 0.1f;
@@ -1087,7 +1088,8 @@ TEST(CriticTests, ObstaclesCriticFullRolloutCollision)
     generated_trajectories.y(0, t) = 0.0;
   }
 
-  // Trajectory 1: Penetrates through the goal into the lethal wall at x = 2.0m (progresses to 2.45m)
+  // Trajectory 1: Penetrates through the goal into the lethal wall at x = 2.0m
+  // (progresses to 2.45m)
   for (unsigned int t = 0; t < 30; ++t) {
     generated_trajectories.x(1, t) = 1.0 + 0.05 * static_cast<double>(t);
     generated_trajectories.y(1, t) = 0.0;
@@ -1131,3 +1133,195 @@ TEST(CriticTests, ObstaclesCriticFullRolloutCollision)
     "fail_flag was not set when all trajectories collide with obstacle";
 }
 
+class FootprintThresholdWitness : public ObstaclesCritic
+{
+public:
+  float threshold() const {return possible_collision_cost_;}
+};
+
+TEST(CriticTests, HardFootprintVetoBelowInflationThreshold)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("raster_footprint");
+  node->declare_parameter("critic.consider_footprint", false);
+  node->declare_parameter("critic.collision_check_footprint_only", true);
+  node->declare_parameter("critic.repulsion_weight", 0.0);
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "raster_footprint_map", "", "raster_footprint_map", true);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{"inflation_layer"}));
+  cm->declare_parameter("inflation_layer.plugin", std::string("nav2_costmap_2d::InflationLayer"));
+  cm->declare_parameter("inflation_layer.cost_scaling_factor", 6.0);
+  cm->declare_parameter("inflation_layer.inflation_radius", 0.42);
+  cm->set_parameter(rclcpp::Parameter("footprint", std::string(
+      "[[-0.06000000052154064,-0.1609999928623438],"
+      "[0.2859999928623438,-0.1609999928623438],"
+      "[0.2859999928623438,0.1609999928623438],"
+      "[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
+  rclcpp_lifecycle::State lifecycle;
+  ASSERT_EQ(cm->on_configure(lifecycle), nav2_util::CallbackReturn::SUCCESS);
+  cm->getLayeredCostmap()->resizeMap(150, 150, .02, 3.2200000000000055, -1.220000000000001);
+  auto * grid = cm->getCostmap();
+  std::fill(grid->getCharMap(), grid->getCharMap() + 22500, 0);
+  grid->setCost(72, 75, 49);
+  grid->setCost(56, 70, nav2_costmap_2d::LETHAL_OBSTACLE);
+  grid->setCost(56, 71, nav2_costmap_2d::LETHAL_OBSTACLE);
+  models::State state; state.reset(2, 1);
+  models::Trajectories trajectories; trajectories.reset(2, 1);
+  trajectories.x.fill(4.6692705154418945f);
+  trajectories.y.fill(0.29113420844078064f);
+  trajectories.yaws.fill(2.9674172401428223f);
+  // Second rollout is an independently clear pose in the same grid.
+  trajectories.x(1, 0) = 5.0f;
+  models::Path path; path.reset(2);
+  geometry_msgs::msg::Pose goal; goal.position.x = 100.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = .05;
+  CriticData data{state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  ParametersHandler handler(node);
+  FootprintThresholdWitness critic;
+  critic.on_configure(node, "mppi", "critic", cm, &handler);
+  nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(grid);
+  ASSERT_EQ(checker.footprintCostAtPose(trajectories.x(0, 0), trajectories.y(0, 0),
+      trajectories.yaws(0, 0), cm->getRobotFootprint()), 254.0);
+  critic.score(data);
+  ASSERT_GT(critic.threshold(), 49.0f);  // Confirm the actual optimization shortcut premise.
+  EXPECT_GE(costs(0), 1000000.0f);
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  EXPECT_FALSE(data.fail_flag);
+  trajectories.x(1, 0) = trajectories.x(0, 0);
+  costs.fill(0.0f); data.fail_flag = false;
+  critic.score(data);
+  EXPECT_GE(costs(0), 1000000.0f);
+  EXPECT_GE(costs(1), 1000000.0f);
+  EXPECT_TRUE(data.fail_flag);  // No safe rollout is not a successful batch.
+  trajectories.x(1, 0) = 5.0f;
+  // Removing only the two lethal cells must restore clear soft scoring.
+  grid->setCost(56, 70, 0); grid->setCost(56, 71, 0);
+  costs.fill(0.0f); data.fail_flag = false;
+  critic.score(data);
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);  // Same reference-cell soft score as before.
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  EXPECT_FALSE(data.fail_flag);
+  cm->on_cleanup(lifecycle);
+}
+
+TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("hard_footprint");
+  node->declare_parameter("critic.consider_footprint", false);
+  node->declare_parameter("critic.collision_check_footprint_only", true);
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "hard_footprint_map", "", "hard_footprint_map", true);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("footprint", std::string(
+      "[[-0.050,-0.151],[0.276,-0.151],[0.276,0.151],[-0.050,0.151]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.01));
+  rclcpp_lifecycle::State lifecycle;
+  cm->on_configure(lifecycle);
+  cm->getLayeredCostmap()->resizeMap(80, 80, 0.05, -1.0, -1.0);
+  auto * grid = cm->getCostmap();
+  std::fill(grid->getCharMap(), grid->getCharMap() + 6400, 0);
+  unsigned int mx, my;
+  for (double y = 0.5; y < 1.5; y += 0.025) {
+    ASSERT_TRUE(grid->worldToMap(1.275, y, mx, my));
+    grid->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+  }
+  models::State state; state.reset(2, 10);
+  models::Trajectories trajectories; trajectories.reset(2, 10);
+  trajectories.x.fill(0.0); trajectories.y.fill(1.0); trajectories.yaws.fill(0.0);
+  for (size_t t = 0; t < 10; ++t) {
+    trajectories.x(0, t) = 1.0;
+                                                              }
+  models::Path path; path.reset(2);
+  geometry_msgs::msg::Pose goal; goal.position.x = 100.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05;
+  CriticData data{state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  ParametersHandler handler(node);
+  ObstaclesCritic critic;
+  critic.on_configure(node, "mppi", "critic", cm, &handler);
+  critic.score(data);
+  EXPECT_GT(costs(0), 1000.0);
+  EXPECT_FLOAT_EQ(costs(1), 0.0);
+  EXPECT_FALSE(data.fail_flag);  // The second rollout remains clear.
+  node->set_parameter(rclcpp::Parameter("critic.collision_check_footprint_only", false));
+  ObstaclesCritic point;
+  point.on_configure(node, "mppi", "critic", cm, &handler);
+  costs.fill(0.0); data.fail_flag = false; point.score(data);
+  EXPECT_FLOAT_EQ(costs(0), 0.0);  // Reproduces the unsafe center-only blind spot.
+  cm->on_cleanup(lifecycle);
+}
+
+TEST(CriticTests, PathAlignCriticIntermediateCuspAlignment)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("test_node_intermediate_cusp");
+  ParametersHandler param_handler(node);
+
+  node->declare_parameter("critic.threshold_to_consider", 1.0f);
+  node->declare_parameter("critic.use_path_orientations", true);
+  node->declare_parameter("critic.offset_from_furthest", 0);
+  node->declare_parameter("critic.cusp_terminal_heading_weight", 30.0f);
+
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "costmap_for_path_align_intermediate_cusp", "", "costmap_for_path_align_intermediate_cusp",
+    true);
+  rclcpp_lifecycle::State state_lifecycle;
+  costmap_ros->on_configure(state_lifecycle);
+
+  models::State state;
+  state.reset(2, 10);
+  state.pose.pose.position.x = 0.1;  // Within 1.0m of goal (0,0)
+  state.pose.pose.position.y = 0.0;
+
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(2, 10);
+  // Trajectory 0: terminal yaw aligned with path cusp (yaw = 0.0)
+  generated_trajectories.x.fill(0.0);
+  generated_trajectories.y.fill(0.0);
+  generated_trajectories.yaws.fill(0.0);
+
+  // Trajectory 1: terminal yaw misaligned with path cusp (yaw = M_PI_2)
+  for (unsigned int t = 0; t < 10; ++t) {
+    generated_trajectories.yaws(1, t) = static_cast<float>(M_PI_2);
+  }
+
+  models::Path path;
+  path.reset(3);
+  path.x(0) = 0.0; path.y(0) = 0.0; path.yaws(0) = 0.0;
+  path.x(1) = 0.05; path.y(1) = 0.0; path.yaws(1) = 0.0;
+  path.x(2) = 0.10; path.y(2) = 0.0; path.yaws(2) = 0.0;
+
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 0.0;  // Robot is within threshold_to_consider (1.0m) of this goal
+  goal.position.y = 0.0;
+
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.05f;
+
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  // Case 1: active_cusp_direction == 0 (final goal approach)
+  // Inside threshold_to_consider, PathAlignCritic skips scoring so goal critic can take over.
+  data.active_cusp_direction = 0;
+  critic.score(data);
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+
+  // Case 2: active_cusp_direction == 1 (intermediate forward cusp segment)
+  // Even though within threshold_to_consider of the final goal, critic MUST NOT skip!
+  // And cusp_terminal_heading_weight penalizes yaw error on trajectory 1.
+  costs.fill(0.0f);
+  data.active_cusp_direction = 1;
+  data.real_path_point_count = 3;
+  critic.score(data);
+  EXPECT_GT(costs(1), costs(0));
+  EXPECT_GT(costs(1), 20.0f);  // 30.0 * M_PI_2 ~= 47.1
+
+  costmap_ros->on_cleanup(state_lifecycle);
+}
