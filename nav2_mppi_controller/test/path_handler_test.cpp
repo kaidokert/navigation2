@@ -1802,3 +1802,51 @@ TEST(PathHandlerTests, OptionalGateTraceRecordsDecisionWithoutChangingIt)
     unsetenv("MPPI_CUSP_GATE_TRACE_PATH");
   }
 }
+
+TEST(PathHandlerTest, adaptiveGateClampAndFloor)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("clamp_test_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.inversion_yaw_tolerance", 0.40);
+  node->declare_parameter("dummy.inversion_segment_ratio", 0.25);
+  node->declare_parameter("dummy.inversion_xy_floor", 0.05);
+  node->declare_parameter("dummy.micro_cusp_length_threshold", 0.10);
+  auto cm = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+
+  // Plan with segment 1 of length 0.24m (from 0 to 0.24m) and reverse to 0.10m
+  // With ratio 0.25: scaled gate = 0.25 * 0.24 = 0.06m.
+  // Floor is 0.05m. So effective xy tol = 0.06m.
+  nav_msgs::msg::Path plan1;
+  plan1.header.frame_id = "odom";
+  plan1.poses = {makePose(0, 0, 0), makePose(0.12, 0, 0), makePose(0.24, 0, 0), makePose(0.10, 0, 0)};
+  handler.setPath(plan1);
+
+  auto cusp_tol = handler.getCuspTolerances();
+  ASSERT_TRUE(cusp_tol.has_value());
+  EXPECT_NEAR(cusp_tol->first, 0.06, 1e-4);
+
+  // Robot at x = 0.16 (dist = 0.08m > 0.06m gate): rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.16, 0, 0)));
+  // Robot at x = 0.19 (dist = 0.05m <= 0.06m gate): accepted
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0)));
+
+  // Test deadband floor on a short segment: length 0.12m
+  // scaled gate = 0.25 * 0.12 = 0.03m < 0.05m floor -> effective xy tol = 0.05m
+  nav_msgs::msg::Path plan2;
+  plan2.header.frame_id = "odom";
+  plan2.poses = {makePose(0, 0, 0), makePose(0.06, 0, 0), makePose(0.12, 0, 0), makePose(0.05, 0, 0)};
+  handler.setPath(plan2);
+
+  cusp_tol = handler.getCuspTolerances();
+  ASSERT_TRUE(cusp_tol.has_value());
+  EXPECT_NEAR(cusp_tol->first, 0.05, 1e-4);
+  // Robot at x = 0.06 (dist = 0.06m > 0.05m gate): rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.06, 0, 0)));
+  // Robot at x = 0.08 (dist = 0.04m <= 0.05m gate): accepted
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.08, 0, 0)));
+}
+

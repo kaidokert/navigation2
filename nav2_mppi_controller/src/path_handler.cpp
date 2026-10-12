@@ -84,6 +84,8 @@ void PathHandler::initialize(
   if (enforce_path_inversion_) {
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
     getParam(inversion_yaw_tolerance_, "inversion_yaw_tolerance", 0.4);
+    getParam(inversion_segment_ratio_, "inversion_segment_ratio", 0.25);
+    getParam(inversion_xy_floor_, "inversion_xy_floor", 0.05);
     // Experimental policy: previous unconditional version regressed the loop.
     // Keep opt-in so paired frozen-path diagnostics can test it independently.
     getParam(bound_handoff_by_next_segment_, "bound_handoff_by_next_segment", false);
@@ -104,6 +106,8 @@ void PathHandler::initialize(
     handoff_yaw_relax_per_cycle_ = std::max(handoff_yaw_relax_per_cycle_, 0.0);
     handoff_yaw_relax_cap_ = std::max(
       handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
+    inversion_segment_ratio_ = std::clamp(inversion_segment_ratio_, 0.05, 1.0);
+    inversion_xy_floor_ = std::max(0.0, inversion_xy_floor_);
     if (min_inversion_horizon_ < 0.0) {
       RCLCPP_WARN(logger_,
         "min_inversion_horizon (%.3f) is negative, disabling ghost extension",
@@ -338,6 +342,25 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
     if (accept_handoff) {
       departure_approach_budget_.reset();
+      const auto & handed_off_cusp = global_plan_up_to_inversion_.poses.back();
+      const double handoff_dist = std::hypot(
+        global_pose.pose.position.x - handed_off_cusp.pose.position.x,
+        global_pose.pose.position.y - handed_off_cusp.pose.position.y);
+      const double handoff_yaw_err = angles::shortest_angular_distance(
+        tf2::getYaw(global_pose.pose.orientation), tf2::getYaw(handed_off_cusp.pose.orientation));
+      const auto [effective_xy_tol, relaxed_yaw_tol] = effectiveInversionTolerances();
+      const double robot_yaw = tf2::getYaw(global_pose.pose.orientation);
+      const double cusp_yaw = tf2::getYaw(handed_off_cusp.pose.orientation);
+      RCLCPP_INFO(logger_,
+        "[CUSP_HANDOFF_EVENT] cusp_idx=%u dist=%.4fm (xy_gate=%.4fm) "
+        "yaw_err=%.2fdeg (yaw_gate=%.2fdeg) seg_len=%.3fm "
+        "robot=(%.3f,%.3f,%.1fdeg) cusp=(%.3f,%.3f,%.1fdeg)",
+        inversion_locale_, handoff_dist, effective_xy_tol,
+        handoff_yaw_err * 180.0 / M_PI, relaxed_yaw_tol * 180.0 / M_PI,
+        current_segment_length_,
+        global_pose.pose.position.x, global_pose.pose.position.y, robot_yaw * 180.0 / M_PI,
+        handed_off_cusp.pose.position.x, handed_off_cusp.pose.position.y, cusp_yaw * 180.0 / M_PI);
+
       // inversion_locale_ is the first pose AFTER the shared cusp. Keep the
       // cusp as the start of the outgoing segment: dropping it removes that
       // segment's first edge, and erases a one-edge reversal entirely.
@@ -393,9 +416,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
     const double overrun = current_segment_direction_ * (
       (global_pose.pose.position.x - cusp.position.x) * std::cos(yaw) +
       (global_pose.pose.position.y - cusp.position.y) * std::sin(yaw));
-    const double length = bound_handoff_by_next_segment_ ?
-      std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
-    const double gate = std::min<double>(inversion_xy_tolerance_, 0.5 * length);
+    const double gate = effectiveInversionTolerances().first;
     // Edge preservation keeps a genuine tangent for the critics; it must not
     // make a consumed endpoint appear unconsumed to this recovery policy.
     // Use the same nearest-position criterion as pruning, without changing
@@ -873,14 +894,17 @@ std::pair<double, double> PathHandler::effectiveInversionTolerances() const
 
   // A fixed handoff radius can encompass an entire short segment, consuming
   // its cusp before any of the required motion takes place. Restrict that
-  // radius to half the original segment length (cached before pruning).
-  // Longer segments retain the configured gate. This does not relax arrival
-  // criteria, nor does it prove that the controller can execute the segment.
+  // radius to a fraction (inversion_segment_ratio_) of the segment length,
+  // floored at inversion_xy_floor_ to avoid deadband stalls on micro-segments.
+  // Longer segments retain the configured gate.
   const double gate_segment_length = bound_handoff_by_next_segment_
     ? std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
+  const double max_allowed = static_cast<double>(inversion_xy_tolerance_);
+  const double scaled_gate = inversion_segment_ratio_ * gate_segment_length;
+  const double floor_val = std::min<double>(inversion_xy_floor_, max_allowed);
   const double effective_xy_tol = is_micro_cusp
-    ? inversion_xy_tolerance_
-    : std::min<double>(inversion_xy_tolerance_, 0.5 * gate_segment_length);
+    ? max_allowed
+    : std::max<double>(floor_val, std::min<double>(max_allowed, scaled_gate));
 
   // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
   // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
