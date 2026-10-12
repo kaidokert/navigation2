@@ -163,6 +163,12 @@ public:
     if (model) {model->setInitialSteering(angle);}
   }
 
+  std::optional<float> getInitialSteering() const
+  {
+    auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    return model ? model->initialSteering() : std::nullopt;
+  }
+
   bool requiresConditionedSteering() const
   {
     auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);

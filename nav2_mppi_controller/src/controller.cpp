@@ -38,6 +38,14 @@ void MPPIController::configure(
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(visualize_, "visualize", false);
   getParam(reset_on_path_handoff_, "reset_on_path_handoff", false);
+  getParam(enable_presteer_on_handoff_, "enable_presteer_on_handoff", false);
+  getParam(presteer_creep_speed_, "presteer_creep_speed", 0.038);
+  getParam(presteer_timeout_, "presteer_timeout", 1.0);
+  getParam(presteer_angle_tolerance_, "presteer_angle_tolerance", 0.05);
+  getParam(presteer_wheelbase_, "AckermannConstraints.steering_wheelbase", 0.213);
+  getParam(presteer_max_angle_, "AckermannConstraints.steering_max_angle", 0.576);
+  if (presteer_wheelbase_ <= 0.0) {presteer_wheelbase_ = 0.213;}
+  if (presteer_max_angle_ <= 0.0) {presteer_max_angle_ = 0.576;}
 
   // Configure composed objects
   optimizer_.initialize(parent_, name_, costmap_ros_, parameters_handler_.get());
@@ -83,6 +91,7 @@ void MPPIController::configure(
 
 void MPPIController::cleanup()
 {
+  presteering_ = false;
   steering_subscription_.reset();
   conditioned_steering_subscription_.reset();
   {
@@ -107,6 +116,7 @@ void MPPIController::activate()
 
 void MPPIController::deactivate()
 {
+  presteering_ = false;
   {
     std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
     steering_feedback_.reset();
@@ -122,6 +132,7 @@ void MPPIController::deactivate()
 
 void MPPIController::reset()
 {
+  presteering_ = false;
   optimizer_.setInitialSteering(std::nullopt);
   optimizer_.setInitialConditionedSteering(std::nullopt);
   optimizer_.reset(false /*Don't reset zone-based speed limits between requests*/);
@@ -218,6 +229,79 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
     RCLCPP_INFO(logger_, "[MPPI] Handoff cleared previous gear control history");
   }
 
+  auto node = parent_.lock();
+  if (enable_presteer_on_handoff_ && node) {
+    if (path_handler_.didHandoff()) {
+      presteer_gear_ = path_handler_.getPathDirection();
+      if (presteer_gear_ != 0 && transformed_plan.poses.size() >= 2) {
+        const double rx = robot_pose.pose.position.x;
+        const double ry = robot_pose.pose.position.y;
+        const double ryaw = tf2::getYaw(robot_pose.pose.orientation);
+        const double cos_yaw = std::cos(ryaw);
+        const double sin_yaw = std::sin(ryaw);
+
+        size_t lookahead_idx = 1;
+        for (size_t i = 1; i < transformed_plan.poses.size(); ++i) {
+          const double dx = transformed_plan.poses[i].pose.position.x - rx;
+          const double dy = transformed_plan.poses[i].pose.position.y - ry;
+          if (std::hypot(dx, dy) >= 0.20 || i == transformed_plan.poses.size() - 1) {
+            lookahead_idx = i;
+            break;
+          }
+        }
+
+        const double dx = transformed_plan.poses[lookahead_idx].pose.position.x - rx;
+        const double dy = transformed_plan.poses[lookahead_idx].pose.position.y - ry;
+        const double local_x = dx * cos_yaw + dy * sin_yaw;
+        const double local_y = -dx * sin_yaw + dy * cos_yaw;
+        const double dist_sq = local_x * local_x + local_y * local_y;
+
+        if (dist_sq > 1e-4) {
+          const double kappa = 2.0 * local_y / dist_sq;
+          const double target_steer = std::clamp(
+            std::atan(presteer_wheelbase_ * kappa),
+            -presteer_max_angle_, presteer_max_angle_);
+
+          float current_steer = optimizer_.getInitialSteering().value_or(0.0f);
+          if (std::abs(current_steer - target_steer) > presteer_angle_tolerance_) {
+            presteering_ = true;
+            presteer_start_time_ = node->now();
+            presteer_target_angle_ = static_cast<float>(target_steer);
+            RCLCPP_INFO(logger_,
+              "[PRESTEER] Initiated: current=%.2f deg, target=%.2f deg, gear=%d, lookahead=%.3fm",
+              current_steer * 180.0f / M_PI, target_steer * 180.0f / M_PI, presteer_gear_,
+              std::sqrt(dist_sq));
+          }
+        }
+      }
+    }
+
+    if (presteering_) {
+      float current_steer = optimizer_.getInitialSteering().value_or(0.0f);
+      double elapsed = (node->now() - presteer_start_time_).seconds();
+      if (elapsed < 0.0 ||
+          std::abs(current_steer - presteer_target_angle_) <= presteer_angle_tolerance_ ||
+          elapsed >= presteer_timeout_)
+      {
+        RCLCPP_INFO(logger_,
+          "[PRESTEER] Finished in %.3fs: current=%.2f deg, target=%.2f deg (timeout=%.1fs)",
+          elapsed, current_steer * 180.0f / M_PI, presteer_target_angle_ * 180.0f / M_PI,
+          presteer_timeout_);
+        presteering_ = false;
+      } else {
+        const double vx = presteer_gear_ * presteer_creep_speed_;
+        const double wz = vx * std::tan(presteer_target_angle_) / presteer_wheelbase_;
+        geometry_msgs::msg::TwistStamped cmd = utils::toTwistStamped(
+          static_cast<float>(vx), static_cast<float>(wz),
+          robot_pose.header.stamp, costmap_ros_->getBaseFrameID());
+        if (visualize_) {
+          visualize(std::move(transformed_plan), cmd.header.stamp);
+        }
+        return cmd;
+      }
+    }
+  }
+
   optimizer_.setPathBinding(path_handler_.getPathBinding());
   optimizer_.setRealPathPointCount(path_handler_.getRealPathPointCount());
   optimizer_.setActiveCuspDirection(path_handler_.getActiveCuspDirection());
@@ -261,6 +345,7 @@ void MPPIController::visualize(
 
 void MPPIController::setPlan(const nav_msgs::msg::Path & path)
 {
+  presteering_ = false;
   path_handler_.setPath(path);
   optimizer_.requestPlanEntrySeed();
 }

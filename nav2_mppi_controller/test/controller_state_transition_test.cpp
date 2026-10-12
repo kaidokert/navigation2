@@ -711,3 +711,67 @@ TEST(ControllerStateTransitionTest, ControllerNotFail)
   controller->deactivate();
   controller->cleanup();
 }
+
+TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("presteer_test_node");
+  node->declare_parameter("controller_frequency", 20.0);
+  node->declare_parameter("test.model_dt", 0.05);
+  node->declare_parameter("test.motion_model", std::string("Ackermann"));
+  node->declare_parameter("test.critics", std::vector<std::string>{});
+  node->declare_parameter("test.enforce_path_inversion", true);
+  node->declare_parameter("test.inversion_xy_tolerance", 0.20);
+  node->declare_parameter("test.inversion_yaw_tolerance", 0.35);
+  node->declare_parameter("test.enable_presteer_on_handoff", true);
+  node->declare_parameter("test.presteer_creep_speed", 0.038);
+  node->declare_parameter("test.presteer_timeout", 1.0);
+  node->declare_parameter("test.presteer_angle_tolerance", 0.05);
+
+  auto costmap_ros = getDummyCostmapRos();
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  HandoffMemoryController controller;
+  controller.configure(node, "test", tf, costmap_ros);
+  controller.activate();
+
+  // Provide initial steering feedback: front_steering_joint at -0.40 rad (-23 deg)
+  auto feedback = std::make_shared<sensor_msgs::msg::JointState>();
+  feedback->header.stamp = node->now();
+  feedback->name = {"front_steering_joint"};
+  feedback->position = {-0.40};
+  controller.receiveSteeringFeedback(feedback);
+
+  // Two-segment plan with a cusp at (0.30, 0.0):
+  // Segment 1: Forward from (0,0) to (0.30, 0)
+  // Segment 2: Reverse curving left from (0.30, 0) to (0.10, 0.15)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = costmap_ros->getGlobalFrameID();
+  plan.poses.push_back(getDummyPointStamped(node, {0.0, 0.0, 0.0}));
+  plan.poses.push_back(getDummyPointStamped(node, {0.30, 0.0, 0.0}));
+  // Reverse segment (poses going backwards with left turn)
+  plan.poses.push_back(getDummyPointStamped(node, {0.20, 0.05, 0.0}));
+  plan.poses.push_back(getDummyPointStamped(node, {0.10, 0.12, 0.0}));
+  controller.setPlan(plan);
+
+  // Robot reaches cusp at (0.30, 0.0)
+  auto robot_pose = getDummyPointStamped(node, {0.30, 0.0, 0.0});
+  auto velocity = getDummyTwist();
+
+  // On first call reaching cusp: handoff fires and pre-steer engages because target steering != -0.40 rad
+  auto cmd = controller.computeVelocityCommands(robot_pose, velocity, nullptr);
+  EXPECT_TRUE(controller.isPresteering());
+  // Presteer commands sub-deadband reverse creep (-0.038 m/s)
+  EXPECT_NEAR(cmd.twist.linear.x, -0.038, 1e-4);
+  EXPECT_NE(cmd.twist.angular.z, 0.0);
+
+  // Update steering feedback to match target angle
+  feedback->header.stamp = node->now();
+  feedback->position = {controller.getPresteerTargetAngle()};
+  controller.receiveSteeringFeedback(feedback);
+
+  // On next cycle with steering aligned: pre-steer finishes and normal MPPI takes over
+  EXPECT_NO_THROW(controller.computeVelocityCommands(robot_pose, velocity, nullptr));
+  EXPECT_FALSE(controller.isPresteering());
+
+  controller.deactivate();
+  controller.cleanup();
+}
