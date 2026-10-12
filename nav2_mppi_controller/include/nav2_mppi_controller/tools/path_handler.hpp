@@ -323,6 +323,8 @@ protected:
   bool validate_short_forward_departure_{false};
   bool preserve_cusp_direction_edge_{false};
   bool replan_on_cusp_overrun_{false};
+  double min_goal_distance_{std::numeric_limits<double>::infinity()};
+  unsigned int goal_stall_cycles_{0u};
   bool cusp_overrun_snapshot_written_{false};
   struct DepartureApproachBudget
   {
