@@ -1977,21 +1977,20 @@ public:
     motor_deadband_floor_ = 0.050f;
     motor_deadband_terminal_radius_ = 0.06f;
 
-    // 1. Cusp forward intent floored
+    // 1. Intermediate cusps (active_cusp_direction_ != 0) -> floor NOT applied, preserving natural deceleration to stop at cusp
     active_cusp_direction_ = 1;
     control_sequence_.vx.fill(0.010f);
     control_sequence_.wz.fill(0.0f);
     auto cmd = getControlFromSequenceAsTwistWrapper();
-    EXPECT_GE(cmd.twist.linear.x, 0.050f);
+    EXPECT_NEAR(cmd.twist.linear.x, 0.010f, 1e-4);
 
-    // 2. Cusp reverse intent floored
     active_cusp_direction_ = -1;
     control_sequence_.vx.fill(-0.010f);
     control_sequence_.wz.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
-    EXPECT_LE(cmd.twist.linear.x, -0.050f);
+    EXPECT_NEAR(cmd.twist.linear.x, -0.010f, 1e-4);
 
-    // 3. Final segment outside terminal radius floored
+    // 2. Final segment (active_cusp_direction_ == 0) outside terminal radius floored forward
     active_cusp_direction_ = 0;
     path_direction_ = 1;
     state_.pose.pose.position.x = 0.0;
@@ -2003,7 +2002,14 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
+    // 3. Final segment reverse outside terminal radius floored reverse
+    path_direction_ = -1;
+    control_sequence_.vx.fill(-0.015f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_LE(cmd.twist.linear.x, -0.050f);
+
     // 4. Final segment inside terminal radius -> floor released to decelerate/stop
+    path_direction_ = 1;
     state_.pose.pose.position.x = 0.12;
     state_.pose.pose.position.y = 0.0;
     goal_.position.x = 0.15; // 3 cm away <= 6 cm radius
@@ -2012,15 +2018,7 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
 
-    // 5. Cusp forward intent with negative noise -> directional floor forces positive departure
-    active_cusp_direction_ = 1;
-    control_sequence_.vx.fill(-0.005f);
-    cmd = getControlFromSequenceAsTwistWrapper();
-    EXPECT_GE(cmd.twist.linear.x, 0.050f);
-
-    // 6. Final segment forward with negative noise -> directional floor forces positive approach (no chatter)
-    active_cusp_direction_ = 0;
-    path_direction_ = 1;
+    // 5. Final segment forward with negative noise -> directional floor forces positive approach (no chatter)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
     goal_.position.x = 0.15; // 15 cm > 6 cm radius

@@ -3025,28 +3025,20 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
 
-  if (motor_deadband_floor_ > 0.0f) {
-    if (active_cusp_direction_ != 0) {
-      if (active_cusp_direction_ > 0) {
+  if (motor_deadband_floor_ > 0.0f && active_cusp_direction_ == 0) {
+    const float dist_to_goal = std::hypot(
+      state_.pose.pose.position.x - goal_.position.x,
+      state_.pose.pose.position.y - goal_.position.y);
+    if (dist_to_goal > motor_deadband_terminal_radius_) {
+      if (path_direction_ > 0) {
         vx = std::max(vx, motor_deadband_floor_);
-      } else {
+      } else if (path_direction_ < 0) {
         vx = std::min(vx, -motor_deadband_floor_);
-      }
-    } else {
-      const float dist_to_goal = std::hypot(
-        state_.pose.pose.position.x - goal_.position.x,
-        state_.pose.pose.position.y - goal_.position.y);
-      if (dist_to_goal > motor_deadband_terminal_radius_) {
-        if (path_direction_ > 0) {
+      } else {
+        if (vx >= 0.0f) {
           vx = std::max(vx, motor_deadband_floor_);
-        } else if (path_direction_ < 0) {
-          vx = std::min(vx, -motor_deadband_floor_);
         } else {
-          if (vx >= 0.0f) {
-            vx = std::max(vx, motor_deadband_floor_);
-          } else {
-            vx = std::min(vx, -motor_deadband_floor_);
-          }
+          vx = std::min(vx, -motor_deadband_floor_);
         }
       }
     }
