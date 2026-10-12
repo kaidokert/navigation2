@@ -2128,6 +2128,11 @@ public:
     control_sequence_.vx.fill(-0.015f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_LE(cmd.twist.linear.x, -0.050f);
+
+    // 10c. Commanded standstill (0.0f) with goal abeam -> preserved at 0.0f (never floored to +/-0.050f)
+    control_sequence_.vx.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.0f, 1e-4);
   }
 };
 

@@ -147,7 +147,7 @@ void MPPIController::receiveSteeringFeedback(
 
 void MPPIController::updateSteeringFeedback()
 {
-  if (!optimizer_.requiresSteeringFeedback()) {return;}
+  if (!optimizer_.requiresSteeringFeedback() && !enable_presteer_on_handoff_) {return;}
   optimizer_.setInitialSteering(std::nullopt);
   optimizer_.setInitialConditionedSteering(std::nullopt);
   sensor_msgs::msg::JointState::ConstSharedPtr message;

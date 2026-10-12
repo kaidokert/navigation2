@@ -3086,8 +3086,15 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
               effective_direction = -1;
             } else {
               // Goal is abeam (beside the robot, |d_long| <= d_long_deadband).
-              // Follow the optimizer's commanded sign to eliminate sign-flip chatter.
-              effective_direction = (vx >= 0.0f) ? 1 : -1;
+              // Follow the optimizer's commanded sign when moving, but preserve standstill/zero
+              // command (|vx| <= 0.005) so the vehicle can arrest for StoppedGoalChecker.
+              if (vx > 0.005f) {
+                effective_direction = 1;
+              } else if (vx < -0.005f) {
+                effective_direction = -1;
+              } else {
+                effective_direction = 0;
+              }
             }
           }
 
