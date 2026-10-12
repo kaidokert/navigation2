@@ -184,7 +184,8 @@ void Optimizer::getParams()
             "preserve_short_cusp_feasibility requires seed_short_cusp_on_handoff");
   }
   getParam(motor_deadband_floor_, "motor_deadband_floor", 0.0f);
-  getParam(motor_deadband_terminal_radius_, "motor_deadband_terminal_radius", 0.06f);
+  getParam(motor_deadband_approach_radius_, "motor_deadband_approach_radius", 0.15f);
+  getParam(motor_deadband_terminal_radius_, "motor_deadband_terminal_radius", 0.04f);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -3029,7 +3030,9 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     const float dist_to_goal = std::hypot(
       state_.pose.pose.position.x - goal_.position.x,
       state_.pose.pose.position.y - goal_.position.y);
-    if (dist_to_goal > motor_deadband_terminal_radius_) {
+    if (dist_to_goal <= motor_deadband_approach_radius_ &&
+        dist_to_goal > motor_deadband_terminal_radius_)
+    {
       if (path_direction_ > 0) {
         vx = std::max(vx, motor_deadband_floor_);
       } else if (path_direction_ < 0) {

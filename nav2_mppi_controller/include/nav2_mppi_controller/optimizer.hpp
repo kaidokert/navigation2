@@ -454,7 +454,8 @@ protected:
   bool preserve_filtered_collision_feasibility_{false};
   bool retain_collision_free_long_path_sample_{false};
   float motor_deadband_floor_{0.0f};
-  float motor_deadband_terminal_radius_{0.06f};
+  float motor_deadband_approach_radius_{0.15f};
+  float motor_deadband_terminal_radius_{0.04f};
 };
 
 }  // namespace mppi

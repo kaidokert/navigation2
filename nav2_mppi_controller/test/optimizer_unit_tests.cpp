@@ -1975,7 +1975,8 @@ public:
   void testMotorDeadbandFloor()
   {
     motor_deadband_floor_ = 0.050f;
-    motor_deadband_terminal_radius_ = 0.06f;
+    motor_deadband_approach_radius_ = 0.15f;
+    motor_deadband_terminal_radius_ = 0.04f;
 
     // 1. Intermediate cusps (active_cusp_direction_ != 0) -> floor NOT applied, preserving natural deceleration to stop at cusp
     active_cusp_direction_ = 1;
@@ -1990,38 +1991,47 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, -0.010f, 1e-4);
 
-    // 2. Final segment (active_cusp_direction_ == 0) outside terminal radius floored forward
+    // 2. Final segment (active_cusp_direction_ == 0) within approach radius (10 cm away) floored forward
     active_cusp_direction_ = 0;
     path_direction_ = 1;
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
-    goal_.position.x = 0.15;
+    goal_.position.x = 0.10;
     goal_.position.y = 0.0;
     control_sequence_.vx.fill(0.015f);
     control_sequence_.wz.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    // 3. Final segment reverse outside terminal radius floored reverse
+    // 3. Final segment reverse within approach radius floored reverse
     path_direction_ = -1;
     control_sequence_.vx.fill(-0.015f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_LE(cmd.twist.linear.x, -0.050f);
 
-    // 4. Final segment inside terminal radius -> floor released to decelerate/stop
+    // 4. Final segment inside terminal radius (2 cm away <= 4 cm radius) -> floor released to decelerate/stop
     path_direction_ = 1;
-    state_.pose.pose.position.x = 0.12;
+    state_.pose.pose.position.x = 0.08;
     state_.pose.pose.position.y = 0.0;
-    goal_.position.x = 0.15; // 3 cm away <= 6 cm radius
+    goal_.position.x = 0.10;
     control_sequence_.vx.fill(0.015f);
     control_sequence_.wz.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
 
-    // 5. Final segment forward with negative noise -> directional floor forces positive approach (no chatter)
+    // 5. Final segment outside approach radius (30 cm away > 15 cm radius) -> floor NOT applied (normal MPPI)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
-    goal_.position.x = 0.15; // 15 cm > 6 cm radius
+    goal_.position.x = 0.30;
+    control_sequence_.vx.fill(0.020f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.020f, 1e-4);
+
+    // 6. Final segment within approach radius with negative noise -> directional floor forces positive approach (no chatter)
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    goal_.position.x = 0.10; // 10 cm <= 15 cm approach radius
     control_sequence_.vx.fill(-0.005f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
