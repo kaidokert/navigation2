@@ -3081,19 +3081,13 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
                                  dy * static_cast<float>(std::sin(robot_yaw));
             constexpr float d_long_deadband = 0.08f;
             if (d_long > d_long_deadband) {
-              if (vx > 0.0f) {
-                effective_direction = 1;
-              }
+              effective_direction = 1;
             } else if (d_long < -d_long_deadband) {
-              if (vx < 0.0f) {
-                effective_direction = -1;
-              }
+              effective_direction = -1;
             } else {
               // Goal is abeam (beside the robot, |d_long| <= d_long_deadband).
               // Follow the optimizer's commanded sign to eliminate sign-flip chatter.
-              if (std::abs(vx) > 1e-4f) {
-                effective_direction = (vx >= 0.0f) ? 1 : -1;
-              }
+              effective_direction = (vx >= 0.0f) ? 1 : -1;
             }
           }
 
