@@ -2035,6 +2035,19 @@ public:
     control_sequence_.vx.fill(-0.005f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
+
+    // 7. Final segment within approach radius, but heading misaligned (> 30 deg) -> floor NOT applied (let MPPI steer)
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, 1.0); // ~57 deg misaligned from goal along +X
+    state_.pose.pose.orientation = tf2::toMsg(q);
+    goal_.position.x = 0.10;
+    goal_.position.y = 0.0;
+    control_sequence_.vx.fill(0.015f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
   }
 };
 

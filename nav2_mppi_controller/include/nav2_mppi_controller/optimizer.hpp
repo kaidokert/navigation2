@@ -456,6 +456,7 @@ protected:
   float motor_deadband_floor_{0.0f};
   float motor_deadband_approach_radius_{0.15f};
   float motor_deadband_terminal_radius_{0.04f};
+  float motor_deadband_max_heading_error_{0.5236f};
 };
 
 }  // namespace mppi

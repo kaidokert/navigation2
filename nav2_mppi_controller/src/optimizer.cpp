@@ -186,6 +186,7 @@ void Optimizer::getParams()
   getParam(motor_deadband_floor_, "motor_deadband_floor", 0.0f);
   getParam(motor_deadband_approach_radius_, "motor_deadband_approach_radius", 0.15f);
   getParam(motor_deadband_terminal_radius_, "motor_deadband_terminal_radius", 0.04f);
+  getParam(motor_deadband_max_heading_error_, "motor_deadband_max_heading_error", 0.5236f);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -3033,15 +3034,27 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     if (dist_to_goal <= motor_deadband_approach_radius_ &&
         dist_to_goal > motor_deadband_terminal_radius_)
     {
-      if (path_direction_ > 0) {
-        vx = std::max(vx, motor_deadband_floor_);
-      } else if (path_direction_ < 0) {
-        vx = std::min(vx, -motor_deadband_floor_);
-      } else {
-        if (vx >= 0.0f) {
+      const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
+      double target_bearing = std::atan2(
+        goal_.position.y - state_.pose.pose.position.y,
+        goal_.position.x - state_.pose.pose.position.x);
+      if (path_direction_ < 0) {
+        target_bearing = angles::normalize_angle(target_bearing + M_PI);
+      }
+      const double heading_err = std::abs(
+        angles::shortest_angular_distance(robot_yaw, target_bearing));
+
+      if (heading_err <= motor_deadband_max_heading_error_) {
+        if (path_direction_ > 0) {
           vx = std::max(vx, motor_deadband_floor_);
-        } else {
+        } else if (path_direction_ < 0) {
           vx = std::min(vx, -motor_deadband_floor_);
+        } else {
+          if (vx >= 0.0f) {
+            vx = std::max(vx, motor_deadband_floor_);
+          } else {
+            vx = std::min(vx, -motor_deadband_floor_);
+          }
         }
       }
     }
