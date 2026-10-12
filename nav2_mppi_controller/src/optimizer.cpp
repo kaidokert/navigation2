@@ -3067,19 +3067,33 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
           int effective_direction = (active_cusp_direction_ != 0) ?
             active_cusp_direction_ : path_direction_;
 
-          // On final segment (active_cusp_direction_ == 0), if the vehicle is oriented towards
-          // and commanding motion in the direction of the target, align effective_direction
-          // with the target longitudinal offset to prevent stale path_direction_ from inverting recovery.
+          // On final segment (active_cusp_direction_ == 0), align effective_direction with
+          // the target's relative longitudinal displacement (d_long) to prevent stale path_direction_
+          // from inverting recovery commands.
+          // When the goal is abeam (beside the robot, |d_long| <= d_long_deadband), longitudinal
+          // displacement is near zero: follow the optimizer's commanded direction rather than
+          // flipping sign or reverting to stale path_direction_.
           if (active_cusp_direction_ == 0) {
             const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
             const float dx = target_x - static_cast<float>(state_.pose.pose.position.x);
             const float dy = target_y - static_cast<float>(state_.pose.pose.position.y);
             const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
                                  dy * static_cast<float>(std::sin(robot_yaw));
-            if (d_long > 0.02f && vx > 0.0f) {
-              effective_direction = 1;
-            } else if (d_long < -0.02f && vx < 0.0f) {
-              effective_direction = -1;
+            constexpr float d_long_deadband = 0.08f;
+            if (d_long > d_long_deadband) {
+              if (vx > 0.0f) {
+                effective_direction = 1;
+              }
+            } else if (d_long < -d_long_deadband) {
+              if (vx < 0.0f) {
+                effective_direction = -1;
+              }
+            } else {
+              // Goal is abeam (beside the robot, |d_long| <= d_long_deadband).
+              // Follow the optimizer's commanded sign to eliminate sign-flip chatter.
+              if (std::abs(vx) > 1e-4f) {
+                effective_direction = (vx >= 0.0f) ? 1 : -1;
+              }
             }
           }
 

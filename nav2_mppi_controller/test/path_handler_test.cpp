@@ -139,6 +139,16 @@ public:
   {
     handoff_escape_after_cycles_ = cycles;
   }
+
+  bool shouldUseGhostPathWrapper(
+    const nav_msgs::msg::Path & transformed_plan,
+    const geometry_msgs::msg::PoseStamped & global_pose,
+    const double tgp_length,
+    double & cusp_dist,
+    double & heading) const
+  {
+    return shouldUseGhostPath(transformed_plan, global_pose, tgp_length, cusp_dist, heading);
+  }
 };
 
 // Helper: robot pose at (x, y) with the given yaw
@@ -1854,5 +1864,88 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.06, 0, 0)));
   // Robot at x = 0.08 (dist = 0.04m <= 0.05m gate): accepted
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.08, 0, 0)));
+}
+
+TEST(PathHandlerTests, ClosestApproachHandoffNearMiss)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("closest_approach_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.inversion_yaw_tolerance", 0.38);
+  node->declare_parameter("dummy.inversion_segment_ratio", 0.25);
+  node->declare_parameter("dummy.inversion_xy_floor", 0.05);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Path with cusp at (1.0, 0.0): length 1.0m > 0.6m -> effective_xy_tol = 0.15m
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0, 0), makePose(0.5, 0, 0), makePose(1.0, 0, 0), makePose(0.8, 0, 0)};
+  handler.setPath(plan);
+
+  // Approach cycle 1: robot at x = 0.80 (dist = 0.20m > 0.15m) -> rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.80, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.20, 1e-4);
+
+  // Approach cycle 2: robot at x = 0.845 (dist = 0.155m > 0.150m gate)
+  // Distance is 15.5 cm, within the 2 cm near-miss margin (0.15 + 0.02 = 0.17m),
+  // but distance is currently decreasing -> rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.155, 1e-4);
+
+  // Approach cycle 3: robot passes closest approach and moves back to x = 0.835
+  // (dist = 0.165m > min_dist 0.155m + 0.005m delta)
+  // Near-miss closest-approach handoff triggers!
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.835, 0, 0)));
+
+  // If heading was misaligned (e.g. yaw = 0.50 rad > 0.38 rad tolerance): rejected
+  handler.setPath(plan);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0.50)));
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.835, 0, 0.50)));
+
+  // If far miss (min distance = 0.22m > 0.15 + 0.02 = 0.17m): rejected
+  handler.setPath(plan);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.78, 0, 0)));
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.76, 0, 0)));
+}
+
+TEST(PathHandlerTests, BoundedGhostExtensionPastClosestApproach)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ghost_bound_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.min_inversion_horizon", 0.80);
+  node->declare_parameter("dummy.ghost_max_extension", 0.35);
+  node->declare_parameter("dummy.ghost_point_spacing", 0.05);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0, 0), makePose(0.5, 0, 0), makePose(1.0, 0, 0), makePose(0.8, 0, 0)};
+  handler.setPath(plan);
+
+  nav_msgs::msg::Path transformed;
+  transformed.header.frame_id = "odom";
+  transformed.poses = {makePose(1.0, 0, 0)}; // real TGP pruned to single cusp point
+
+  // Approach to 0.155m: updates min_cusp_distance_
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.155, 1e-4);
+
+  double cusp_dist = 0.0;
+  double heading = 0.0;
+  // While close (dist = 0.160m <= 0.155 + 0.05m): ghost extension allowed
+  EXPECT_TRUE(handler.shouldUseGhostPathWrapper(
+    transformed, makePose(0.840, 0, 0), 0.0, cusp_dist, heading));
+
+  // Once robot has drifted past closest approach by > 5 cm (e.g. dist = 0.22m > 0.155 + 0.05m):
+  // ghost extension is suppressed!
+  EXPECT_FALSE(handler.shouldUseGhostPathWrapper(
+    transformed, makePose(0.780, 0, 0), 0.0, cusp_dist, heading));
 }
 

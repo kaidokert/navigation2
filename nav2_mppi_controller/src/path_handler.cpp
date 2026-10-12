@@ -343,6 +343,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
     if (accept_handoff) {
       departure_approach_budget_.reset();
+      min_cusp_distance_ = std::numeric_limits<double>::infinity();
       const auto & handed_off_cusp = global_plan_up_to_inversion_.poses.back();
       const double handoff_dist = std::hypot(
         global_pose.pose.position.x - handed_off_cusp.pose.position.x,
@@ -490,6 +491,24 @@ nav_msgs::msg::Path PathHandler::transformPath(
   double cusp_dist = std::numeric_limits<double>::infinity();
   double ghost_heading = 0.0;
 
+  // Bounded ghost extension & stopped-replan safety backstop:
+  // If the active segment has been consumed to a single point (or empty) and the robot
+  // has passed closest approach by > 5 cm without handoff, terminate ghost extension
+  // and throw FailedToMakeProgress to stop the robot and trigger replanning instead
+  // of reversing indefinitely into obstacles.
+  if (enforce_path_inversion_ && inversion_locale_ != 0u &&
+    real_path_point_count_ <= 1u && std::isfinite(min_cusp_distance_))
+  {
+    cusp_dist = getCuspDistance(global_pose);
+    if (cusp_dist > min_cusp_distance_ + 0.05) {
+      RCLCPP_WARN(logger_,
+        "[CUSP_MISSED] consumed segment past closest approach (min=%.4fm, curr=%.4fm); "
+        "requesting stopped replan",
+        min_cusp_distance_, cusp_dist);
+      throw nav2_core::FailedToMakeProgress("Cusp missed past closest approach; stopped replan required");
+    }
+  }
+
   // Layer 2 escape (notes/cusp_handoff_fix_plan.md): the handoff has been
   // blocked long enough that extrapolating the consumed segment cannot help â€”
   // extend along the NEXT segment's travel direction instead, so the optimizer
@@ -607,6 +626,17 @@ bool PathHandler::shouldUseGhostPath(
   }
 
   cusp_dist = getCuspDistance(global_pose);
+
+  // Bounded ghost extension: do not extrapolate ghost path if the robot
+  // has passed closest approach by more than 5 cm.
+  if (std::isfinite(min_cusp_distance_) && cusp_dist > min_cusp_distance_ + 0.05) {
+    if (clock_) {
+      RCLCPP_WARN_THROTTLE(logger_, *clock_, 500,
+        "[GHOST_BOUND] cusp_dist=%.4fm > min_cusp_dist=%.4fm + 0.05m; suppressing ghost extension",
+        cusp_dist, min_cusp_distance_);
+    }
+    return false;
+  }
 
   double heading_variance = 0.0;
   double seed_arc_length = 0.0;
@@ -839,6 +869,7 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
 {
   departure_approach_budget_.reset();
   retained_departure_approach_.reset();
+  min_cusp_distance_ = std::numeric_limits<double>::infinity();
   canonical_plan_=std::make_shared<const nav_msgs::msg::Path>(plan);
   ++plan_generation_;++segment_generation_;path_binding_.reset();
   global_source_offset_=0;inversion_source_offset_=0;segment_source_begin_=0;
@@ -988,9 +1019,32 @@ bool PathHandler::isWithinInversionTolerances(
     tf2::getYaw(robot_pose.pose.orientation), tf2::getYaw(last_pose.pose.orientation));
   const auto [effective_xy_tol, relaxed_yaw_tol] = effectiveInversionTolerances();
   const bool is_micro_cusp = current_segment_length_ < micro_cusp_length_threshold_;
+  if (distance < min_cusp_distance_) {
+    min_cusp_distance_ = distance;
+  }
 
-  bool result = distance <= effective_xy_tol &&
-         std::fabs(angle_distance) <= relaxed_yaw_tol;
+  const bool within_xy = distance <= effective_xy_tol;
+  const bool within_yaw = std::fabs(angle_distance) <= relaxed_yaw_tol;
+
+  // Closest-approach handoff for near misses:
+  // If the robot reached within 2 cm of the effective xy gate with heading aligned,
+  // and has now passed closest approach (distance increasing by > 5 mm),
+  // accept handoff so non-holonomic near misses do not stall or reverse into obstacles.
+  constexpr float closest_approach_margin = 0.02f;
+  constexpr float closest_approach_delta = 0.005f;
+  const bool closest_approach_handoff = within_yaw &&
+    (min_cusp_distance_ <= effective_xy_tol + closest_approach_margin) &&
+    (distance > min_cusp_distance_ + closest_approach_delta);
+
+  bool result = (within_xy && within_yaw) || closest_approach_handoff;
+
+  if (closest_approach_handoff && !within_xy && clock_) {
+    RCLCPP_INFO(logger_,
+      "[CUSP_HANDOFF_CLOSEST_APPROACH] min_dist=%.4fm dist=%.4fm xy_gate=%.4fm "
+      "yaw_err=%.2fdeg(gate=%.2fdeg)",
+      min_cusp_distance_, distance, effective_xy_tol,
+      angle_distance * 180.0 / M_PI, relaxed_yaw_tol * 180.0 / M_PI);
+  }
 
   // Optional forensic trace of the exact pose and gates used at this call.
   // Sampled /tf or ground truth cannot establish that a handoff evaluation

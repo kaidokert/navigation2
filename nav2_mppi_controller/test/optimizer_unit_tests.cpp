@@ -2109,6 +2109,25 @@ public:
     control_sequence_.vx.fill(0.180f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.180f, 1e-4);
+
+    // 10. Final segment with goal abeam (|d_long| <= d_long_deadband = 0.08m)
+    // -> Follows optimizer's commanded sign without chatter or gear flipping
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    state_.pose.pose.orientation = geometry_msgs::msg::Quaternion(); // yaw = 0.0
+    path_.yaws.fill(0.0f);
+    goal_.position.x = 0.0;
+    goal_.position.y = 0.10; // 10 cm directly abeam (d_long = 0.0 <= 0.08m deadband)
+
+    // 10a. Commanded forward creep (+0.015f) -> floored to +0.050f
+    control_sequence_.vx.fill(0.015f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_GE(cmd.twist.linear.x, 0.050f);
+
+    // 10b. Commanded reverse creep (-0.015f) -> floored to -0.050f (never flipped to +0.050f)
+    control_sequence_.vx.fill(-0.015f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_LE(cmd.twist.linear.x, -0.050f);
   }
 };
 

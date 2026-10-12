@@ -135,6 +135,8 @@ public:
   void setInversionSegmentRatio(double ratio) {inversion_segment_ratio_ = ratio;}
   void setInversionXYFloor(double floor) {inversion_xy_floor_ = floor;}
   void setInversionYawBase(double yaw) {inversion_yaw_base_ = yaw;}
+  double getMinCuspDistance() const {return min_cusp_distance_;}
+  void resetMinCuspDistance() {min_cusp_distance_ = std::numeric_limits<double>::infinity();}
 
   /**
    * @brief Get the global goal pose transformed to the local frame
@@ -303,6 +305,7 @@ protected:
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
+  mutable double min_cusp_distance_{std::numeric_limits<double>::infinity()};
   bool enforce_path_inversion_{false};
   bool did_handoff_{false};
   size_t real_path_point_count_{0u};
