@@ -2036,11 +2036,15 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    // 7. Final segment within approach radius, but heading misaligned (> 30 deg) -> floor NOT applied (let MPPI steer)
+    // 7. Final segment within approach radius, but heading misaligned to path (> 30 deg) -> floor NOT applied (let MPPI steer)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
+    path_.reset(2);
+    path_.x = {0.0f, 0.10f};
+    path_.y.fill(0.0f);
+    path_.yaws.fill(0.0f);
     tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, 1.0); // ~57 deg misaligned from goal along +X
+    q.setRPY(0.0, 0.0, 1.0); // ~57 deg misaligned from path heading (0.0)
     state_.pose.pose.orientation = tf2::toMsg(q);
     goal_.position.x = 0.10;
     goal_.position.y = 0.0;

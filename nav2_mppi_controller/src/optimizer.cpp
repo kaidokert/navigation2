@@ -3034,17 +3034,16 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     if (dist_to_goal <= motor_deadband_approach_radius_ &&
         dist_to_goal > motor_deadband_terminal_radius_)
     {
-      const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
-      double target_bearing = std::atan2(
-        goal_.position.y - state_.pose.pose.position.y,
-        goal_.position.x - state_.pose.pose.position.x);
-      if (path_direction_ < 0) {
-        target_bearing = angles::normalize_angle(target_bearing + M_PI);
+      bool aligned_to_path = true;
+      if (path_.yaws.size() > 0) {
+        const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
+        const double path_yaw = path_.yaws(0);
+        const double heading_err = std::abs(
+          angles::shortest_angular_distance(robot_yaw, path_yaw));
+        aligned_to_path = (heading_err <= motor_deadband_max_heading_error_);
       }
-      const double heading_err = std::abs(
-        angles::shortest_angular_distance(robot_yaw, target_bearing));
 
-      if (heading_err <= motor_deadband_max_heading_error_) {
+      if (aligned_to_path) {
         if (path_direction_ > 0) {
           vx = std::max(vx, motor_deadband_floor_);
         } else if (path_direction_ < 0) {
