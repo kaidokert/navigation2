@@ -3027,32 +3027,54 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
 
-  if (motor_deadband_floor_ > 0.0f && active_cusp_direction_ == 0) {
-    const float dist_to_goal = std::hypot(
-      state_.pose.pose.position.x - goal_.position.x,
-      state_.pose.pose.position.y - goal_.position.y);
-    if (dist_to_goal <= motor_deadband_approach_radius_ &&
-        dist_to_goal > motor_deadband_terminal_radius_)
-    {
-      bool aligned_to_path = true;
-      if (path_.yaws.size() > 0) {
-        const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
-        const double path_yaw = path_.yaws(0);
-        const double heading_err = std::abs(
-          angles::shortest_angular_distance(robot_yaw, path_yaw));
-        aligned_to_path = (heading_err <= motor_deadband_max_heading_error_);
-      }
+  if (motor_deadband_floor_ > 0.0f) {
+    float target_x = 0.0f;
+    float target_y = 0.0f;
+    bool has_target = false;
 
-      if (aligned_to_path) {
-        if (path_direction_ > 0) {
-          vx = std::max(vx, motor_deadband_floor_);
-        } else if (path_direction_ < 0) {
-          vx = std::min(vx, -motor_deadband_floor_);
-        } else {
-          if (vx >= 0.0f) {
+    if (active_cusp_direction_ == 0) {
+      target_x = goal_.position.x;
+      target_y = goal_.position.y;
+      has_target = true;
+    } else {
+      const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+      if (real > 0) {
+        target_x = path_.x(real - 1);
+        target_y = path_.y(real - 1);
+        has_target = true;
+      }
+    }
+
+    if (has_target) {
+      const float dist_to_target = std::hypot(
+        state_.pose.pose.position.x - target_x,
+        state_.pose.pose.position.y - target_y);
+      if (dist_to_target <= motor_deadband_approach_radius_ &&
+          dist_to_target > motor_deadband_terminal_radius_)
+      {
+        bool aligned_to_path = true;
+        if (path_.yaws.size() > 0) {
+          const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
+          const double path_yaw = path_.yaws(0);
+          const double heading_err = std::abs(
+            angles::shortest_angular_distance(robot_yaw, path_yaw));
+          aligned_to_path = (heading_err <= motor_deadband_max_heading_error_);
+        }
+
+        if (aligned_to_path) {
+          const int effective_direction = (active_cusp_direction_ != 0) ?
+            active_cusp_direction_ : path_direction_;
+
+          if (effective_direction > 0) {
             vx = std::max(vx, motor_deadband_floor_);
-          } else {
+          } else if (effective_direction < 0) {
             vx = std::min(vx, -motor_deadband_floor_);
+          } else {
+            if (vx >= 0.0f) {
+              vx = std::max(vx, motor_deadband_floor_);
+            } else {
+              vx = std::min(vx, -motor_deadband_floor_);
+            }
           }
         }
       }

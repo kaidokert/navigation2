@@ -1978,18 +1978,56 @@ public:
     motor_deadband_approach_radius_ = 0.15f;
     motor_deadband_terminal_radius_ = 0.04f;
 
-    // 1. Intermediate cusps (active_cusp_direction_ != 0) -> floor NOT applied, preserving natural deceleration to stop at cusp
-    active_cusp_direction_ = 1;
+    // 1a. Intermediate forward cusp within approach radius (10 cm away) -> floored forward
+    setActiveCuspDirection(1);
+    path_.reset(2);
+    path_.x = {0.0f, 0.10f};
+    path_.y.fill(0.0f);
+    path_.yaws.fill(0.0f);
+    setRealPathPointCount(2);
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
     control_sequence_.vx.fill(0.010f);
     control_sequence_.wz.fill(0.0f);
     auto cmd = getControlFromSequenceAsTwistWrapper();
-    EXPECT_NEAR(cmd.twist.linear.x, 0.010f, 1e-4);
+    EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    active_cusp_direction_ = -1;
+    // 1b. Intermediate reverse cusp within approach radius (10 cm away) -> floored reverse
+    setActiveCuspDirection(-1);
+    path_.reset(2);
+    path_.x = {0.0f, -0.10f};
+    path_.y.fill(0.0f);
+    path_.yaws.fill(0.0f);
+    setRealPathPointCount(2);
+    control_sequence_.vx.fill(-0.010f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_LE(cmd.twist.linear.x, -0.050f);
+
+    // 1c. Intermediate cusp inside terminal radius (2 cm away <= 4 cm radius) -> floor released
+    setActiveCuspDirection(-1);
+    path_.reset(2);
+    path_.x = {0.0f, -0.02f};
+    path_.y.fill(0.0f);
+    path_.yaws.fill(0.0f);
+    setRealPathPointCount(2);
     control_sequence_.vx.fill(-0.010f);
     control_sequence_.wz.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, -0.010f, 1e-4);
+
+    // 1d. Intermediate cusp outside approach radius (30 cm away > 15 cm radius) -> floor NOT applied
+    setActiveCuspDirection(1);
+    path_.reset(2);
+    path_.x = {0.0f, 0.30f};
+    path_.y.fill(0.0f);
+    path_.yaws.fill(0.0f);
+    setRealPathPointCount(2);
+    control_sequence_.vx.fill(0.010f);
+    control_sequence_.wz.fill(0.0f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.010f, 1e-4);
 
     // 2. Final segment (active_cusp_direction_ == 0) within approach radius (10 cm away) floored forward
     active_cusp_direction_ = 0;
