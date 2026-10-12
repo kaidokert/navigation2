@@ -3058,7 +3058,9 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
           const double path_yaw = path_.yaws(0);
           const double heading_err = std::abs(
             angles::shortest_angular_distance(robot_yaw, path_yaw));
-          aligned_to_path = (heading_err <= motor_deadband_max_heading_error_);
+          const float max_heading = (active_cusp_direction_ != 0) ?
+            0.5236f : motor_deadband_max_heading_error_;
+          aligned_to_path = (heading_err <= max_heading);
         }
 
         if (aligned_to_path) {
