@@ -86,6 +86,7 @@ void PathHandler::initialize(
     getParam(inversion_yaw_tolerance_, "inversion_yaw_tolerance", 0.4);
     getParam(inversion_segment_ratio_, "inversion_segment_ratio", 0.25);
     getParam(inversion_xy_floor_, "inversion_xy_floor", 0.05);
+    getParam(inversion_yaw_base_, "inversion_yaw_base", 0.20);
     // Experimental policy: previous unconditional version regressed the loop.
     // Keep opt-in so paired frozen-path diagnostics can test it independently.
     getParam(bound_handoff_by_next_segment_, "bound_handoff_by_next_segment", false);
@@ -889,8 +890,8 @@ std::pair<double, double> PathHandler::effectiveInversionTolerances() const
   const bool is_micro_cusp =
     current_segment_length_ < micro_cusp_length_threshold_;
   const double effective_yaw_tol = is_micro_cusp
-    ? inversion_yaw_tolerance_ * micro_cusp_yaw_scale_
-    : inversion_yaw_tolerance_;
+    ? static_cast<double>(inversion_yaw_tolerance_) * micro_cusp_yaw_scale_
+    : std::min<double>(inversion_yaw_tolerance_, inversion_yaw_base_);
 
   // A fixed handoff radius can encompass an entire short segment, consuming
   // its cusp before any of the required motion takes place. Restrict that

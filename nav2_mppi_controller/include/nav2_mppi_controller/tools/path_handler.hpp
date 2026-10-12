@@ -131,8 +131,10 @@ public:
 
   double getInversionSegmentRatio() const {return inversion_segment_ratio_;}
   double getInversionXYFloor() const {return inversion_xy_floor_;}
+  double getInversionYawBase() const {return inversion_yaw_base_;}
   void setInversionSegmentRatio(double ratio) {inversion_segment_ratio_ = ratio;}
   void setInversionXYFloor(double floor) {inversion_xy_floor_ = floor;}
+  void setInversionYawBase(double yaw) {inversion_yaw_base_ = yaw;}
 
   /**
    * @brief Get the global goal pose transformed to the local frame
@@ -283,6 +285,7 @@ protected:
   float inversion_yaw_tolerance_{0.4};
   double inversion_segment_ratio_{0.25};
   double inversion_xy_floor_{0.05};
+  double inversion_yaw_base_{0.20};
   double min_inversion_horizon_{0.15};
   double ghost_max_extension_{0.35};
   double ghost_point_spacing_{0.05};

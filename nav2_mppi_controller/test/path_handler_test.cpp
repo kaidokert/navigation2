@@ -1834,6 +1834,12 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   // Robot at x = 0.19 (dist = 0.05m <= 0.06m gate): accepted
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0)));
 
+  // Test heading check: cusp heading is 0.0 rad, base yaw gate is 0.20 rad (~11.5°).
+  // Robot at x = 0.19 with yaw = 0.25 rad (~14.3°): rejected because heading is too flat
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0.25)));
+  // Robot at x = 0.19 with yaw = 0.10 rad (~5.7°): accepted
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0.10)));
+
   // Test deadband floor on a short segment: length 0.12m
   // scaled gate = 0.25 * 0.12 = 0.03m < 0.05m floor -> effective xy tol = 0.05m
   nav_msgs::msg::Path plan2;
