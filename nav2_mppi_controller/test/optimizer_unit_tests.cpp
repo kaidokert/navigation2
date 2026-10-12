@@ -2090,6 +2090,25 @@ public:
     control_sequence_.wz.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
+
+    // 8. Final segment with reverse path_direction_ (-1) but goal is in front and MPPI commands forward creep (+0.020f)
+    // -> effective_direction aligns forward, floored to +0.050f (never inverted to -0.050f)
+    path_direction_ = -1;
+    state_.pose.pose.position.x = 0.0;
+    state_.pose.pose.position.y = 0.0;
+    state_.pose.pose.orientation = geometry_msgs::msg::Quaternion(); // yaw = 0.0
+    path_.yaws.fill(0.0f);
+    goal_.position.x = 0.10; // in front
+    goal_.position.y = 0.0;
+    control_sequence_.vx.fill(0.020f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_GE(cmd.twist.linear.x, 0.050f);
+
+    // 9. Final segment with reverse path_direction_ (-1) and MPPI commands deliberate forward maneuver (+0.180f)
+    // -> preserved without modification (never inverted to -0.050f)
+    control_sequence_.vx.fill(0.180f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, 0.180f, 1e-4);
   }
 };
 

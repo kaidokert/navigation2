@@ -3064,13 +3064,33 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
         }
 
         if (aligned_to_path) {
-          const int effective_direction = (active_cusp_direction_ != 0) ?
+          int effective_direction = (active_cusp_direction_ != 0) ?
             active_cusp_direction_ : path_direction_;
 
+          // On final segment (active_cusp_direction_ == 0), if the vehicle is oriented towards
+          // and commanding motion in the direction of the target, align effective_direction
+          // with the target longitudinal offset to prevent stale path_direction_ from inverting recovery.
+          if (active_cusp_direction_ == 0) {
+            const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
+            const float dx = target_x - static_cast<float>(state_.pose.pose.position.x);
+            const float dy = target_y - static_cast<float>(state_.pose.pose.position.y);
+            const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
+                                 dy * static_cast<float>(std::sin(robot_yaw));
+            if (d_long > 0.02f && vx > 0.0f) {
+              effective_direction = 1;
+            } else if (d_long < -0.02f && vx < 0.0f) {
+              effective_direction = -1;
+            }
+          }
+
           if (effective_direction > 0) {
-            vx = std::max(vx, motor_deadband_floor_);
+            if (vx >= 0.0f || std::abs(vx) < motor_deadband_floor_) {
+              vx = std::max(vx, motor_deadband_floor_);
+            }
           } else if (effective_direction < 0) {
-            vx = std::min(vx, -motor_deadband_floor_);
+            if (vx <= 0.0f || std::abs(vx) < motor_deadband_floor_) {
+              vx = std::min(vx, -motor_deadband_floor_);
+            }
           } else {
             if (vx >= 0.0f) {
               vx = std::max(vx, motor_deadband_floor_);
