@@ -49,7 +49,7 @@ void MPPIController::configure(
 
   // Configure composed objects
   optimizer_.initialize(parent_, name_, costmap_ros_, parameters_handler_.get());
-  if (optimizer_.requiresSteeringFeedback()) {
+  if (optimizer_.requiresSteeringFeedback() || enable_presteer_on_handoff_) {
     std::string topic;
     getParam(topic, "AckermannConstraints.steering_feedback_topic",
       std::string("/robot_joint_states"), ParameterType::Static);

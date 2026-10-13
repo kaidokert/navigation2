@@ -3106,12 +3106,6 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             if (vx <= 0.0f || std::abs(vx) < motor_deadband_floor_) {
               vx = std::min(vx, -motor_deadband_floor_);
             }
-          } else {
-            if (vx >= 0.0f) {
-              vx = std::max(vx, motor_deadband_floor_);
-            } else {
-              vx = std::min(vx, -motor_deadband_floor_);
-            }
           }
         }
       }
