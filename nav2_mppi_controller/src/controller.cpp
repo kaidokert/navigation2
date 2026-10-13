@@ -147,7 +147,7 @@ void MPPIController::receiveSteeringFeedback(
 
 void MPPIController::updateSteeringFeedback()
 {
-  if (!optimizer_.requiresSteeringFeedback() && !enable_presteer_on_handoff_) {return;}
+  if (!optimizer_.requiresSteeringFeedback()) {return;}
   optimizer_.setInitialSteering(std::nullopt);
   optimizer_.setInitialConditionedSteering(std::nullopt);
   sensor_msgs::msg::JointState::ConstSharedPtr message;
@@ -262,7 +262,17 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
             std::atan(presteer_wheelbase_ * kappa),
             -presteer_max_angle_, presteer_max_angle_);
 
-          float current_steer = optimizer_.getInitialSteering().value_or(0.0f);
+          float current_steer = 0.0f;
+          {
+            std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
+            if (steering_feedback_) {
+              const auto & names = steering_feedback_->name;
+              const auto found = std::find(names.begin(), names.end(), "front_steering_joint");
+              if (found != names.end() && static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size()) {
+                current_steer = static_cast<float>(steering_feedback_->position[found - names.begin()]);
+              }
+            }
+          }
           if (std::abs(current_steer - target_steer) > presteer_angle_tolerance_) {
             presteering_ = true;
             presteer_start_time_ = node->now();
@@ -277,7 +287,17 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
     }
 
     if (presteering_) {
-      float current_steer = optimizer_.getInitialSteering().value_or(0.0f);
+      float current_steer = 0.0f;
+      {
+        std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
+        if (steering_feedback_) {
+          const auto & names = steering_feedback_->name;
+          const auto found = std::find(names.begin(), names.end(), "front_steering_joint");
+          if (found != names.end() && static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size()) {
+            current_steer = static_cast<float>(steering_feedback_->position[found - names.begin()]);
+          }
+        }
+      }
       double elapsed = (node->now() - presteer_start_time_).seconds();
       if (elapsed < 0.0 ||
           std::abs(current_steer - presteer_target_angle_) <= presteer_angle_tolerance_ ||
