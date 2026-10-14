@@ -1968,13 +1968,38 @@ TEST(PathHandlerTests, TerminalGoalStallRequestsReplan)
   // Robot at (-0.02, 0.24) -> dist = 0.16m > 0.10m goal tolerance
   auto robot_pose = makePose(-0.02, 0.24, 0);
 
-  // For 50 cycles, transformPath succeeds while tracking stall cycles
-  for (unsigned int i = 0; i < 50; ++i) {
+  // For 60 cycles, transformPath succeeds while tracking stall cycles
+  for (unsigned int i = 0; i < 60; ++i) {
     EXPECT_NO_THROW(handler.transformPath(robot_pose));
   }
 
-  // On 51st cycle (stall_cycles > 50), FailedToMakeProgress is thrown for stopped replan
+  // On 61st cycle (stall_cycles > 60), FailedToMakeProgress is thrown for stopped replan
   EXPECT_THROW(handler.transformPath(robot_pose), nav2_core::FailedToMakeProgress);
+}
+
+TEST(PathHandlerTests, TerminalGoalWithinToleranceDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot at (0.0, 0.32) -> dist = 0.08m <= 0.098m goal tolerance bound
+  auto robot_pose = makePose(0, 0.32, 0);
+
+  // For 100 cycles, does not throw because vehicle is within goal tolerance bound
+  for (unsigned int i = 0; i < 100; ++i) {
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
 }
 
 

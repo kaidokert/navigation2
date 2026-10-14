@@ -530,9 +530,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
       } else {
         ++goal_stall_cycles_;
       }
-      constexpr double goal_tolerance_bound = 0.070;
+      constexpr double goal_tolerance_bound = 0.098;
       if (min_goal_distance_ > goal_tolerance_bound &&
-          (goal_dist > min_goal_distance_ + 0.03 || goal_stall_cycles_ > 30u))
+          (goal_dist > min_goal_distance_ + 0.04 || goal_stall_cycles_ > 60u))
       {
         RCLCPP_WARN(logger_,
           "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm stall_cycles=%u pts=%zu; requesting stopped replan",
