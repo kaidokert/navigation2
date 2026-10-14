@@ -524,15 +524,18 @@ nav_msgs::msg::Path PathHandler::transformPath(
       global_pose.pose.position.y - goal_pose.pose.position.y);
     const bool near_goal = (real_path_point_count_ <= 3u || goal_dist < 0.25);
     if (near_goal) {
-      if (goal_dist < min_goal_distance_) {
+      if (min_goal_distance_ - goal_dist > 0.010) {
         min_goal_distance_ = goal_dist;
         goal_stall_cycles_ = 0u;
       } else {
+        if (goal_dist < min_goal_distance_) {
+          min_goal_distance_ = goal_dist;
+        }
         ++goal_stall_cycles_;
       }
-      constexpr double goal_tolerance_bound = 0.098;
-      if (min_goal_distance_ > goal_tolerance_bound &&
-          (goal_dist > min_goal_distance_ + 0.04 || goal_stall_cycles_ > 60u))
+      constexpr double goal_tolerance_bound = 0.085;
+      if (goal_dist > goal_tolerance_bound &&
+          (goal_dist > min_goal_distance_ + 0.03 || goal_stall_cycles_ > 60u))
       {
         RCLCPP_WARN(logger_,
           "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm stall_cycles=%u pts=%zu; requesting stopped replan",

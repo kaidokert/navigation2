@@ -3080,17 +3080,20 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
                                  dy * static_cast<float>(std::sin(robot_yaw));
             constexpr float d_long_deadband = 0.08f;
-            if (d_long > d_long_deadband) {
-              effective_direction = 1;
-            } else if (d_long < -d_long_deadband) {
-              effective_direction = -1;
+            if (vx > 0.005f) {
+              // Deliberate forward command: apply forward deadband floor only if target is ahead
+              // or abeam; never invert forward motion into reverse.
+              effective_direction = (d_long >= -d_long_deadband) ? 1 : 0;
+            } else if (vx < -0.005f) {
+              // Deliberate reverse command: apply reverse deadband floor only if target is behind
+              // or abeam; never invert reverse motion into forward.
+              effective_direction = (d_long <= d_long_deadband) ? -1 : 0;
             } else {
-              // Goal is abeam (beside the robot, |d_long| <= d_long_deadband).
-              // Follow the optimizer's commanded sign when moving, but preserve standstill/zero
-              // command (|vx| <= 0.005) so the vehicle can arrest for StoppedGoalChecker.
-              if (vx > 0.005f) {
+              // Commanded standstill or noise (|vx| <= 0.005):
+              // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve standstill.
+              if (d_long > d_long_deadband) {
                 effective_direction = 1;
-              } else if (vx < -0.005f) {
+              } else if (d_long < -d_long_deadband) {
                 effective_direction = -1;
               } else {
                 effective_direction = 0;
