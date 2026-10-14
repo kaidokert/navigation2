@@ -522,7 +522,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
     const double goal_dist = std::hypot(
       global_pose.pose.position.x - goal_pose.pose.position.x,
       global_pose.pose.position.y - goal_pose.pose.position.y);
-    const bool near_goal = (real_path_point_count_ <= 3u || goal_dist < 0.25);
+    const double goal_tol = (goal_tolerance_ > 0.0) ? goal_tolerance_ : 0.085;
+    const bool near_goal = (real_path_point_count_ <= 3u || goal_dist < (goal_tol + 0.15));
     if (near_goal) {
       if (min_goal_distance_ - goal_dist > 0.010) {
         min_goal_distance_ = goal_dist;
@@ -533,13 +534,12 @@ nav_msgs::msg::Path PathHandler::transformPath(
         }
         ++goal_stall_cycles_;
       }
-      constexpr double goal_tolerance_bound = 0.085;
-      if (goal_dist > goal_tolerance_bound &&
+      if (goal_dist > goal_tol &&
           (goal_dist > min_goal_distance_ + 0.03 || goal_stall_cycles_ > 60u))
       {
         RCLCPP_WARN(logger_,
-          "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm stall_cycles=%u pts=%zu; requesting stopped replan",
-          goal_dist, min_goal_distance_, goal_stall_cycles_, real_path_point_count_);
+          "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm stall_cycles=%u pts=%zu tol=%.4fm; requesting stopped replan",
+          goal_dist, min_goal_distance_, goal_stall_cycles_, real_path_point_count_, goal_tol);
         min_goal_distance_ = std::numeric_limits<double>::infinity();
         goal_stall_cycles_ = 0u;
         throw nav2_core::FailedToMakeProgress("Terminal goal progress stalled; stopped replan required");

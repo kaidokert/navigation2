@@ -137,6 +137,8 @@ public:
   void setInversionYawBase(double yaw) {inversion_yaw_base_ = yaw;}
   double getMinCuspDistance() const {return min_cusp_distance_;}
   void resetMinCuspDistance() {min_cusp_distance_ = std::numeric_limits<double>::infinity();}
+  void setGoalTolerance(double tol) {goal_tolerance_ = tol;}
+  double getGoalTolerance() const {return goal_tolerance_;}
 
   /**
    * @brief Get the global goal pose transformed to the local frame
@@ -325,6 +327,7 @@ protected:
   bool replan_on_cusp_overrun_{false};
   double min_goal_distance_{std::numeric_limits<double>::infinity()};
   unsigned int goal_stall_cycles_{0u};
+  double goal_tolerance_{0.085};
   bool cusp_overrun_snapshot_written_{false};
   struct DepartureApproachBudget
   {

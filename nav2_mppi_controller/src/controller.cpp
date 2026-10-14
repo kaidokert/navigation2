@@ -209,6 +209,13 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
   std::lock_guard<std::mutex> param_lock(*parameters_handler_->getLock());
   // Validate before path pruning can consume a cusp or advance segment state.
   updateSteeringFeedback();
+  if (goal_checker) {
+    geometry_msgs::msg::Pose pose_tol;
+    geometry_msgs::msg::Twist vel_tol;
+    if (goal_checker->getTolerances(pose_tol, vel_tol)) {
+      path_handler_.setGoalTolerance(pose_tol.position.x);
+    }
+  }
   geometry_msgs::msg::Pose goal = path_handler_.getTransformedGoal(robot_pose.header.stamp).pose;
 
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();

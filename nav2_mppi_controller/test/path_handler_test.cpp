@@ -2002,4 +2002,33 @@ TEST(PathHandlerTests, TerminalGoalWithinToleranceDoesNotStall)
   }
 }
 
+TEST(PathHandlerTests, TerminalGoalWithDynamicToleranceDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Set dynamic goal tolerance to 0.21m (e.g. M6 tolerance)
+  handler.setGoalTolerance(0.21);
+  EXPECT_DOUBLE_EQ(handler.getGoalTolerance(), 0.21);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot at (0.0, 0.27) -> dist = 0.13m (within 0.21m goal tolerance, but would have failed with 0.085m bound)
+  auto robot_pose = makePose(0, 0.27, 0);
+
+  // For 100 cycles, does not throw because vehicle is within goal tolerance (0.21m)
+  for (unsigned int i = 0; i < 100; ++i) {
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
 
