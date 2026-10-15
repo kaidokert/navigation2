@@ -3055,9 +3055,10 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
         bool aligned_to_path = true;
         if (path_.yaws.size() > 0) {
           const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
-          const double path_yaw = path_.yaws(0);
+          const double ref_yaw = (active_cusp_direction_ == 0) ?
+            tf2::getYaw(goal_.orientation) : path_.yaws(0);
           const double heading_err = std::abs(
-            angles::shortest_angular_distance(robot_yaw, path_yaw));
+            angles::shortest_angular_distance(robot_yaw, ref_yaw));
           const float max_heading = (active_cusp_direction_ != 0) ?
             0.5236f : motor_deadband_max_heading_error_;
           aligned_to_path = (heading_err <= max_heading);
