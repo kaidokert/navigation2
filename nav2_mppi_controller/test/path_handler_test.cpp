@@ -1968,12 +1968,12 @@ TEST(PathHandlerTests, TerminalGoalStallRequestsReplan)
   // Robot at (-0.02, 0.24) -> dist = 0.16m > 0.10m goal tolerance
   auto robot_pose = makePose(-0.02, 0.24, 0);
 
-  // For 60 cycles, transformPath succeeds while tracking stall cycles
-  for (unsigned int i = 0; i < 60; ++i) {
+  // For 120 cycles, transformPath succeeds while tracking stall cycles
+  for (unsigned int i = 0; i < 120; ++i) {
     EXPECT_NO_THROW(handler.transformPath(robot_pose));
   }
 
-  // On 61st cycle (stall_cycles > 60), FailedToMakeProgress is thrown for stopped replan
+  // On 121st cycle (stall_cycles > 120), FailedToMakeProgress is thrown for stopped replan
   EXPECT_THROW(handler.transformPath(robot_pose), nav2_core::FailedToMakeProgress);
 }
 
@@ -2030,5 +2030,35 @@ TEST(PathHandlerTests, TerminalGoalWithDynamicToleranceDoesNotStall)
     EXPECT_NO_THROW(handler.transformPath(robot_pose));
   }
 }
+
+TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Set goal tolerance to 0.07m (e.g. M8 stopped checker tolerance)
+  handler.setGoalTolerance(0.07);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot starts at y = 0.22 (dist = 0.18m > 0.07m goal tolerance).
+  // Creeps slowly forward at 1 mm per cycle over 150 cycles (0.5 m/s * dt = 0.001m per cycle).
+  // Because net progress exceeds 10mm every 10 cycles, stall_cycles is continually reset.
+  for (unsigned int i = 0; i < 150; ++i) {
+    double current_y = 0.22 + (static_cast<double>(i) * 0.001);
+    auto robot_pose = makePose(0, current_y, 0);
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
 
 

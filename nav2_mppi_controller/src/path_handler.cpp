@@ -345,6 +345,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
       departure_approach_budget_.reset();
       min_cusp_distance_ = std::numeric_limits<double>::infinity();
       min_goal_distance_ = std::numeric_limits<double>::infinity();
+      last_progress_distance_ = std::numeric_limits<double>::infinity();
       goal_stall_cycles_ = 0u;
       const auto & handed_off_cusp = global_plan_up_to_inversion_.poses.back();
       const double handoff_dist = std::hypot(
@@ -525,28 +526,33 @@ nav_msgs::msg::Path PathHandler::transformPath(
     const double goal_tol = (goal_tolerance_ > 0.0) ? goal_tolerance_ : 0.085;
     const bool near_goal = (real_path_point_count_ <= 3u || goal_dist < (goal_tol + 0.15));
     if (near_goal) {
-      if (min_goal_distance_ - goal_dist > 0.010) {
-        min_goal_distance_ = goal_dist;
+      if (!std::isfinite(last_progress_distance_)) {
+        last_progress_distance_ = goal_dist;
+      }
+      if (last_progress_distance_ - goal_dist > 0.010) {
+        last_progress_distance_ = goal_dist;
         goal_stall_cycles_ = 0u;
       } else {
-        if (goal_dist < min_goal_distance_) {
-          min_goal_distance_ = goal_dist;
-        }
         ++goal_stall_cycles_;
       }
+      if (goal_dist < min_goal_distance_) {
+        min_goal_distance_ = goal_dist;
+      }
       if (goal_dist > goal_tol &&
-          (goal_dist > min_goal_distance_ + 0.03 || goal_stall_cycles_ > 60u))
+          (goal_dist > min_goal_distance_ + 0.04 || goal_stall_cycles_ > 120u))
       {
         RCLCPP_WARN(logger_,
-          "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm stall_cycles=%u pts=%zu tol=%.4fm; requesting stopped replan",
-          goal_dist, min_goal_distance_, goal_stall_cycles_, real_path_point_count_, goal_tol);
+          "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm last_prog=%.4fm stall_cycles=%u pts=%zu tol=%.4fm; requesting stopped replan",
+          goal_dist, min_goal_distance_, last_progress_distance_, goal_stall_cycles_, real_path_point_count_, goal_tol);
         min_goal_distance_ = std::numeric_limits<double>::infinity();
+        last_progress_distance_ = std::numeric_limits<double>::infinity();
         goal_stall_cycles_ = 0u;
         throw nav2_core::FailedToMakeProgress("Terminal goal progress stalled; stopped replan required");
       }
     }
   } else {
     min_goal_distance_ = std::numeric_limits<double>::infinity();
+    last_progress_distance_ = std::numeric_limits<double>::infinity();
     goal_stall_cycles_ = 0u;
   }
 
@@ -912,6 +918,7 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
   retained_departure_approach_.reset();
   min_cusp_distance_ = std::numeric_limits<double>::infinity();
   min_goal_distance_ = std::numeric_limits<double>::infinity();
+  last_progress_distance_ = std::numeric_limits<double>::infinity();
   goal_stall_cycles_ = 0u;
   canonical_plan_=std::make_shared<const nav_msgs::msg::Path>(plan);
   ++plan_generation_;++segment_generation_;path_binding_.reset();
