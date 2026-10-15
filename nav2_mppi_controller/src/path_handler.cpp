@@ -344,9 +344,6 @@ nav_msgs::msg::Path PathHandler::transformPath(
     if (accept_handoff) {
       departure_approach_budget_.reset();
       min_cusp_distance_ = std::numeric_limits<double>::infinity();
-      min_goal_distance_ = std::numeric_limits<double>::infinity();
-      last_progress_distance_ = std::numeric_limits<double>::infinity();
-      goal_stall_cycles_ = 0u;
       const auto & handed_off_cusp = global_plan_up_to_inversion_.poses.back();
       const double handoff_dist = std::hypot(
         global_pose.pose.position.x - handed_off_cusp.pose.position.x,
@@ -512,49 +509,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
     }
   }
 
-  // Terminal goal stall recovery:
-  // On the final segment (inversion_locale_ == 0u), when the real path has been
-  // consumed to the goal pose (real_path_point_count_ <= 1u), if the vehicle cannot
-  // reach the goal tolerance (< 0.10m) and stalls oscillating for > 2.5 seconds (50 cycles)
-  // or recedes by > 4 cm past closest approach, throw FailedToMakeProgress to trigger
-  // stopped replanning with Smac Planner instead of indefinite limit-cycling.
-  if (inversion_locale_ == 0u && !global_plan_.poses.empty()) {
-    const auto & goal_pose = global_plan_.poses.back();
-    const double goal_dist = std::hypot(
-      global_pose.pose.position.x - goal_pose.pose.position.x,
-      global_pose.pose.position.y - goal_pose.pose.position.y);
-    const double goal_tol = (goal_tolerance_ > 0.0) ? goal_tolerance_ : 0.085;
-    const bool near_goal = (real_path_point_count_ <= 1u && goal_dist < (goal_tol + 0.10));
-    if (near_goal) {
-      if (!std::isfinite(last_progress_distance_)) {
-        last_progress_distance_ = goal_dist;
-      }
-      if (last_progress_distance_ - goal_dist > 0.010) {
-        last_progress_distance_ = goal_dist;
-        goal_stall_cycles_ = 0u;
-      } else {
-        ++goal_stall_cycles_;
-      }
-      if (goal_dist < min_goal_distance_) {
-        min_goal_distance_ = goal_dist;
-      }
-      if (min_goal_distance_ > goal_tol &&
-          (goal_dist > min_goal_distance_ + 0.04 || goal_stall_cycles_ > 120u))
-      {
-        RCLCPP_WARN(logger_,
-          "[TERMINAL_STALL] goal_dist=%.4fm min=%.4fm last_prog=%.4fm stall_cycles=%u pts=%zu tol=%.4fm; requesting stopped replan",
-          goal_dist, min_goal_distance_, last_progress_distance_, goal_stall_cycles_, real_path_point_count_, goal_tol);
-        min_goal_distance_ = std::numeric_limits<double>::infinity();
-        last_progress_distance_ = std::numeric_limits<double>::infinity();
-        goal_stall_cycles_ = 0u;
-        throw nav2_core::FailedToMakeProgress("Terminal goal progress stalled; stopped replan required");
-      }
-    }
-  } else {
-    min_goal_distance_ = std::numeric_limits<double>::infinity();
-    last_progress_distance_ = std::numeric_limits<double>::infinity();
-    goal_stall_cycles_ = 0u;
-  }
+
 
   // Layer 2 escape (notes/cusp_handoff_fix_plan.md): the handoff has been
   // blocked long enough that extrapolating the consumed segment cannot help â€”
@@ -917,9 +872,6 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
   departure_approach_budget_.reset();
   retained_departure_approach_.reset();
   min_cusp_distance_ = std::numeric_limits<double>::infinity();
-  min_goal_distance_ = std::numeric_limits<double>::infinity();
-  last_progress_distance_ = std::numeric_limits<double>::infinity();
-  goal_stall_cycles_ = 0u;
   canonical_plan_=std::make_shared<const nav_msgs::msg::Path>(plan);
   ++plan_generation_;++segment_generation_;path_binding_.reset();
   global_source_offset_=0;inversion_source_offset_=0;segment_source_begin_=0;
