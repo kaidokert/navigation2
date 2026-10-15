@@ -3079,7 +3079,7 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             const float dy = target_y - static_cast<float>(state_.pose.pose.position.y);
             const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
                                  dy * static_cast<float>(std::sin(robot_yaw));
-            constexpr float d_long_deadband = 0.08f;
+            constexpr float d_long_deadband = 0.02f;
             if (vx > 0.005f) {
               // Deliberate forward command: apply forward deadband floor only if target is ahead
               // or abeam; never invert forward motion into reverse.
@@ -3090,13 +3090,13 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
               effective_direction = (d_long <= d_long_deadband) ? -1 : 0;
             } else {
               // Commanded standstill or noise (|vx| <= 0.005):
-              // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve standstill.
+              // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve path direction.
               if (d_long > d_long_deadband) {
                 effective_direction = 1;
               } else if (d_long < -d_long_deadband) {
                 effective_direction = -1;
               } else {
-                effective_direction = 0;
+                effective_direction = (path_direction_ != 0) ? path_direction_ : 1;
               }
             }
           }

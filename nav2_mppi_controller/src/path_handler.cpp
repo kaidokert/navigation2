@@ -524,7 +524,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
       global_pose.pose.position.x - goal_pose.pose.position.x,
       global_pose.pose.position.y - goal_pose.pose.position.y);
     const double goal_tol = (goal_tolerance_ > 0.0) ? goal_tolerance_ : 0.085;
-    const bool near_goal = (real_path_point_count_ <= 3u || goal_dist < (goal_tol + 0.15));
+    const bool near_goal = (real_path_point_count_ <= 1u && goal_dist < (goal_tol + 0.10));
     if (near_goal) {
       if (!std::isfinite(last_progress_distance_)) {
         last_progress_distance_ = goal_dist;
