@@ -538,7 +538,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
       if (goal_dist < min_goal_distance_) {
         min_goal_distance_ = goal_dist;
       }
-      if (goal_dist > goal_tol &&
+      if (min_goal_distance_ > goal_tol &&
           (goal_dist > min_goal_distance_ + 0.04 || goal_stall_cycles_ > 120u))
       {
         RCLCPP_WARN(logger_,
