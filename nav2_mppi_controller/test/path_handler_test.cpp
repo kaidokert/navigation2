@@ -2057,5 +2057,52 @@ TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
   }
 }
 
+TEST(PathHandlerTests, LongitudinalProgressGateRejectsPrematureHandoff)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("long_gate_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.inversion_yaw_tolerance", 0.38);
+  node->declare_parameter("dummy.inversion_longitudinal_tolerance", 0.05);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Path with incoming segment approaching cusp at (0.0, 1.0) along +y:
+  // (0.0, 0.0) -> (0.0, 0.5) -> (0.0, 1.0), then outgoing reversal to (0.0, 0.8)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {
+    makePose(0.0, 0.0, 1.5707963),
+    makePose(0.0, 0.5, 1.5707963),
+    makePose(0.0, 1.0, 1.5707963),
+    makePose(0.0, 0.8, -1.5707963)
+  };
+  handler.setPath(plan);
+  ASSERT_GT(handler.getInversionLocale(), 0u);
+
+  // Case 1: Premature arrival along approach tangent.
+  // Robot at (0.0, 0.88, 1.5707963).
+  // Distance to cusp is 0.12m <= 0.15m (within isotropic Euclidean gate!).
+  // Remaining longitudinal progress is 0.12m > 0.05m.
+  // Handoff must be REJECTED so the vehicle does not abort the segment 12 cm early.
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.0, 0.88, 1.5707963)));
+
+  // Case 2: Near arrival within longitudinal progress gate.
+  // Robot at (0.02, 0.98, 1.5707963).
+  // Distance to cusp is hypot(0.02, 0.02) = 0.0283m <= 0.15m.
+  // Remaining longitudinal progress is 0.02m <= 0.05m.
+  // Handoff must be ACCEPTED.
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.02, 0.98, 1.5707963)));
+
+  // Case 3: Overshoot past the cusp along the approach tangent.
+  // Robot at (0.03, 1.02, 1.5707963).
+  // Distance to cusp is hypot(0.03, 0.02) = 0.036m <= 0.15m.
+  // Remaining longitudinal progress is -0.02m <= 0.05m (past cusp).
+  // Handoff must be ACCEPTED.
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.03, 1.02, 1.5707963)));
+}
+
 
 

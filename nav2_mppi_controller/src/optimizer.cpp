@@ -3092,9 +3092,12 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             } else {
               // Commanded standstill or noise (|vx| <= 0.005):
               // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve path direction.
-              if (d_long > d_long_deadband) {
+              const float d_lat = -dx * static_cast<float>(std::sin(robot_yaw)) +
+                                   dy * static_cast<float>(std::cos(robot_yaw));
+              const bool is_predominantly_abeam = std::abs(d_lat) > std::abs(d_long);
+              if (d_long > d_long_deadband && !is_predominantly_abeam) {
                 effective_direction = 1;
-              } else if (d_long < -d_long_deadband) {
+              } else if (d_long < -d_long_deadband && !is_predominantly_abeam) {
                 effective_direction = -1;
               } else {
                 effective_direction = (path_direction_ != 0) ? path_direction_ : 1;

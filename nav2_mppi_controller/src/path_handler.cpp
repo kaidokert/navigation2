@@ -86,6 +86,7 @@ void PathHandler::initialize(
     getParam(inversion_yaw_tolerance_, "inversion_yaw_tolerance", 0.4);
     getParam(inversion_segment_ratio_, "inversion_segment_ratio", 0.25);
     getParam(inversion_xy_floor_, "inversion_xy_floor", 0.05);
+    getParam(inversion_longitudinal_tolerance_, "inversion_longitudinal_tolerance", 0.05);
     getParam(inversion_yaw_base_, "inversion_yaw_base", 0.20);
     // Experimental policy: previous unconditional version regressed the loop.
     // Keep opt-in so paired frozen-path diagnostics can test it independently.
@@ -109,6 +110,7 @@ void PathHandler::initialize(
       handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
     inversion_segment_ratio_ = std::clamp(inversion_segment_ratio_, 0.05, 1.0);
     inversion_xy_floor_ = std::max(0.0, inversion_xy_floor_);
+    inversion_longitudinal_tolerance_ = std::max(0.0, inversion_longitudinal_tolerance_);
     if (min_inversion_horizon_ < 0.0) {
       RCLCPP_WARN(logger_,
         "min_inversion_horizon (%.3f) is negative, disabling ghost extension",
@@ -1025,7 +1027,42 @@ bool PathHandler::isWithinInversionTolerances(
     min_cusp_distance_ = distance;
   }
 
-  const bool within_xy = distance <= effective_xy_tol;
+  // Directional longitudinal progress check along incoming path tangent:
+  // If the robot is tracking along the incoming segment towards the cusp,
+  // do not trigger handoff prematurely when it is still significantly far
+  // upstream along the path tangent, even if it has entered the isotropic
+  // effective_xy_tol circle.
+  double remaining_longitudinal = 0.0;
+  bool has_incoming_tangent = false;
+  if (global_plan_up_to_inversion_.poses.size() >= 2) {
+    const auto & cusp_pt = last_pose.pose.position;
+    for (int i = static_cast<int>(global_plan_up_to_inversion_.poses.size()) - 2; i >= 0; --i) {
+      const auto & prev_pt = global_plan_up_to_inversion_.poses[i].pose.position;
+      const double dx = cusp_pt.x - prev_pt.x;
+      const double dy = cusp_pt.y - prev_pt.y;
+      const double seg_len = std::hypot(dx, dy);
+      if (seg_len >= 0.02 || i == 0) {
+        if (seg_len > 1e-4) {
+          const double ux = dx / seg_len;
+          const double uy = dy / seg_len;
+          const double rx = cusp_pt.x - robot_pose.pose.position.x;
+          const double ry = cusp_pt.y - robot_pose.pose.position.y;
+          remaining_longitudinal = rx * ux + ry * uy;
+          has_incoming_tangent = true;
+        }
+        break;
+      }
+    }
+  }
+
+  const double max_remaining_long = is_micro_cusp
+    ? effective_xy_tol
+    : std::min(static_cast<double>(effective_xy_tol), inversion_longitudinal_tolerance_);
+
+  const bool longitudinal_satisfied = !has_incoming_tangent ||
+    (remaining_longitudinal <= max_remaining_long);
+
+  const bool within_xy = (distance <= effective_xy_tol) && longitudinal_satisfied;
   const bool within_yaw = std::fabs(angle_distance) <= relaxed_yaw_tol;
 
   // Closest-approach handoff for near misses:
