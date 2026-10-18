@@ -2987,8 +2987,7 @@ void Optimizer::updateControlSequence(bool diag)
 {
   recorder::observe("update_begin", [&] {return recorder::Json{
     {"costs", recorder::tensor(costs_)}, {"control", recorder::sequence(control_sequence_)},
-    {"sampled_vx", recorder::tensor(state_.cvx)}, {"sampled_vy", recorder::tensor(state_.cvy)},
-    {"sampled_wz", recorder::tensor(state_.cwz)}};});
+    {"sample_bank_id", recorder::active->bank}};});
   const bool is_holo = isHolonomic();
   auto & s = settings_;
   auto bounded_noises_vx = state_.cvx - control_sequence_.vx;

@@ -12,6 +12,8 @@
 #include <fcntl.h>
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <vector>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
 
@@ -30,15 +32,30 @@ inline bool finite(double value)
 }
 template<typename Tensor> Json tensor(const Tensor & t)
 {
-  Json data = Json::array(), shape = Json::array();
+  static_assert(std::is_same<typename Tensor::value_type, float>::value,
+    "Trace tensor encoding must not narrow a non-float32 tensor");
+  Json shape = Json::array();
   if (t.size() > 2048 * 128) {throw std::runtime_error("tensor capture bound");}
-  data.get_ref<Json::array_t &>().reserve(t.size());
   for (auto n : t.shape()) {shape.push_back(n);}
-  for (auto x : t) {
+  std::vector<unsigned char> bytes;
+  bytes.reserve(t.size() * 4);
+  for (float x : t) {
     if (!finite(static_cast<double>(x))) {throw std::runtime_error("nonfinite tensor");}
-    data.push_back(x);
+    uint32_t bits; std::memcpy(&bits, &x, sizeof(bits));
+    for (unsigned shift : {0u,8u,16u,24u}) {bytes.push_back((bits >> shift) & 255u);}
   }
-  return Json{{"shape", std::move(shape)}, {"data", std::move(data)}};
+  static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string data; data.reserve(4 * ((bytes.size() + 2) / 3));
+  for (size_t i=0; i<bytes.size(); i+=3) {
+    const uint32_t bits = (uint32_t(bytes[i]) << 16) |
+      (i+1<bytes.size() ? uint32_t(bytes[i+1]) << 8 : 0) |
+      (i+2<bytes.size() ? uint32_t(bytes[i+2]) : 0);
+    data.push_back(alphabet[(bits >> 18) & 63]);data.push_back(alphabet[(bits >> 12) & 63]);
+    data.push_back(i+1<bytes.size() ? alphabet[(bits >> 6) & 63] : '=');
+    data.push_back(i+2<bytes.size() ? alphabet[bits & 63] : '=');
+  }
+  return Json{{"shape", std::move(shape)}, {"encoding","f32le-base64"},
+    {"order","C"}, {"data", std::move(data)}};
 }
 template<typename Sequence> Json sequence(const Sequence & s)
 {return Json{{"vx", tensor(s.vx)}, {"vy", tensor(s.vy)}, {"wz", tensor(s.wz)}};}
@@ -65,7 +82,7 @@ template<typename Path> Json path(const Path & p)
 
 struct Config
 {
-  size_t pre{3}, post{2}, maximum_invocations{128}, maximum_bytes{256 * 1024 * 1024};
+  size_t pre{25}, post{2}, maximum_invocations{128}, maximum_bytes{256 * 1024 * 1024};
   unsigned collapse_cycles{20}, reversal_count{4};
   double collapse_speed{0.02}, progress_floor{0.005}, moving_command{0.05};
 };
@@ -76,7 +93,13 @@ inline size_t serializedUpperBound(const Json & value)
 {
   if (value.is_null() || value.is_boolean()) {return 5;}
   if (value.is_number()) {return 32;}
-  if (value.is_string()) {return 2 + 6 * value.get_ref<const std::string &>().size();}
+  if (value.is_string()) {
+    size_t bytes = 2;
+    for (unsigned char c : value.get_ref<const std::string &>()) {
+      bytes += c < 0x20 ? 6 : (c == '"' || c == '\\') ? 2 : 1;
+    }
+    return bytes;
+  }
   size_t bound = 2;
   if (value.is_array()) {
     const auto & items = value.get_ref<const Json::array_t &>();
@@ -169,7 +192,7 @@ public:
     // Called on explicit flush/inspection, outside the observed control scope.
     size_t actual_bytes = 0;
     for (const auto & frame : frames_) {actual_bytes += frame.dump().size();}
-    return Json{{"schema", "jetacker-decision-trace/1.0.0"}, {"manifest", manifest_},
+    return Json{{"schema", "jetacker-decision-trace/1.1.0"}, {"manifest", manifest_},
       {"termination", reason_}, {"triggered", triggered_}, {"frozen", frozen_},
       {"health", {{"errors", errors_}, {"overflow", overflow_}, {"pre_evictions", evictions_},
         {"after_window", after_window_}, {"clock_resets", clock_resets_},

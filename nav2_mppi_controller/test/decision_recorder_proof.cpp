@@ -118,13 +118,13 @@ struct Scene
       {"candidate_scope",(name=="healthy" || name=="smoothing" || name=="benchmark") ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
   }
 };
-void save(const std::string & name,rec::Recorder & recorder,const geometry_msgs::msg::TwistStamped & command)
+void save(const std::string & name,rec::Recorder & recorder,const geometry_msgs::msg::TwistStamped & command, const rec::Json & witnesses=rec::Json::array())
 {
   auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));
   std::filesystem::create_directories(out);recorder.trigger("manual");recorder.writeExclusive((out/(name+".trace.json")).string());
   std::ofstream f(out/(name+".witness.json"));
   f<<rec::Json{{"vx",command.twist.linear.x},{"vy",command.twist.linear.y},{"wz",command.twist.angular.z},
-    {"source","separate native function return, not re-read from trace"}}.dump(2);
+    {"source","separate native function return, not re-read from trace"},{"commands",witnesses}}.dump(2);
 }
 }
 
@@ -189,9 +189,9 @@ TEST(DecisionRecorderProof,FullOptimizerWithActiveSmoothing)
 TEST(DecisionRecorderProof,ProductionSizedOverheadAndNumericalParity)
 {
   Scene s(false,1000,41,3);geometry_msgs::msg::Twist speed;speed.linear.x=.1;
-  rec::Config cfg;cfg.pre=1;cfg.maximum_invocations=1;
+  rec::Config cfg;cfg.pre=25;cfg.maximum_invocations=128;
   rec::Recorder recorder(s.manifest("benchmark"),cfg);
-  std::vector<double> off_ms,on_ms,added;size_t mismatches=0;
+  std::vector<double> off_ms,on_ms,added;size_t mismatches=0;rec::Json witnesses=rec::Json::array();
   geometry_msgs::msg::TwistStamped on;
   for(int i=0;i<40;++i){
     s.optimizer.seed();auto begin=rec::monotonicNs();
@@ -200,18 +200,20 @@ TEST(DecisionRecorderProof,ProductionSizedOverheadAndNumericalParity)
     s.optimizer.seed();begin=rec::monotonicNs();
     {rec::Session recording(recorder);on=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);}
     on_ms.push_back((rec::monotonicNs()-begin)/1e6);added.push_back(on_ms.back()-off_ms.back());
+    witnesses.push_back({{"clock_epoch",0},{"invocation_id",i+1},{"vx",on.twist.linear.x},{"vy",on.twist.linear.y},{"wz",on.twist.angular.z}});
     if(off.twist.linear.x!=on.twist.linear.x||off.twist.angular.z!=on.twist.angular.z){++mismatches;}
   }
   auto quantile=[](std::vector<double> values,double q){std::sort(values.begin(),values.end());return values[std::min(values.size()-1,static_cast<size_t>(std::ceil(q*values.size())-1))];};
+  auto flush_start=rec::monotonicNs();save("benchmark",recorder,on,witnesses);auto flush_ns=rec::monotonicNs()-flush_start;
   struct rusage resource{};getrusage(RUSAGE_SELF,&resource);
   auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));
   std::ofstream f(out/"benchmark.metrics.json");
   f<<rec::Json{{"pairs",40},{"batch_size",1000},{"time_steps",41},{"iterations",3},
     {"off_ms",off_ms},{"on_ms",on_ms},{"paired_added_ms",added},{"added_p99_ms",quantile(added,.99)},
     {"off_p50_ms",quantile(off_ms,.5)},{"on_p50_ms",quantile(on_ms,.5)},
-    {"peak_process_rss_kib",resource.ru_maxrss},{"parity_mismatches",mismatches},
+    {"peak_process_rss_kib",resource.ru_maxrss},{"flush_ms",flush_ns/1e6},{"parity_mismatches",mismatches},
     {"declared_added_p99_budget_ms",25.0},{"scope","Observed native benchmark quantile, not a field latency guarantee; flush excluded"}}.dump(2);
-  f.close();save("benchmark",recorder,on);
+  f.close();
   EXPECT_EQ(mismatches,0u);EXPECT_LE(quantile(added,.99),25.0);
 }
 
@@ -226,6 +228,29 @@ TEST(DecisionRecorderTrigger,ExpectedStopsAndHealthyMotionDoNotTrigger)
     EXPECT_FALSE(recorder.document()["triggered"].get<bool>());report.push_back({{"mode",mode},{"trace",recorder.document()}});
   }
   auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));std::ofstream f(out/"expected_stop_controls.json");f<<report.dump(2);
+}
+
+TEST(DecisionRecorderProof,SymptomWindowRetainsHealthyApproach)
+{
+  Scene s;geometry_msgs::msg::Twist speed;speed.linear.x=.1;
+  rec::Recorder recorder(s.manifest("symptom_window"));
+  rec::Json witnesses=rec::Json::array();geometry_msgs::msg::TwistStamped command;
+  for(int i=0;i<30;++i){
+    s.optimizer.seed();
+    if(i>=5){s.optimizer.setSpeedLimit(.005,false);}
+    s.pose.header.stamp.sec=1+i/20;s.pose.header.stamp.nanosec=(i%20)*50000000;
+    s.path.header=s.pose.header;
+    {rec::Session recording(recorder);command=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);}
+    witnesses.push_back({{"clock_epoch",0},{"invocation_id",i+1},{"vx",command.twist.linear.x},
+      {"vy",command.twist.linear.y},{"wz",command.twist.angular.z}});
+    if(i<5){EXPECT_GT(command.twist.linear.x,.02);}else{EXPECT_LT(std::abs(command.twist.linear.x),.02);}
+  }
+  auto document=recorder.document();
+  EXPECT_EQ(document["termination"],"command_speed_collapse");
+  EXPECT_TRUE(document["frozen"].get<bool>());EXPECT_EQ(document["health"]["overflow"],0);
+  ASSERT_EQ(document["invocations"].size(),27u);
+  EXPECT_EQ(document["invocations"][0]["invocation_id"],1);
+  save("symptom_window",recorder,command,witnesses);
 }
 
 TEST(DecisionRecorderTrigger,CollapseWithoutCollisionAndEpochReset)
