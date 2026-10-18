@@ -3055,26 +3055,59 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
         bool aligned_to_path = true;
         if (path_.yaws.size() > 0) {
           const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
-          const double path_yaw = path_.yaws(0);
+          const double ref_yaw = (active_cusp_direction_ == 0) ?
+            tf2::getYaw(goal_.orientation) : path_.yaws(0);
           const double heading_err = std::abs(
-            angles::shortest_angular_distance(robot_yaw, path_yaw));
+            angles::shortest_angular_distance(robot_yaw, ref_yaw));
           const float max_heading = (active_cusp_direction_ != 0) ?
             0.5236f : motor_deadband_max_heading_error_;
           aligned_to_path = (heading_err <= max_heading);
         }
 
         if (aligned_to_path) {
-          const int effective_direction = (active_cusp_direction_ != 0) ?
+          int effective_direction = (active_cusp_direction_ != 0) ?
             active_cusp_direction_ : path_direction_;
 
-          if (effective_direction > 0) {
-            vx = std::max(vx, motor_deadband_floor_);
-          } else if (effective_direction < 0) {
-            vx = std::min(vx, -motor_deadband_floor_);
-          } else {
-            if (vx >= 0.0f) {
-              vx = std::max(vx, motor_deadband_floor_);
+          // On final segment (active_cusp_direction_ == 0), align effective_direction with
+          // the target's relative longitudinal displacement (d_long) to prevent stale path_direction_
+          // from inverting recovery commands.
+          // When the goal is abeam (beside the robot, |d_long| <= d_long_deadband), longitudinal
+          // displacement is near zero: follow the optimizer's commanded direction rather than
+          // flipping sign or reverting to stale path_direction_.
+          if (active_cusp_direction_ == 0) {
+            const double robot_yaw = tf2::getYaw(state_.pose.pose.orientation);
+            const float dx = target_x - static_cast<float>(state_.pose.pose.position.x);
+            const float dy = target_y - static_cast<float>(state_.pose.pose.position.y);
+            const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
+                                 dy * static_cast<float>(std::sin(robot_yaw));
+            constexpr float d_long_deadband = 0.02f;
+            if (vx > 0.005f) {
+              // Deliberate forward command: apply forward deadband floor only if target is ahead
+              // or abeam; never invert forward motion into reverse.
+              effective_direction = (d_long >= -d_long_deadband) ? 1 : 0;
+            } else if (vx < -0.005f) {
+              // Deliberate reverse command: apply reverse deadband floor only if target is behind
+              // or abeam; never invert reverse motion into forward.
+              effective_direction = (d_long <= d_long_deadband) ? -1 : 0;
             } else {
+              // Commanded standstill or noise (|vx| <= 0.005):
+              // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve path direction.
+              if (d_long > d_long_deadband) {
+                effective_direction = 1;
+              } else if (d_long < -d_long_deadband) {
+                effective_direction = -1;
+              } else {
+                effective_direction = (path_direction_ != 0) ? path_direction_ : 1;
+              }
+            }
+          }
+
+          if (effective_direction > 0) {
+            if (vx >= 0.0f || std::abs(vx) < motor_deadband_floor_) {
+              vx = std::max(vx, motor_deadband_floor_);
+            }
+          } else if (effective_direction < 0) {
+            if (vx <= 0.0f || std::abs(vx) < motor_deadband_floor_) {
               vx = std::min(vx, -motor_deadband_floor_);
             }
           }
