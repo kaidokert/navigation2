@@ -1,6 +1,8 @@
 // Copyright 2026 Kaido Kert. Apache-2.0.
 #include "nav2_mppi_controller/tools/live_decision_recorder.hpp"
 #include "gtest/gtest.h"
+#include <future>
+#include <chrono>
 
 namespace rec=mppi::recorder;
 namespace
@@ -82,4 +84,46 @@ TEST(LiveRecorder,SerializationFailureIsUnhealthyWithoutChangingControl)
   EXPECT_EQ(read(root/"failure/session.closed.json")["worker_errors"],1);
   std::ifstream original(root/"failure/episode_1.trace.json");std::string text;
   std::getline(original,text);EXPECT_EQ(text,"preserve me");
+}
+
+TEST(LiveRecorder,RecurringCaptureCapacityBudgetAndRearmIsolation)
+{
+  using namespace std::chrono_literals;
+  auto root=directory("live_adapter_recurring");
+  std::promise<void> started,release;auto started_future=started.get_future();
+  auto released=release.get_future().share();std::atomic<unsigned> flushes{0};
+  {
+    rec::LiveRecorder live(root.string(),{{"native_baseline","fixture"}},[&] {
+      if(++flushes==1) {started.set_value();released.wait_for(5s);}
+    });
+    live.command({{"operation","arm"},{"run_id","recurring"},{"maximum_episodes",2}});
+    int64_t stamp=1000;
+    auto call=[&] {tick(live,stamp++);};
+    call();live.command({{"operation","trigger"},{"run_id","recurring"},{"reason","test_first"}});
+    for(int i=0;i<3;++i) {call();}
+    EXPECT_EQ(started_future.wait_for(2s),std::future_status::ready);
+    for(int i=0;i<10;++i) {call();}
+    EXPECT_FALSE(std::filesystem::exists(root/"recurring/episode_2.trace.json"));
+    release.set_value();
+    for(int i=0;i<2000 && !std::filesystem::exists(root/"recurring/episode_2.trace.json");++i) {
+      call();live.command({{"operation","trigger"},{"run_id","recurring"},{"reason","test_repeat"}});
+      std::this_thread::sleep_for(1ms);
+    }
+    for(int i=0;i<10;++i) {call();}
+    live.command({{"operation","close"},{"run_id","recurring"}});
+    // Rearm before old closure is processed: queued jobs must retain their folder/identity.
+    live.command({{"operation","arm"},{"run_id","next"},{"maximum_episodes",1}});
+    for(int i=0;i<2000 && !std::filesystem::exists(root/"recurring/session.closed.json");++i) {
+      call();std::this_thread::sleep_for(1ms);
+    }
+    call();live.command({{"operation","close"},{"run_id","next"}});
+  }
+  const auto receipt=read(root/"recurring/session.closed.json");
+  EXPECT_EQ(receipt["episodes_started"],2);EXPECT_GT(receipt["capture_wait_ticks"],0);
+  EXPECT_GT(receipt["budget_exhausted_ticks"],0);EXPECT_EQ(receipt["queue_drops"],0);
+  EXPECT_EQ(receipt["worker_errors"],0);
+  EXPECT_EQ(read(root/"recurring/episode_1.trace.json")["manifest"]["episode_id"],1);
+  EXPECT_EQ(read(root/"recurring/episode_2.trace.json")["manifest"]["episode_id"],2);
+  EXPECT_EQ(read(root/"next/episode_1.trace.json")["manifest"]["run_id"],"next");
+  EXPECT_EQ(read(root/"next/session.closed.json")["worker_errors"],0);
 }

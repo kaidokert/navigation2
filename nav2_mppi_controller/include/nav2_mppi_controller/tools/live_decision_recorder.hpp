@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <map>
+#include <functional>
 #include <thread>
 
 namespace mppi::recorder
@@ -22,8 +24,8 @@ class LiveRecorder
     std::unique_ptr<Recorder> capture;
   };
 public:
-  explicit LiveRecorder(std::string root, Json manifest)
-  : root_(std::move(root)), manifest_(std::move(manifest)), worker_([this] {work();}) {}
+  explicit LiveRecorder(std::string root, Json manifest, std::function<void()> before_flush = {})
+  : root_(std::move(root)), manifest_(std::move(manifest)), before_flush_(std::move(before_flush)), worker_([this] {work();}) {}
   ~LiveRecorder()
   {
     try {std::lock_guard<std::mutex> lock(mutex_); detach("shutdown");}
@@ -41,13 +43,17 @@ public:
     if (op == "arm") {
       if (armed_) {throw std::runtime_error("close current recorder session before rearming");}
       const auto id = input.at("run_id").get<std::string>();
+      if(input.contains("maximum_episodes") && !input.at("maximum_episodes").is_number_integer()) {
+        throw std::invalid_argument("maximum_episodes must be an integer");}
+      const auto maximum=input.value("maximum_episodes",int64_t(8));
+      if(maximum<1 || maximum>16) {throw std::invalid_argument("maximum_episodes out of bounds");}
       if (id.empty() || id.size() > 120 || !std::all_of(id.begin(),id.end(),[](char c) {
           return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';}))
       {throw std::invalid_argument("invalid recorder session identifier");}
       folder_ = (std::filesystem::path(root_) / id).string();
       // Callback thread, never the control call; exclusive creation prevents reuse.
       if (!std::filesystem::create_directory(folder_)) {throw std::runtime_error("session exists");}
-      session_ = input; run_ = id; goal_.clear(); motion_=nullptr; episode_ = 0; captured_ = false;
+      session_ = input; run_ = id; goal_.clear(); motion_=nullptr; episode_ = 0; maximum_episodes_=static_cast<size_t>(maximum);capture_wait_ticks_=budget_wait_ticks_=0;dense_status_="armed";
       drop_start_=drops_.load();error_start_=worker_errors_.load();
       dense_ = input.value("dense",true); armed_ = true;
       enqueue({folder_,"event",{{"kind","session_armed"},{"host_ns",monotonicNs()},
@@ -61,6 +67,8 @@ public:
       enqueue({folder_,"closed",{{"kind","session_closed"},{"run_id",run_},
         {"host_ns",monotonicNs()},{"queue_drops",drops_.load()-drop_start_},
         {"worker_errors",worker_errors_.load()-error_start_},
+        {"episodes_started",episode_},{"maximum_episodes",maximum_episodes_},
+        {"capture_wait_ticks",capture_wait_ticks_},{"budget_exhausted_ticks",budget_wait_ticks_},
         {"drop_start",drop_start_},{"error_start",error_start_}},nullptr});
     } else if (op == "motion") {
       const auto displacement=input.at("max_excursion_m").get<double>();
@@ -90,22 +98,39 @@ public:
       if (!owner_->armed_) {owner_ = nullptr; return;}
       if (!goal.empty() && owner_->goal_ != goal) {
         owner_->detach("controller_goal_changed"); owner_->goal_=std::move(goal);
-        owner_->captured_=false;
+
       }
-      if (owner_->dense_ && !owner_->captured_ && !owner_->recorder_) {
-        Json m=owner_->manifest_;m["run_id"]=owner_->run_;
-        m["goal_uuid"]=owner_->goal_.empty()?"no_controller_goal":owner_->goal_;
-        m["mission_uuid"]=owner_->session_.value("mission_uuid",std::string("unknown"));
-        m["episode_id"]=++owner_->episode_;
-        {std::lock_guard<std::mutex> queue_lock(owner_->queue_mutex_);
-          if(owner_->pending_captures_>=2) {owner_->captured_=true;++owner_->drops_;}}
-        if(!owner_->captured_) {owner_->recorder_=std::make_unique<Recorder>(std::move(m));}
+      std::string dense_status=owner_->dense_?"recording":"disabled";
+      if(owner_->dense_ && !owner_->recorder_) {
+        if(owner_->episode_>=owner_->maximum_episodes_) {
+          dense_status="session_capture_budget_exhausted";++owner_->budget_wait_ticks_;
+        } else {
+          bool available;
+          {std::lock_guard<std::mutex> queue_lock(owner_->queue_mutex_);available=owner_->pending_captures_==0;}
+          if(!available) {dense_status="capture_capacity_wait";++owner_->capture_wait_ticks_;}
+          else {
+            Json m=owner_->manifest_;m["run_id"]=owner_->run_;
+            m["goal_uuid"]=owner_->goal_.empty()?"no_controller_goal":owner_->goal_;
+            m["mission_uuid"]=owner_->session_.value("mission_uuid",std::string("unknown"));
+            m["episode_id"]=owner_->episode_+1;
+            m["recording_policy"]={{"maximum_episodes",owner_->maximum_episodes_},
+              {"maximum_in_flight",1},{"maximum_episode_bytes",268435456},
+              {"maximum_session_dense_bytes_bound",owner_->maximum_episodes_*size_t(268435456)}};
+            owner_->recorder_=std::make_unique<Recorder>(std::move(m));++owner_->episode_;
+          }
+        }
+      }
+      if(dense_status!=owner_->dense_status_) {
+        owner_->journal("dense_status",{{"run_id",owner_->run_},{"goal_uuid",owner_->goal_},
+          {"stamp_ns",stamp},{"status",dense_status},{"previous_status",owner_->dense_status_},
+          {"capture_wait_ticks",owner_->capture_wait_ticks_},{"budget_exhausted_ticks",owner_->budget_wait_ticks_}});
+        owner_->dense_status_=dense_status;
       }
       current_scope_=owner_;
       owner_->tick_++;
       owner_->context_={{"run_id",owner_->run_},{"goal_uuid",owner_->goal_},
         {"episode_id",owner_->episode_},{"server_tick",owner_->tick_},
-        {"stamp_ns",stamp},{"mode",mode},{"reason",reason}};
+        {"stamp_ns",stamp},{"mode",mode},{"reason",reason},{"dense_status",dense_status}};
       if (owner_->recorder_) {
         auto & r=*owner_->recorder_;r.mode=mode;
         r.independent_progress.reset();r.delivered_speed.reset();
@@ -143,7 +168,7 @@ public:
       row["exception"]=exception;owner_->journal("tick_end",row);
       if (owner_->recorder_ && (exception || owner_->recorder_->frozen())) {
         owner_->detach(exception?"abort":"symptom_window_complete");
-        owner_->captured_=true;
+
       }
       } catch (...) {++owner_->worker_errors_;}
       current_scope_=nullptr;
@@ -156,6 +181,12 @@ public:
     std::unique_ptr<Invocation> invocation_;
   };
   void noteError() noexcept {++worker_errors_;}
+  void failure(const char * reason) noexcept
+  {
+    if(current_scope_!=this) {return;}
+    try {journal("server_exception",{{"context",context_},{"reason",reason}});}
+    catch (...) {++worker_errors_;}
+  }
   // Called while Scope owns mutex_. The payload is the actual publish boundary.
   void publication(Json payload)
   {
@@ -179,12 +210,19 @@ private:
   void enqueue(Job job)
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (queue_.size()>=4096 || (job.capture && pending_captures_>=2)) {++drops_;return;}
+    if (queue_.size()>=4096 || (job.capture && pending_captures_>=1)) {++drops_;return;}
     const bool capture=bool(job.capture);
     queue_.push_back(std::move(job));if(capture) {++pending_captures_;} wake_.notify_one();
   }
   void work() noexcept
   {
+    std::map<std::string,std::ofstream> journals;
+    auto append=[&](const std::string & folder,const Json & row,bool flush=false) {
+      auto & file=journals[folder];
+      if(!file.is_open()) {file.open(folder+"/server.events.jsonl",std::ios::app);}
+      file<<row.dump()<<'\n';if(flush) {file.flush();}
+      if(!file) {throw std::runtime_error("journal write/flush failed");}
+    };
     while (true) {
       Job job;
       {
@@ -194,8 +232,19 @@ private:
         job=std::move(queue_.front());queue_.pop_front();
       }
       try {
-        if (job.capture) {job.capture->writeExclusive(job.folder+"/"+job.name);}
+        if (job.capture) {
+          if(before_flush_) {before_flush_();}
+          const auto started=monotonicNs();job.capture->writeExclusive(job.folder+"/"+job.name);
+          append(job.folder,{{"kind","capture_written"},{"filename",job.name},
+            {"host_ns",monotonicNs()},{"flush_duration_ns",monotonicNs()-started},
+            {"bytes",std::filesystem::file_size(job.folder+"/"+job.name)}});
+        }
         else if (job.name=="closed") {
+          auto stream=journals.find(job.folder);
+          if(stream!=journals.end()) {
+            stream->second.flush();if(!stream->second) {throw std::runtime_error("journal final flush failed");}
+            stream->second.close();journals.erase(stream);
+          }
           job.row["lifetime_queue_drops"]=drops_.load();job.row["lifetime_worker_errors"]=worker_errors_.load();
           job.row["queue_drops"]=drops_.load()-job.row.at("drop_start").get<size_t>();
           job.row["worker_errors"]=worker_errors_.load()-job.row.at("error_start").get<size_t>();
@@ -206,8 +255,7 @@ private:
           const auto n=::write(fd,value.data(),value.size());::close(fd);
           if(n!=static_cast<ssize_t>(value.size())) {throw std::runtime_error("closure receipt write failed");}
         } else {
-          std::ofstream file(job.folder+"/server.events.jsonl",std::ios::app);
-          file<<job.row.dump()<<'\n';if(!file) {throw std::runtime_error("journal write failed");}
+          append(job.folder,job.row,job.row.value("kind",std::string())=="session_armed");
         }
       } catch (...) {++worker_errors_;}
       if (job.capture) {std::lock_guard<std::mutex> lock(queue_mutex_);--pending_captures_;}
@@ -218,10 +266,12 @@ private:
   Json manifest_,session_,motion_,context_;
   std::mutex mutex_,queue_mutex_;std::condition_variable wake_;
   std::deque<Job> queue_;std::unique_ptr<Recorder> recorder_;
-  bool armed_{false},dense_{true},captured_{false},shutdown_{false};
+  bool armed_{false},dense_{true},shutdown_{false};
+  std::string dense_status_;size_t maximum_episodes_{8},capture_wait_ticks_{0},budget_wait_ticks_{0};
   size_t episode_{0},pending_captures_{0},drop_start_{0},error_start_{0};uint64_t tick_{0};
   std::atomic<size_t> drops_{0},worker_errors_{0};
   // Declared last so the thread cannot observe uninitialized synchronization state.
+  std::function<void()> before_flush_;
   std::thread worker_;
 };
 }  // namespace mppi::recorder

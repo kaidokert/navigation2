@@ -758,6 +758,7 @@ void ControllerServer::computeAndPublishVelocity()
   publishVelocity(cmd_vel_2d);
   } catch (const std::exception & error) {
     mppi::recorder::observe("server_exception",[&] {return mppi::recorder::Json{{"reason",error.what()}};});
+    if(decision_recorder_) {decision_recorder_->failure(error.what());}
     throw;
   }
 }
