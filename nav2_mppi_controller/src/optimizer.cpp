@@ -18,7 +18,7 @@
 #include <cstdint>
 #include "nav2_mppi_controller/optimizer.hpp"
 
-#include <limits>
+#include <type_traits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -35,8 +35,8 @@
 #include <xtensor/xnoalias.hpp>
 
 #include "nav2_core/controller_exceptions.hpp"
-#include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
+#include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
 #include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
 
 namespace mppi
@@ -73,7 +73,22 @@ void snapshotTensor(std::ostream & out, const Tensor & value)
   }
   out << "]}";
 }
+
+// std::isfinite may be optimized away by this package's -ffast-math policy.
+// Inspect IEEE exponent bits so invalid inputs are still rejected in Release.
+template<typename T>
+bool finiteValue(T value)
+{
+  static_assert(std::numeric_limits<T>::is_iec559);
+  using Bits = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
+  Bits bits;
+  std::memcpy(&bits, &value, sizeof(value));
+  constexpr Bits exponent = sizeof(T) == 4 ?
+    static_cast<Bits>(0x7f800000U) : static_cast<Bits>(0x7ff0000000000000ULL);
+  return (bits & exponent) != exponent;
+}
 }  // namespace
+
 
 void Optimizer::initialize(
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent, const std::string & name,
@@ -355,7 +370,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       smooth_control_sequence_ ? 1 : 0);
   }
 
-  auto control = getControlFromSequenceAsTwist(
+  auto control = getValidatedControlFromSequenceAsTwist(
     plan.header.stamp, warm_start ? &*warm_start : nullptr,
     before_filter ? &*before_filter : nullptr);
 
@@ -1572,42 +1587,6 @@ bool Optimizer::initializeLongCuspPrefixMean()
   critics_data_.path_pts_valid.reset(); critics_data_.fail_flag=false;
   if (best == proposals.size()) {return false;}
   control_sequence_=proposals[best];
-  return true;
-}
-
-bool Optimizer::controlSequenceCollisionFree() const
-{
-  models::State predicted;
-  predicted.reset(1, settings_.time_steps);
-  predicted.pose = state_.pose;
-  predicted.speed = state_.speed;
-  for (size_t j = 0; j < settings_.time_steps; ++j) {
-    if (!std::isfinite(control_sequence_.vx(j)) ||
-      !std::isfinite(control_sequence_.wz(j)) ||
-      (isHolonomic() && !std::isfinite(control_sequence_.vy(j))))
-    {
-      return false;
-    }
-    predicted.cvx(0, j) = control_sequence_.vx(j);
-    predicted.cwz(0, j) = control_sequence_.wz(j);
-    if (isHolonomic()) {predicted.cvy(0, j) = control_sequence_.vy(j);}
-  }
-  updateStateVelocities(predicted);
-  models::Trajectories trajectory;
-  trajectory.reset(1, settings_.time_steps);
-  integrateStateVelocities(trajectory, predicted);
-  nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-  const auto footprint = costmap_ros_->getRobotFootprint();
-  for (size_t j = 0; j < settings_.time_steps; ++j) {
-    if (!std::isfinite(trajectory.x(0, j)) || !std::isfinite(trajectory.y(0, j)) ||
-      !std::isfinite(trajectory.yaws(0, j)))
-    {
-      return false;
-    }
-    const double cost = checker.footprintCostAtPose(
-      trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j), footprint);
-    if (cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {return false;}
-  }
   return true;
 }
 
@@ -3057,6 +3036,160 @@ void Optimizer::updateControlSequence(bool diag)
   recorder::observe("constrained", [&] {return recorder::Json{{"control", recorder::sequence(control_sequence_)}};});
 }
 
+bool Optimizer::controlSequenceFinite() const
+{
+  const size_t n = settings_.time_steps;
+  if (!motion_model_ || n < 2 || !finiteValue(settings_.model_dt) || settings_.model_dt <= 0 ||
+    control_sequence_.vx.size() != n || control_sequence_.wz.size() != n ||
+    control_sequence_.vy.size() != n)
+  {
+    return false;
+  }
+  for (size_t j = 0; j < n; ++j) {
+    if (!finiteValue(control_sequence_.vx(j)) || !finiteValue(control_sequence_.wz(j)) ||
+      (isHolonomic() && !finiteValue(control_sequence_.vy(j))))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Optimizer::controlSequenceCollisionFree() const
+{
+  // Adapted from PR #14's final filtered-sequence guard. It is unconditional
+  // here: scoring sampled rollouts is not proof that the emitted mean is clear.
+  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite()) {return false;}
+  const auto & p = state_.pose.pose.position;
+  const auto & q = state_.pose.pose.orientation;
+  if (!finiteValue(p.x) || !finiteValue(p.y) || !finiteValue(q.x) || !finiteValue(q.y) ||
+    !finiteValue(q.z) || !finiteValue(q.w) ||
+    q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1e-12 ||
+    !finiteValue(state_.speed.linear.x) || !finiteValue(state_.speed.angular.z) ||
+    (isHolonomic() && !finiteValue(state_.speed.linear.y)))
+  {
+    return false;
+  }
+
+  const size_t n = settings_.time_steps;
+  const size_t offset = settings_.shift_control_sequence ? 1 : 0;
+  models::State predicted;
+  // The first state column is measured velocity. Include one additional column
+  // so every command in the emitted horizon contributes to the forecast.
+  predicted.reset(1, n + 1);
+  predicted.pose = state_.pose;
+  predicted.speed = state_.speed;
+  for (size_t j = 0; j <= n; ++j) {
+    const size_t k = std::min(j + offset, n - 1);
+    predicted.cvx(0, j) = control_sequence_.vx(k);
+    predicted.cwz(0, j) = control_sequence_.wz(k);
+    if (isHolonomic()) {predicted.cvy(0, j) = control_sequence_.vy(k);}
+  }
+  updateStateVelocities(predicted);
+  models::Trajectories trajectory;
+  trajectory.reset(1, n + 1);
+  integrateStateVelocities(trajectory, predicted);
+
+  std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
+  const auto footprint = costmap_ros_->getRobotFootprint();
+  const bool circle = costmap_ros_->getUseRadius();
+  if (footprint.size() < 3) {return false;}
+  const double radius = circle ?
+    costmap_ros_->getLayeredCostmap()->getCircumscribedRadius() : 0.0;
+  if (circle && (!finiteValue(radius) || radius <= 0.0)) {return false;}
+  nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
+  const auto in_bounds = [&](double x, double y) {
+      return finiteValue(x) && finiteValue(y) &&
+             x >= costmap_->getOriginX() && y >= costmap_->getOriginY() &&
+             x < costmap_->getOriginX() + costmap_->getSizeInCellsX() * costmap_->getResolution() &&
+             y < costmap_->getOriginY() + costmap_->getSizeInCellsY() * costmap_->getResolution();
+    };
+  const auto clear_pose = [&](double x, double y, double yaw) {
+      if (!in_bounds(x, y) || !finiteValue(yaw)) {return false;}
+      unsigned int mx, my;
+      if (!costmap_->worldToMap(x, y, mx, my)) {return false;}
+      const auto center_cost = costmap_->getCost(mx, my);
+      if (center_cost >= (circle ? nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE :
+        nav2_costmap_2d::LETHAL_OBSTACLE))
+      {
+        return false;
+      }
+      if (circle) {
+        // Inflation is optional and may be smaller than the body. Check every
+        // cell intersecting the padded circular body, including its interior.
+        if (!in_bounds(x - radius, y - radius) || !in_bounds(x + radius, y + radius)) {
+          return false;
+        }
+        unsigned int x0, y0, x1, y1;
+        if (!costmap_->worldToMap(x - radius, y - radius, x0, y0) ||
+          !costmap_->worldToMap(x + radius, y + radius, x1, y1))
+        {
+          return false;
+        }
+        const double resolution = costmap_->getResolution();
+        for (unsigned int cy = y0; cy <= y1; ++cy) {
+          const double bottom = costmap_->getOriginY() + cy * resolution;
+          const double dy = std::max({bottom - y, 0.0, y - bottom - resolution});
+          for (unsigned int cx = x0; cx <= x1; ++cx) {
+            const double left = costmap_->getOriginX() + cx * resolution;
+            const double dx = std::max({left - x, 0.0, x - left - resolution});
+            if (dx * dx + dy * dy <= radius * radius &&
+              costmap_->getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE)
+            {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
+      const double c = std::cos(yaw), sn = std::sin(yaw);
+      for (const auto & vertex : footprint) {
+        if (!in_bounds(x + c * vertex.x - sn * vertex.y, y + sn * vertex.x + c * vertex.y)) {
+          return false;
+        }
+      }
+      const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
+      return cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
+    };
+  // Never rely on forward prediction to notice an already-occupied footprint.
+  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {return false;}
+  for (size_t j = 0; j <= n; ++j) {
+    if (!clear_pose(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwist(
+  const builtin_interfaces::msg::Time & stamp,
+  const models::ControlSequence * warm_start,
+  const models::ControlSequence * before_filter)
+{
+  // Validate raw controls before clamping can turn NaN/Inf into a finite bound.
+  if (controlSequenceFinite()) {
+    // Smoothing follows optimization and can invalidate the Ackermann cone.
+    // No velocity or steering adjustment is permitted after this validation.
+    applyControlSequenceConstraints();
+    // Office extraction can replace warm starts, condition cusp motion or
+    // apply a deadband floor. Veto AFTER those edits, before emission.
+    const auto control = getControlFromSequenceAsTwist(stamp, warm_start, before_filter);
+    if (controlSequenceFinite() && controlSequenceCollisionFree()) {
+      control_history_.back() = {static_cast<float>(control.twist.linear.x),
+        static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
+      recorder::observe("issued", [&] {return recorder::Json{
+        {"vx",control.twist.linear.x},{"vy",control.twist.linear.y},{"wz",control.twist.angular.z},
+        {"stamp_ns",rclcpp::Time(control.header.stamp).nanoseconds()},{"frame",control.header.frame_id},
+        {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)},
+        {"final_output_collision_guard_passed",true}};});
+      return control;
+    }
+  }
+  control_sequence_.reset(settings_.time_steps);
+  control_history_.fill({0.0f, 0.0f, 0.0f});
+  throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
+}
+
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   const builtin_interfaces::msg::Time & stamp)
 {
@@ -3308,7 +3441,7 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   auto issued = isHolonomic() ?
     utils::toTwistStamped(vx, control_sequence_.vy(offset), wz, stamp, costmap_ros_->getBaseFrameID()) :
     utils::toTwistStamped(vx, wz, stamp, costmap_ros_->getBaseFrameID());
-  recorder::observe("issued", [&] {return recorder::Json{
+  recorder::observe("extracted_candidate", [&] {return recorder::Json{
     {"vx",issued.twist.linear.x},{"vy",issued.twist.linear.y},{"wz",issued.twist.angular.z},
     {"stamp_ns",rclcpp::Time(issued.header.stamp).nanoseconds()},{"frame",issued.header.frame_id},
     {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});

@@ -1,5 +1,6 @@
 set(TEST_NAMES
   decision_recorder_proof
+  final_output_collision_tests
   optimizer_smoke_test
   controller_state_transition_test
   models_test
@@ -48,3 +49,6 @@ endif()
 target_link_libraries(decision_recorder_proof mppi_critics)
 
 ament_add_gtest(live_decision_recorder_test live_decision_recorder_test.cpp)
+ament_add_gtest(collision_critic_tests collision_critic_tests.cpp)
+ament_target_dependencies(collision_critic_tests ${dependencies_pkgs})
+target_link_libraries(collision_critic_tests mppi_controller mppi_critics)

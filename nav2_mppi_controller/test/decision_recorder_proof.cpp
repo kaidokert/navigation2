@@ -65,7 +65,7 @@ public:
     rec::observe("before_smoothing",[&]{return rec::Json{{"control",rec::sequence(control_sequence_)},{"history",rec::history(control_history_)}};});
     smoothControlSequence();
     rec::observe("after_smoothing",[&]{return rec::Json{{"control",rec::sequence(control_sequence_)},{"history",rec::history(control_history_)}};});
-    auto command=getControlFromSequenceAsTwist(stamp);
+    auto command=getValidatedControlFromSequenceAsTwist(stamp);
     return command;
   }
   void updateAgain() {updateControlSequence(false);}

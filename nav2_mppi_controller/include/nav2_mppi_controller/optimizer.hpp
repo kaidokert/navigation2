@@ -334,6 +334,22 @@ protected:
     const models::ControlSequence * before_filter);
 
   /**
+   * @brief Check the actual emitted control sequence using the measured state.
+   */
+  bool controlSequenceCollisionFree() const;
+
+  /**
+   * @brief Apply final constraints and veto colliding output before conversion.
+   */
+  geometry_msgs::msg::TwistStamped
+  getValidatedControlFromSequenceAsTwist(
+    const builtin_interfaces::msg::Time & stamp,
+    const models::ControlSequence * warm_start = nullptr,
+    const models::ControlSequence * before_filter = nullptr);
+
+  bool controlSequenceFinite() const;
+
+  /**
    * @brief Whether the motion model is holonomic
    * @return Bool if holonomic to populate `y` axis of state
    */
@@ -414,7 +430,6 @@ protected:
   bool cusp_completion_attempted_{false};
   std::optional<models::ControlSequence> cusp_completion_;
   size_t cusp_completion_shifts_{0};
-  bool controlSequenceCollisionFree() const;
   void preserveFilteredCollisionFeasibility(const models::ControlSequence * before_filter);
 
 protected:

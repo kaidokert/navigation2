@@ -570,6 +570,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
     // appended == 0 (escape direction blocked by cost): fall through to the
     // normal ghost branch below (review finding 8).
   }
+  const bool short_unhandled_inversion =
+    !escape_handled && real_tgp_length < min_inversion_horizon_ && inversion_locale_ != 0u;
   if (!escape_handled && shouldUseGhostPath(
       transformed_plan, global_pose, real_tgp_length, cusp_dist,
       ghost_heading))
@@ -595,9 +597,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
         appended, ghost_heading, ghost_heading * 180.0 / M_PI,
         real_tgp_length, tgp_length, cusp_dist);
     }
-  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_ &&
-    inversion_locale_ != 0u)
-  {
+  } else if (short_unhandled_inversion) {
     // Log WHY ghost didn't fire when TGP is short
     cusp_dist = getCuspDistance(global_pose);
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,

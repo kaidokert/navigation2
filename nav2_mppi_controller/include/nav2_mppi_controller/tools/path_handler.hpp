@@ -17,6 +17,7 @@
 #ifndef NAV2_MPPI_CONTROLLER__TOOLS__PATH_HANDLER_HPP_
 #define NAV2_MPPI_CONTROLLER__TOOLS__PATH_HANDLER_HPP_
 
+#include <limits>
 #include <vector>
 #include <utility>
 #include <string>
@@ -302,8 +303,8 @@ protected:
   double handoff_yaw_relax_per_cycle_{0.005};   // rad of extra yaw tol per blocked cycle
   double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
   int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
-                                                // <=0 DISABLES escape (default: off until the
-                                                // oscillation latch is implemented â€” review 2026-09-25)
+  // <=0 DISABLES escape (default: off until the oscillation latch is implemented;
+  // review 2026-09-25).
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};

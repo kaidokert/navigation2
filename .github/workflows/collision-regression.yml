@@ -1,0 +1,43 @@
+name: Collision regression
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collision_regression:
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake libxtensor-dev libxsimd-dev nlohmann-json3-dev \
+            ros-jazzy-nav2-costmap-2d ros-jazzy-nav2-core ros-jazzy-nav2-util \
+            ros-jazzy-tf2-eigen ros-jazzy-ament-cmake-gtest
+      - name: Compile production collision code and regressions
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon --log-base /tmp/msg-log build --packages-select nav2_critics_msgs --build-base /tmp/msg-build \
+            --install-base /tmp/msg-install
+          source /tmp/msg-install/setup.bash
+          cmake -S nav2_mppi_controller/test/collision_regression -B /tmp/collision-build
+          cmake --build /tmp/collision-build --parallel 2
+      - name: Run collision regressions
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source /tmp/msg-install/setup.bash
+          ctest --test-dir /tmp/collision-build --output-on-failure
+      - name: Upload native test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collision-regression-results
+          path: /tmp/collision-build/test_results/
+          if-no-files-found: warn
