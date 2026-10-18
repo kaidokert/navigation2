@@ -37,26 +37,37 @@ template<typename Tensor> Json tensor(const Tensor & t)
   Json shape = Json::array();
   if (t.size() > 2048 * 128) {throw std::runtime_error("tensor capture bound");}
   for (auto n : t.shape()) {shape.push_back(n);}
-  std::vector<unsigned char> bytes;
-  bytes.reserve(t.size() * 4);
+  std::vector<unsigned char> bytes(t.size() * 4);
+  size_t offset = 0;
   for (float x : t) {
-    if (!finite(static_cast<double>(x))) {throw std::runtime_error("nonfinite tensor");}
     uint32_t bits; std::memcpy(&bits, &x, sizeof(bits));
-    for (unsigned shift : {0u,8u,16u,24u}) {bytes.push_back((bits >> shift) & 255u);}
-  }
-  static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string data; data.reserve(4 * ((bytes.size() + 2) / 3));
-  for (size_t i=0; i<bytes.size(); i+=3) {
-    const uint32_t bits = (uint32_t(bytes[i]) << 16) |
-      (i+1<bytes.size() ? uint32_t(bytes[i+1]) << 8 : 0) |
-      (i+2<bytes.size() ? uint32_t(bytes[i+2]) : 0);
-    data.push_back(alphabet[(bits >> 18) & 63]);data.push_back(alphabet[(bits >> 12) & 63]);
-    data.push_back(i+1<bytes.size() ? alphabet[(bits >> 6) & 63] : '=');
-    data.push_back(i+2<bytes.size() ? alphabet[bits & 63] : '=');
+    if ((bits & 0x7f800000u) == 0x7f800000u) {throw std::runtime_error("nonfinite tensor");}
+    for (unsigned shift : {0u,8u,16u,24u}) {bytes[offset++] = (bits >> shift) & 255u;}
   }
   return Json{{"shape", std::move(shape)}, {"encoding","f32le-base64"},
-    {"order","C"}, {"data", std::move(data)}};
+    {"order","C"}, {"data", Json::binary(std::move(bytes))}};
 }
+// Encoding is deliberately deferred until explicit flush, outside control.
+inline void encodeBinary(Json & value)
+{
+  if (value.is_binary()) {
+    const auto & bytes = value.get_binary();
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string data; data.reserve(4 * ((bytes.size() + 2) / 3));
+    for (size_t i=0; i<bytes.size(); i+=3) {
+      const uint32_t bits = (uint32_t(bytes[i]) << 16) |
+        (i+1<bytes.size() ? uint32_t(bytes[i+1]) << 8 : 0) |
+        (i+2<bytes.size() ? uint32_t(bytes[i+2]) : 0);
+      data.push_back(alphabet[(bits >> 18) & 63]); data.push_back(alphabet[(bits >> 12) & 63]);
+      data.push_back(i+1<bytes.size() ? alphabet[(bits >> 6) & 63] : '=');
+      data.push_back(i+2<bytes.size() ? alphabet[bits & 63] : '=');
+    }
+    value = std::move(data);
+  } else if (value.is_structured()) {
+    for (auto & item : value) {encodeBinary(item);}
+  }
+}
+
 template<typename Sequence> Json sequence(const Sequence & s)
 {return Json{{"vx", tensor(s.vx)}, {"vy", tensor(s.vy)}, {"wz", tensor(s.wz)}};}
 template<typename History> Json history(const History & h)
@@ -93,6 +104,7 @@ inline size_t serializedUpperBound(const Json & value)
 {
   if (value.is_null() || value.is_boolean()) {return 5;}
   if (value.is_number()) {return 32;}
+  if (value.is_binary()) {return 2 + 4 * ((value.get_binary().size() + 2) / 3);}
   if (value.is_string()) {
     size_t bytes = 2;
     for (unsigned char c : value.get_ref<const std::string &>()) {
@@ -191,14 +203,20 @@ public:
   {
     // Called on explicit flush/inspection, outside the observed control scope.
     size_t actual_bytes = 0;
-    for (const auto & frame : frames_) {actual_bytes += frame.dump().size();}
+    Json exported = Json::array();
+    for (const auto & frame : frames_) {
+      Json copy = frame;
+      encodeBinary(copy);
+      actual_bytes += copy.dump().size();
+      exported.push_back(std::move(copy));
+    }
     return Json{{"schema", "jetacker-decision-trace/1.1.0"}, {"manifest", manifest_},
       {"termination", reason_}, {"triggered", triggered_}, {"frozen", frozen_},
       {"health", {{"errors", errors_}, {"overflow", overflow_}, {"pre_evictions", evictions_},
         {"after_window", after_window_}, {"clock_resets", clock_resets_},
         {"retained_serialized_bytes", actual_bytes}, {"retained_charge_upper_bound_bytes", bytes_},
         {"maximum_bytes", config_.maximum_bytes}}},
-      {"invocations", frames_}};
+      {"invocations", std::move(exported)}};
   }
   void writeExclusive(const std::string & filename) const
   {
