@@ -23,12 +23,16 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/jazzy/setup.bash
+          colcon --log-base /tmp/msg-log build --packages-select nav2_critics_msgs --build-base /tmp/msg-build \
+            --install-base /tmp/msg-install
+          source /tmp/msg-install/setup.bash
           cmake -S nav2_mppi_controller/test/collision_regression -B /tmp/collision-build
           cmake --build /tmp/collision-build --parallel 2
       - name: Run collision regressions
         shell: bash
         run: |
           source /opt/ros/jazzy/setup.bash
+          source /tmp/msg-install/setup.bash
           ctest --test-dir /tmp/collision-build --output-on-failure
       - name: Upload native test results
         if: always()
