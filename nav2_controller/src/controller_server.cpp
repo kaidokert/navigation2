@@ -225,6 +225,32 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
 
   odom_sub_ = std::make_unique<nav_2d_utils::OdomSubscriber>(node);
   vel_publisher_ = std::make_unique<nav2_util::TwistPublisher>(node, "cmd_vel", 1);
+  if (const char * capture_root=std::getenv("JETACKER_RECORDER_ROOT")) {
+    const char * manifest_path=std::getenv("JETACKER_RECORDER_MANIFEST");
+    if(!manifest_path) {throw std::invalid_argument("Recorder manifest required when enabled");}
+    std::ifstream file(manifest_path);mppi::recorder::Json manifest;file>>manifest;
+    manifest["parameters"]=mppi::recorder::Json::object();
+    for(const auto & name:list_parameters({},100).names) {
+      manifest["parameters"][name]=get_parameter(name).value_to_string();
+    }
+    manifest["loaded_library_mappings"]=mppi::recorder::Json::array();
+    std::ifstream mappings("/proc/self/maps");std::string line;
+    while(std::getline(mappings,line)) {
+      if(line.find("libmppi_")!=std::string::npos || line.find("controller_server_core")!=std::string::npos) {
+        manifest["loaded_library_mappings"].push_back(line);
+      }
+    }
+    decision_recorder_=std::make_unique<mppi::recorder::LiveRecorder>(capture_root,std::move(manifest));
+    recorder_control_sub_=node->create_subscription<std_msgs::msg::String>(
+      "/diagnostics/recorder/control",rclcpp::QoS(100).reliable(),
+      [this](std_msgs::msg::String::ConstSharedPtr message) {
+        try {decision_recorder_->command(mppi::recorder::Json::parse(message->data));}
+        catch(const std::exception & error) {
+          RCLCPP_ERROR(get_logger(),"Recorder command rejected: %s",error.what());
+        }
+      });
+  }
+
 
   double action_server_result_timeout;
   get_parameter("action_server_result_timeout", action_server_result_timeout);
@@ -351,6 +377,7 @@ ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
   action_server_.reset();
   odom_sub_.reset();
   costmap_thread_.reset();
+  recorder_control_sub_.reset();decision_recorder_.reset();
   vel_publisher_.reset();
   speed_limit_sub_.reset();
 
@@ -513,7 +540,7 @@ void ControllerServer::computeControl()
         if (controllers_[current_controller_]->cancel()) {
           RCLCPP_INFO(get_logger(), "Cancellation was successful. Stopping the robot.");
           action_server_->terminate_all();
-          publishZeroVelocity();
+          publishZeroVelocity("cancelled");
           return;
         } else {
           RCLCPP_INFO_THROTTLE(
@@ -616,7 +643,7 @@ void ControllerServer::computeControl()
 
   RCLCPP_DEBUG(get_logger(), "Controller succeeded, setting result");
 
-  publishZeroVelocity();
+  publishZeroVelocity("goal_completed");
 
   // TODO(orduno) #861 Handle a pending preemption and set controller name
   action_server_->succeeded_current();
@@ -645,6 +672,12 @@ void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
 
 void ControllerServer::computeAndPublishVelocity()
 {
+  const auto uuid=action_server_->get_current_goal_id();
+  static constexpr char hex[]="0123456789abcdef";
+  std::string goal_id;goal_id.reserve(32);
+  for(auto byte:uuid) {goal_id.push_back(hex[byte>>4]);goal_id.push_back(hex[byte&15]);}
+  mppi::recorder::LiveRecorder::Scope recording(decision_recorder_.get(),goal_id,now().nanoseconds());
+  try {
   geometry_msgs::msg::PoseStamped pose;
 
   if (!getRobotPose(pose)) {
@@ -667,12 +700,16 @@ void ControllerServer::computeAndPublishVelocity()
       pose,
       nav_2d_utils::twist2Dto3D(twist),
       goal_checkers_[current_goal_checker_].get());
+    mppi::recorder::observe("server_return",[&] {return mppi::recorder::Json{
+      {"original_stamp_ns",rclcpp::Time(cmd_vel_2d.header.stamp).nanoseconds()},
+      {"vx",cmd_vel_2d.twist.linear.x},{"vy",cmd_vel_2d.twist.linear.y},{"wz",cmd_vel_2d.twist.angular.z}};});
     last_valid_cmd_time_ = now();
     cmd_vel_2d.header.frame_id = costmap_ros_->getBaseFrameID();
     cmd_vel_2d.header.stamp = last_valid_cmd_time_;
     // Only no valid control exception types are valid to attempt to have control patience, as
     // other types will not be resolved with more attempts
   } catch (nav2_core::NoValidControl & e) {
+    mppi::recorder::observe("server_patience",[&] {return mppi::recorder::Json{{"reason",e.what()},{"failure_tolerance",failure_tolerance_}};});
     if (failure_tolerance_ > 0 || failure_tolerance_ == -1.0) {
       RCLCPP_WARN(this->get_logger(), "%s", e.what());
       cmd_vel_2d.twist.angular.x = 0;
@@ -719,6 +756,10 @@ void ControllerServer::computeAndPublishVelocity()
 
   RCLCPP_DEBUG(get_logger(), "Publishing velocity at time %.2f", now().seconds());
   publishVelocity(cmd_vel_2d);
+  } catch (const std::exception & error) {
+    mppi::recorder::observe("server_exception",[&] {return mppi::recorder::Json{{"reason",error.what()}};});
+    throw;
+  }
 }
 
 void ControllerServer::updateGlobalPath()
@@ -771,13 +812,24 @@ void ControllerServer::updateGlobalPath()
 void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & velocity)
 {
   auto cmd_vel = std::make_unique<geometry_msgs::msg::TwistStamped>(velocity);
+  bool published=false;
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
-    vel_publisher_->publish(std::move(cmd_vel));
+    vel_publisher_->publish(std::move(cmd_vel));published=true;
+  }
+  if(decision_recorder_) {
+    try {decision_recorder_->publication({{"published",published},
+      {"stamp_ns",rclcpp::Time(velocity.header.stamp).nanoseconds()},
+      {"frame",velocity.header.frame_id},{"vx",velocity.twist.linear.x},
+      {"vy",velocity.twist.linear.y},{"wz",velocity.twist.angular.z}});}
+    catch(...) {decision_recorder_->noteError();}
   }
 }
 
-void ControllerServer::publishZeroVelocity()
+void ControllerServer::publishZeroVelocity(const char * reason)
 {
+  const std::string mode=std::string(reason)=="goal_completed"?"goal_completed":
+    std::string(reason)=="cancelled"?"cancelled":"safety_stop";
+  mppi::recorder::LiveRecorder::Scope recording(decision_recorder_.get(),"",now().nanoseconds(),mode,reason);
   if (get_parameter("publish_zero_velocity").as_bool()) {
     geometry_msgs::msg::TwistStamped velocity;
     velocity.twist.angular.x = 0;

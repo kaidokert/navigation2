@@ -136,6 +136,12 @@ public:
     {throw std::invalid_argument("invalid recorder bounds or oversized manifest");}
   }
   bool open() const {return current_.has_value();}
+  bool frozen() const {return frozen_;}
+  Json currentIdentity() const
+  {return Json{{"clock_epoch",epoch_},{"invocation_id",next_id_}};}
+  void setMode(const std::string & value)
+  {mode=value;if(current_) {(*current_)["mode"]=value;}}
+
   void begin(int64_t stamp_ns) noexcept
   {
     try {

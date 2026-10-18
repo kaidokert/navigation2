@@ -3,6 +3,8 @@ project(nav2_controller)
 
 find_package(ament_cmake REQUIRED)
 find_package(nav2_core REQUIRED)
+find_package(nav2_mppi_controller REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(nav2_common REQUIRED)
 find_package(angles REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -35,6 +37,7 @@ add_library(${library_name} SHARED
 )
 
 set(dependencies
+  nav2_mppi_controller
   angles
   rclcpp
   rclcpp_action

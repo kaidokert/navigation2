@@ -19,6 +19,8 @@
   <depend>nav2_costmap_2d</depend>
   <depend>nav_2d_msgs</depend>
   <depend>nav2_core</depend>
+  <depend>nav2_mppi_controller</depend>
+  <depend>nlohmann_json</depend>
   <depend>pluginlib</depend>
 
   <test_depend>ament_lint_common</test_depend>

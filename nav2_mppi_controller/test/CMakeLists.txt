@@ -46,3 +46,5 @@ if(${TEST_DEBUG_INFO})
 endif()
 
 target_link_libraries(decision_recorder_proof mppi_critics)
+
+ament_add_gtest(live_decision_recorder_test live_decision_recorder_test.cpp)

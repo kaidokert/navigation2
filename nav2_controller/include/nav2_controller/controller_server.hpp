@@ -21,6 +21,8 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include "std_msgs/msg/string.hpp"
+#include "nav2_mppi_controller/tools/live_decision_recorder.hpp"
 
 #include "nav2_core/controller.hpp"
 #include "nav2_core/progress_checker.hpp"
@@ -175,7 +177,7 @@ protected:
   /**
    * @brief Calls velocity publisher to publish zero velocity
    */
-  void publishZeroVelocity();
+  void publishZeroVelocity(const char * reason="error_stop");
   /**
    * @brief Checks if goal is reached
    * @return true or false
@@ -231,6 +233,8 @@ protected:
   // Publishers and subscribers
   std::unique_ptr<nav_2d_utils::OdomSubscriber> odom_sub_;
   std::unique_ptr<nav2_util::TwistPublisher> vel_publisher_;
+  std::unique_ptr<mppi::recorder::LiveRecorder> decision_recorder_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr recorder_control_sub_;
   rclcpp::Subscription<nav2_msgs::msg::SpeedLimit>::SharedPtr speed_limit_sub_;
 
   // Progress Checker Plugin
