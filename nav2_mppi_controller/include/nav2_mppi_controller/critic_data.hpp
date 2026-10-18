@@ -56,6 +56,10 @@ struct CriticData
   std::shared_ptr<MotionModel> motion_model;
   std::optional<std::vector<bool>> path_pts_valid;
   std::optional<size_t> furthest_reached_path_point;
+  // Geometry supplied by the planner, excluding visualization/preview ghosts.
+  std::optional<size_t> real_path_point_count = std::nullopt;
+  // Nonzero only while PathHandler enforces an intermediate direction cusp.
+  int active_cusp_direction{0};
 };
 
 }  // namespace mppi
