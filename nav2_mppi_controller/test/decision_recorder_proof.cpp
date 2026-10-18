@@ -114,7 +114,7 @@ struct Scene
     for(const auto & n:node->list_parameters({},10).names){parameters[n]=node->get_parameter(n).value_to_string();}
     rec::Json loaded=rec::Json::array();std::ifstream maps("/proc/self/maps");std::string line;
     while(std::getline(maps,line)){if(line.find("libmppi_controller.so")!=std::string::npos||line.find("libmppi_critics.so")!=std::string::npos){loaded.push_back(line);}}
-    return {{"loaded_mppi_mappings",loaded},{"run_id",name},{"goal_uuid","native-fixture-goal"},{"native_baseline","7adf498bbe5db1d68cfe7d109b5b42432004478c"},
+    return {{"loaded_mppi_mappings",loaded},{"run_id",std::string(std::getenv("RECORDER_PROOF_RUN_ID") ? std::getenv("RECORDER_PROOF_RUN_ID") : "development-unbound")+":"+name},{"goal_uuid","native-fixture-goal"},{"native_baseline","7adf498bbe5db1d68cfe7d109b5b42432004478c"},
       {"parameters",parameters},{"plant","none: native deterministic fixture"},
       {"frame_chain",{{"map_to_controller_base","identity fixture, not a live TF lookup"}}},
       {"candidate_scope",(name=="healthy" || name=="smoothing" || name=="benchmark" || name=="symptom_window" || name=="controller_pipeline") ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
@@ -250,7 +250,7 @@ TEST(DecisionRecorderTrigger,ExpectedStopsAndHealthyMotionDoNotTrigger)
 {
   rec::Config c;c.collapse_cycles=2;
   rec::Json report=rec::Json::array();
-  for(const std::string mode:{"goal_completed","cancelled","paused","safety_stop","presteer","no_goal","active"}){
+  for(const std::string mode:{"goal_completed","cancelled","paused","safety_stop","presteer","gear_transition","no_goal","active"}){
     rec::Recorder recorder({{"run_id","trigger_unit_only"}},c);recorder.mode=mode;
     {rec::Session session(recorder);
       for(int i=0;i<4;++i){rec::Invocation invocation(i);rec::observe("issued",[&]{return rec::Json{{"vx",mode=="active"?.1:0.0}};});}}
