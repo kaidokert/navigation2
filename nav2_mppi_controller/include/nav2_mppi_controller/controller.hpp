@@ -104,6 +104,9 @@ public:
     */
   void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
 
+  bool isPresteering() const {return presteering_;}
+  float getPresteerTargetAngle() const {return presteer_target_angle_;}
+
 protected:
   void receiveSteeringFeedback(sensor_msgs::msg::JointState::ConstSharedPtr message);
   void receiveConditionedSteering(std_msgs::msg::Float64::ConstSharedPtr message);
@@ -129,6 +132,18 @@ protected:
 
   bool visualize_;
   bool reset_on_path_handoff_{false};
+  bool enable_presteer_on_handoff_{false};
+  double presteer_creep_speed_{0.038};
+  double presteer_wheelbase_{0.213};
+  double presteer_max_angle_{0.576};
+  double presteer_timeout_{1.0};
+  double presteer_angle_tolerance_{0.05};
+
+  bool presteering_{false};
+  rclcpp::Time presteer_start_time_{0, 0, RCL_ROS_TIME};
+  float presteer_target_angle_{0.0f};
+  int presteer_gear_{0};
+
   double steering_feedback_timeout_{0.3};
   std::mutex steering_feedback_mutex_;
   sensor_msgs::msg::JointState::ConstSharedPtr steering_feedback_;
