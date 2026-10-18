@@ -183,7 +183,7 @@ nav_msgs::msg::Path makeMicroCuspPath(const std::string & frame_id = "map")
 std::shared_ptr<nav2_costmap_2d::Costmap2DROS> makeConfiguredCostmapRos()
 {
   auto costmap_ros = std::make_shared<SettledTestCostmap>(
-    "dummy_costmap", "", "dummy_costmap", true);
+    "dummy_costmap", "", "dummy_costmap", false);
   // These path-only fixtures use grid metadata and TF, not sensor/map plugins.
   costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   costmap_ros->set_parameters_atomically(
@@ -242,7 +242,7 @@ TEST(PathHandlerTests, TestBounds)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
   node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
   auto costmap_ros = std::make_shared<SettledTestCostmap>(
-    "dummy_costmap", "", "dummy_costmap", true);
+    "dummy_costmap", "", "dummy_costmap", false);
   // These path-only fixtures use grid metadata and TF, not sensor/map plugins.
   costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   auto results = costmap_ros->set_parameters_atomically(
@@ -295,7 +295,7 @@ TEST(PathHandlerTests, TestTransforms)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
   node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
   auto costmap_ros = std::make_shared<SettledTestCostmap>(
-    "dummy_costmap", "", "dummy_costmap", true);
+    "dummy_costmap", "", "dummy_costmap", false);
   // These path-only fixtures use grid metadata and TF, not sensor/map plugins.
   costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   ParametersHandler param_handler(node);
@@ -1963,10 +1963,12 @@ TEST(PathHandlerTests, TerminalGoalSteadyApproachDoesNotAbort)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
+  for (auto & pose : plan.poses) {pose.header = plan.header;}
   handler.setPath(plan);
 
   // Robot at (-0.02, 0.24) -> dist = 0.16m > 0.10m goal tolerance
   auto robot_pose = makePose(-0.02, 0.24, 0);
+    robot_pose.header = plan.header;
 
   // Across 150 cycles, transformPath succeeds smoothly without premature aborts
   for (unsigned int i = 0; i < 150; ++i) {
@@ -1988,10 +1990,12 @@ TEST(PathHandlerTests, TerminalGoalWithinToleranceDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
+  for (auto & pose : plan.poses) {pose.header = plan.header;}
   handler.setPath(plan);
 
   // Robot at (0.0, 0.32) -> dist = 0.08m <= 0.098m goal tolerance bound
   auto robot_pose = makePose(0, 0.32, 0);
+    robot_pose.header = plan.header;
 
   // For 100 cycles, does not throw because vehicle is within goal tolerance bound
   for (unsigned int i = 0; i < 100; ++i) {
@@ -2017,10 +2021,12 @@ TEST(PathHandlerTests, TerminalGoalWithDynamicToleranceDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
+  for (auto & pose : plan.poses) {pose.header = plan.header;}
   handler.setPath(plan);
 
   // Robot at (0.0, 0.27) -> dist = 0.13m (within 0.21m goal tolerance, but would have failed with 0.085m bound)
   auto robot_pose = makePose(0, 0.27, 0);
+    robot_pose.header = plan.header;
 
   // For 100 cycles, does not throw because vehicle is within goal tolerance (0.21m)
   for (unsigned int i = 0; i < 100; ++i) {
@@ -2045,6 +2051,7 @@ TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
+  for (auto & pose : plan.poses) {pose.header = plan.header;}
   handler.setPath(plan);
 
   // Robot starts at y = 0.22 (dist = 0.18m > 0.07m goal tolerance).
@@ -2053,6 +2060,7 @@ TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
   for (unsigned int i = 0; i < 150; ++i) {
     double current_y = 0.22 + (static_cast<double>(i) * 0.001);
     auto robot_pose = makePose(0, current_y, 0);
+    robot_pose.header = plan.header;
     EXPECT_NO_THROW(handler.transformPath(robot_pose));
   }
 }

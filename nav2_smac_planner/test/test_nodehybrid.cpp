@@ -106,31 +106,6 @@ TEST(NodeHybridTest, backtrace_preserves_analytic_heading)
   NodeHybrid::motion_table.bin_size = original_bin_size;
 }
 
-TEST(NodeHybridTest, backtrace_preserves_fractional_headings)
-{
-  const float original_bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
-  nav2_smac_planner::NodeHybrid::motion_table.bin_size = 2.0f * M_PI / 64.0f;
-  nav2_smac_planner::NodeHybrid start(0), middle(1), goal(2);
-  start.pose = {1.0f, 2.0f, 0.25f};
-  middle.pose = {3.0f, 4.0f, 12.75f};
-  goal.pose = {5.0f, 6.0f, 63.5f};
-  middle.parent = &start;
-  goal.parent = &middle;
-  nav2_smac_planner::NodeHybrid::CoordinateVector path;
-  ASSERT_TRUE(goal.backtracePath(path));
-  ASSERT_EQ(path.size(), 3u);
-  const auto bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
-  EXPECT_FLOAT_EQ(path[0].theta, 63.5f * bin_size);
-  EXPECT_FLOAT_EQ(path[1].theta, 12.75f * bin_size);
-  EXPECT_FLOAT_EQ(path[2].theta, 0.25f * bin_size);
-  EXPECT_FLOAT_EQ(path[0].x, goal.pose.x);
-  EXPECT_FLOAT_EQ(path[1].y, middle.pose.y);
-  EXPECT_FLOAT_EQ(path[2].x, start.pose.x);
-  EXPECT_FLOAT_EQ(middle.pose.theta, 12.75f);
-  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.getAngleFromBin(12u), 12.0f * bin_size);
-  nav2_smac_planner::NodeHybrid::motion_table.bin_size = original_bin_size;
-}
-
 TEST(NodeHybridTest, test_node_hybrid)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("test");

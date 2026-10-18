@@ -1410,9 +1410,17 @@ TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
   EXPECT_FLOAT_EQ(costs(1), 0.0);
   EXPECT_FALSE(data.fail_flag);
   goal.position.x = 100.0;
-  node->set_parameter(rclcpp::Parameter("critic.collision_check_footprint_only", false));
+  const auto mutation = node->set_parameter(
+    rclcpp::Parameter("critic.collision_check_footprint_only", false));
+  EXPECT_FALSE(mutation.successful);
+  EXPECT_TRUE(node->get_parameter("critic.collision_check_footprint_only").as_bool());
+  // Read-only safety mode requires a separately configured center-only control.
+  auto point_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("point_only_control");
+  point_node->declare_parameter("critic.consider_footprint", false);
+  point_node->declare_parameter("critic.collision_check_footprint_only", false);
+  ParametersHandler point_handler(point_node);
   ObstaclesCritic point;
-  point.on_configure(node, "mppi", "critic", cm, &handler);
+  point.on_configure(point_node, "mppi", "critic", cm, &point_handler);
   costs.fill(0.0); data.fail_flag = false; point.score(data);
   EXPECT_FLOAT_EQ(costs(0), 0.0);  // Reproduces the unsafe center-only blind spot.
   cm->on_cleanup(lifecycle);
@@ -1503,10 +1511,10 @@ TEST_F(NearGoalCollisionReduction, IntermediateCuspNearGlobalGoalDoesNotTruncate
   score({0.60f, 0.875f, 1.3125f}, true, 1);
 }
 
-TEST_F(NearGoalCollisionReduction, ClearTerminalEntryRetainsPostGoalWallTruncation)
+TEST_F(NearGoalCollisionReduction, PostGoalWallStillVetoesUnstoppedRollout)
 {
   lethal(1.3125, 0.0);
-  score({0.60f, 0.875f, 1.3125f}, false);
+  score({0.60f, 0.875f, 1.3125f}, true);
   score({0.60f, 0.875f, 1.0f}, false);
 }
 

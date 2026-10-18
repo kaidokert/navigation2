@@ -2041,11 +2041,16 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    // 3. Final segment reverse within approach radius floored reverse
+    // 3. Reverse approach to a goal behind the robot is floored reverse.
     path_direction_ = -1;
+    goal_.position.x = -0.10;
     control_sequence_.vx.fill(-0.015f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_LE(cmd.twist.linear.x, -0.050f);
+    goal_.position.x = 0.10;
+    control_sequence_.vx.fill(-0.015f);
+    cmd = getControlFromSequenceAsTwistWrapper();
+    EXPECT_NEAR(cmd.twist.linear.x, -0.015f, 1e-4);  // Do not floor away from the goal.
 
     // 4. Final segment inside terminal radius (2 cm away <= 4 cm radius) -> floor released to decelerate/stop
     path_direction_ = 1;
@@ -2920,7 +2925,11 @@ TEST(OptimizerTests, WrongWarmGearRetriesWithinExistingBudgetWithoutResettingPla
   node->declare_parameter("mppic.condition_control_on_path_direction",true);
   node->declare_parameter("mppic.retry_attempt_limit",1);
   auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("retry_costmap","","retry_costmap",true);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   ParametersHandler parameters(node);rclcpp_lifecycle::State state;cm->on_configure(state);
+  cm->pause();
+  cm->getCostmap()->resizeMap(160, 160, 0.05, -3.0, -3.0);
+  std::fill_n(cm->getCostmap()->getCharMap(), 25600, nav2_costmap_2d::FREE_SPACE);
   OptimizerTester optimizer;optimizer.initialize(node,"mppic",cm,&parameters);
   optimizer.setSpeedLimit(0.1,false);
   EXPECT_NO_THROW({

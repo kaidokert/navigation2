@@ -750,10 +750,12 @@ TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
   // Reverse segment (poses going backwards with left turn)
   plan.poses.push_back(getDummyPointStamped(node, TestPose{0.20, 0.05}));
   plan.poses.push_back(getDummyPointStamped(node, TestPose{0.10, 0.12}));
+  for (auto & pose : plan.poses) {pose.header = plan.header;}
   controller.setPlan(plan);
 
   // Robot reaches cusp at (0.30, 0.0)
   auto robot_pose = getDummyPointStamped(node, TestPose{0.30, 0.0});
+  robot_pose.header = plan.header;
   auto velocity = getDummyTwist();
 
   // On first call reaching cusp: handoff fires and pre-steer engages because target steering != -0.40 rad
