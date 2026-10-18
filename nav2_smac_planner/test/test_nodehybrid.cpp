@@ -433,7 +433,8 @@ TEST(NodeHybridTest, backtrace_preserves_fractional_headings)
   EXPECT_FLOAT_EQ(path[1].y, middle.pose.y);
   EXPECT_FLOAT_EQ(path[2].x, start.pose.x);
   EXPECT_FLOAT_EQ(middle.pose.theta, 12.75f);
-  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.getAngleFromBin(12u), 12.0f * bin_size);
+  EXPECT_FLOAT_EQ(
+    nav2_smac_planner::NodeHybrid::motion_table.getAngleFromBin(12u), 12.0f * bin_size);
   nav2_smac_planner::NodeHybrid::motion_table.bin_size = original_bin_size;
 }
 
