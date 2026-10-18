@@ -71,12 +71,17 @@ class Recorder
 {
 public:
   explicit Recorder(Json manifest, Config config = {})
-  : manifest_(std::move(manifest)), config_(config) {}
+  : manifest_(std::move(manifest)), config_(config)
+  {
+    if (!config_.pre || !config_.maximum_invocations || !config_.maximum_bytes ||
+      !config_.collapse_cycles || manifest_.dump().size() > 65536)
+    {throw std::invalid_argument("invalid recorder bounds or oversized manifest");}
+  }
   bool open() const {return current_.has_value();}
   void begin(int64_t stamp_ns) noexcept
   {
     try {
-      if (last_stamp_ && stamp_ns < *last_stamp_) {++epoch_; ++clock_resets_;}
+      if (last_stamp_ && stamp_ns < *last_stamp_) {++epoch_; ++clock_resets_; low_=0; reversals_=0; previous_sign_=0;}
       last_stamp_ = stamp_ns;
       retry = iteration = bank = 0;
       current_ = Json{{"invocation_id", ++next_id_}, {"clock_epoch", epoch_},
@@ -147,7 +152,7 @@ public:
   }
   void writeExclusive(const std::string & filename) const
   {
-    const auto content = document().dump(2) + "\n";
+    const auto content = document().dump() + "\n";
     int fd = ::open(filename.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {throw std::runtime_error("exclusive trace open failed");}
     size_t written = 0;

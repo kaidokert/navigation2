@@ -1,6 +1,8 @@
 // Copyright 2026 Kaido Kert. Apache-2.0.
 #include <filesystem>
 #include <fstream>
+#include <sys/resource.h>
+#include <algorithm>
 #include <xtensor/xrandom.hpp>
 #include "gtest/gtest.h"
 #include "utils/utils.hpp"
@@ -69,10 +71,10 @@ struct Scene
   Probe optimizer;
   geometry_msgs::msg::PoseStamped pose;
   nav_msgs::msg::Path path;
-  Scene(bool lateral=false,int batch=64,int steps=16)
+  Scene(bool lateral=false,int batch=64,int steps=16,int iterations=2)
   {
     TestCostmapSettings ms;map=getDummyCostmapRos(ms);
-    TestOptimizerSettings os{batch,steps,2,1.7,"Ackermann",true};
+    TestOptimizerSettings os{batch,steps,iterations,1.7,"Ackermann",true};
     auto options=getOptimizerOptions(os,{"PathFollowCritic","ObstaclesCritic"});
     auto overrides=options.parameter_overrides();
     overrides.emplace_back("controller_frequency",20.0);
@@ -85,7 +87,7 @@ struct Scene
     options.parameter_overrides(overrides);node=getDummyNode(options);
     params=std::make_unique<mppi::ParametersHandler>(node);
     xt::random::seed(81471);optimizer.initialize(node,"dummy",map,params.get());optimizer.seed();
-    pose.header.frame_id="map";pose.header.stamp=rclcpp::Time(1000000000).to_msg();
+    pose.header.frame_id="map";pose.header.stamp.sec=1;pose.header.stamp.nanosec=0;
     pose.pose.position.x=2;pose.pose.position.y=2;pose.pose.orientation.w=1;
     path.header=pose.header;
     for(int i=0;i<20;++i){auto p=pose;if(lateral){p.pose.position.y+=.05*i;}else{p.pose.position.x+=.05*i;}path.poses.push_back(p);}
@@ -96,10 +98,12 @@ struct Scene
   {
     rec::Json parameters=rec::Json::object();
     for(const auto & n:node->list_parameters({},10).names){parameters[n]=node->get_parameter(n).value_to_string();}
-    return {{"run_id",name},{"goal_uuid","native-fixture-goal"},{"native_baseline","7adf498bbe5db1d68cfe7d109b5b42432004478c"},
+    rec::Json loaded=rec::Json::array();std::ifstream maps("/proc/self/maps");std::string line;
+    while(std::getline(maps,line)){if(line.find("libmppi_controller.so")!=std::string::npos||line.find("libmppi_critics.so")!=std::string::npos){loaded.push_back(line);}}
+    return {{"loaded_mppi_mappings",loaded},{"run_id",name},{"goal_uuid","native-fixture-goal"},{"native_baseline","7adf498bbe5db1d68cfe7d109b5b42432004478c"},
       {"parameters",parameters},{"plant","none: native deterministic fixture"},
       {"frame_chain",{{"map_to_controller_base","identity fixture, not a live TF lookup"}}},
-      {"candidate_scope",name=="healthy" ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
+      {"candidate_scope",(name=="healthy" || name=="smoothing" || name=="benchmark") ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
   }
 };
 void save(const std::string & name,rec::Recorder & recorder,const geometry_msgs::msg::TwistStamped & command)
@@ -157,4 +161,105 @@ TEST(DecisionRecorderProof,ActualRejectionFallbackAndRecovery)
     command=s.optimizer.finish(s.pose.header.stamp);
   }
   save("rejection_retry",recorder,command);
+}
+
+TEST(DecisionRecorderProof,FullOptimizerWithActiveSmoothing)
+{
+  Scene s(false,64,41);geometry_msgs::msg::Twist speed;speed.linear.x=.1;
+  auto off=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);
+  s.optimizer.seed();rec::Recorder recorder(s.manifest("smoothing"));
+  geometry_msgs::msg::TwistStamped on;
+  {rec::Session recording(recorder);on=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);}
+  EXPECT_EQ(off.twist.linear.x,on.twist.linear.x);EXPECT_EQ(off.twist.angular.z,on.twist.angular.z);
+  save("smoothing",recorder,on);
+}
+
+TEST(DecisionRecorderProof,ProductionSizedOverheadAndNumericalParity)
+{
+  Scene s(false,1000,41,3);geometry_msgs::msg::Twist speed;speed.linear.x=.1;
+  rec::Config cfg;cfg.pre=1;cfg.maximum_invocations=1;
+  rec::Recorder recorder(s.manifest("benchmark"),cfg);
+  std::vector<double> off_ms,on_ms,added;size_t mismatches=0;
+  geometry_msgs::msg::TwistStamped on;
+  for(int i=0;i<40;++i){
+    s.optimizer.seed();auto begin=rec::monotonicNs();
+    auto off=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);
+    off_ms.push_back((rec::monotonicNs()-begin)/1e6);
+    s.optimizer.seed();begin=rec::monotonicNs();
+    {rec::Session recording(recorder);on=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);}
+    on_ms.push_back((rec::monotonicNs()-begin)/1e6);added.push_back(on_ms.back()-off_ms.back());
+    if(off.twist.linear.x!=on.twist.linear.x||off.twist.angular.z!=on.twist.angular.z){++mismatches;}
+  }
+  auto quantile=[](std::vector<double> values,double q){std::sort(values.begin(),values.end());return values[std::min(values.size()-1,static_cast<size_t>(std::ceil(q*values.size())-1))];};
+  struct rusage resource{};getrusage(RUSAGE_SELF,&resource);
+  auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));
+  std::ofstream f(out/"benchmark.metrics.json");
+  f<<rec::Json{{"pairs",40},{"batch_size",1000},{"time_steps",41},{"iterations",3},
+    {"off_ms",off_ms},{"on_ms",on_ms},{"paired_added_ms",added},{"added_p99_ms",quantile(added,.99)},
+    {"off_p50_ms",quantile(off_ms,.5)},{"on_p50_ms",quantile(on_ms,.5)},
+    {"peak_process_rss_kib",resource.ru_maxrss},{"parity_mismatches",mismatches},
+    {"declared_added_p99_budget_ms",25.0},{"scope","Observed native benchmark quantile, not a field latency guarantee; flush excluded"}}.dump(2);
+  f.close();save("benchmark",recorder,on);
+  EXPECT_EQ(mismatches,0u);EXPECT_LE(quantile(added,.99),25.0);
+}
+
+TEST(DecisionRecorderTrigger,ExpectedStopsAndHealthyMotionDoNotTrigger)
+{
+  rec::Config c;c.collapse_cycles=2;
+  rec::Json report=rec::Json::array();
+  for(const std::string mode:{"goal_completed","cancelled","paused","safety_stop","presteer","no_goal","active"}){
+    rec::Recorder recorder({{"run_id","trigger_unit_only"}},c);recorder.mode=mode;
+    {rec::Session session(recorder);
+      for(int i=0;i<4;++i){rec::Invocation invocation(i);rec::observe("issued",[&]{return rec::Json{{"vx",mode=="active"?.1:0.0}};});}}
+    EXPECT_FALSE(recorder.document()["triggered"].get<bool>());report.push_back({{"mode",mode},{"trace",recorder.document()}});
+  }
+  auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));std::ofstream f(out/"expected_stop_controls.json");f<<report.dump(2);
+}
+
+TEST(DecisionRecorderTrigger,CollapseWithoutCollisionAndEpochReset)
+{
+  rec::Config c;c.collapse_cycles=2;c.pre=2;c.post=2;
+  rec::Recorder recorder({{"run_id","trigger_unit_only"}},c);
+  {rec::Session session(recorder);
+    for(const int stamp:{10,1}){rec::Invocation invocation(stamp);rec::observe("issued",[]{return rec::Json{{"vx",0.0}};});}}
+  EXPECT_FALSE(recorder.document()["triggered"].get<bool>());
+  EXPECT_EQ(recorder.document()["health"]["clock_resets"],1);
+  {rec::Session session(recorder);rec::Invocation invocation(2);rec::observe("issued",[]{return rec::Json{{"vx",0.0}};});}
+  EXPECT_EQ(recorder.document()["termination"],"command_speed_collapse");
+  {rec::Session session(recorder);
+    for(int i=3;i<8;++i){rec::Invocation invocation(i);rec::observe("issued",[]{return rec::Json{{"vx",0.0}};});}}
+  EXPECT_TRUE(recorder.document()["frozen"].get<bool>());
+  EXPECT_EQ(recorder.document()["health"]["overflow"],0);
+  auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));recorder.writeExclusive((out/"trigger_epoch.trace.json").string());
+  EXPECT_THROW(recorder.writeExclusive((out/"trigger_epoch.trace.json").string()),std::runtime_error);
+}
+
+TEST(DecisionRecorderTrigger,OverflowAndCaptureExceptionsAreExplicit)
+{
+  rec::Config c;c.maximum_bytes=200;c.collapse_cycles=1;
+  rec::Recorder recorder({{"run_id","trigger_unit_only"}},c);
+  {rec::Session session(recorder);rec::Invocation invocation(1);
+    rec::observe("large_payload",[]{return rec::Json{{"bytes",std::string(1000,'x')}};});
+    rec::observe("issued",[]{return rec::Json{{"vx",0.0}};});}
+  EXPECT_GT(recorder.document()["health"]["overflow"].get<size_t>(),0u);
+  EXPECT_LE(recorder.document()["health"]["retained_serialized_bytes"].get<size_t>(),200u);
+  rec::Recorder bad({{"run_id","trigger_unit_only"}});
+  {rec::Session session(bad);rec::Invocation invocation(1);rec::observe("bad",[]()->rec::Json{throw std::runtime_error("injected serializer failure");});}
+  EXPECT_EQ(bad.document()["health"]["errors"],1);
+  EXPECT_FALSE(bad.document()["invocations"][0]["complete"].get<bool>());
+  auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));recorder.writeExclusive((out/"overflow.trace.json").string());bad.writeExclusive((out/"capture_error.trace.json").string());
+}
+
+TEST(DecisionRecorderTrigger,ManualAbortNoProgressAndReversal)
+{
+  auto out=std::filesystem::path(std::getenv("RECORDER_PROOF_OUTPUT"));
+  for(const std::string kind:{"manual","safety_stop","no_progress","reversal","abort"}){
+    rec::Config c;c.reversal_count=2;rec::Recorder r({{"run_id","trigger_unit_only"}},c);
+    if(kind=="manual"||kind=="safety_stop"){r.trigger(kind);}
+    if(kind=="no_progress"){r.independent_progress=0.;r.delivered_speed=.1;}
+    {rec::Session session(r);
+      for(int i=0;i<3;++i){rec::Invocation invocation(i);if(kind=="abort"){r.exception("injected_native_abort");}
+        rec::observe("issued",[&]{return rec::Json{{"vx",kind=="reversal"?(i%2?-.1:.1):.1}};});}}
+    EXPECT_TRUE(r.document()["triggered"].get<bool>());r.writeExclusive((out/("trigger_"+kind+".trace.json")).string());
+  }
 }
