@@ -131,8 +131,14 @@ public:
 
   double getInversionSegmentRatio() const {return inversion_segment_ratio_;}
   double getInversionXYFloor() const {return inversion_xy_floor_;}
+  double getInversionYawBase() const {return inversion_yaw_base_;}
   void setInversionSegmentRatio(double ratio) {inversion_segment_ratio_ = ratio;}
   void setInversionXYFloor(double floor) {inversion_xy_floor_ = floor;}
+  void setInversionYawBase(double yaw) {inversion_yaw_base_ = yaw;}
+  double getMinCuspDistance() const {return min_cusp_distance_;}
+  void resetMinCuspDistance() {min_cusp_distance_ = std::numeric_limits<double>::infinity();}
+  void setGoalTolerance(double tol) {goal_tolerance_ = tol;}
+  double getGoalTolerance() const {return goal_tolerance_;}
 
   /**
    * @brief Get the global goal pose transformed to the local frame
@@ -283,6 +289,7 @@ protected:
   float inversion_yaw_tolerance_{0.4};
   double inversion_segment_ratio_{0.25};
   double inversion_xy_floor_{0.05};
+  double inversion_yaw_base_{0.20};
   double min_inversion_horizon_{0.15};
   double ghost_max_extension_{0.35};
   double ghost_point_spacing_{0.05};
@@ -300,6 +307,7 @@ protected:
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
+  mutable double min_cusp_distance_{std::numeric_limits<double>::infinity()};
   bool enforce_path_inversion_{false};
   bool did_handoff_{false};
   size_t real_path_point_count_{0u};
@@ -317,6 +325,7 @@ protected:
   bool validate_short_forward_departure_{false};
   bool preserve_cusp_direction_edge_{false};
   bool replan_on_cusp_overrun_{false};
+  double goal_tolerance_{0.085};
   bool cusp_overrun_snapshot_written_{false};
   struct DepartureApproachBudget
   {

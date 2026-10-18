@@ -139,6 +139,16 @@ public:
   {
     handoff_escape_after_cycles_ = cycles;
   }
+
+  bool shouldUseGhostPathWrapper(
+    const nav_msgs::msg::Path & transformed_plan,
+    const geometry_msgs::msg::PoseStamped & global_pose,
+    const double tgp_length,
+    double & cusp_dist,
+    double & heading) const
+  {
+    return shouldUseGhostPath(transformed_plan, global_pose, tgp_length, cusp_dist, heading);
+  }
 };
 
 // Helper: robot pose at (x, y) with the given yaw
@@ -1834,6 +1844,12 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   // Robot at x = 0.19 (dist = 0.05m <= 0.06m gate): accepted
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0)));
 
+  // Test heading check: cusp heading is 0.0 rad, base yaw gate is 0.20 rad (~11.5°).
+  // Robot at x = 0.19 with yaw = 0.25 rad (~14.3°): rejected because heading is too flat
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0.25)));
+  // Robot at x = 0.19 with yaw = 0.10 rad (~5.7°): accepted
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.19, 0, 0.10)));
+
   // Test deadband floor on a short segment: length 0.12m
   // scaled gate = 0.25 * 0.12 = 0.03m < 0.05m floor -> effective xy tol = 0.05m
   nav_msgs::msg::Path plan2;
@@ -1849,4 +1865,197 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   // Robot at x = 0.08 (dist = 0.04m <= 0.05m gate): accepted
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.08, 0, 0)));
 }
+
+TEST(PathHandlerTests, ClosestApproachHandoffNearMiss)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("closest_approach_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.inversion_yaw_tolerance", 0.38);
+  node->declare_parameter("dummy.inversion_segment_ratio", 0.25);
+  node->declare_parameter("dummy.inversion_xy_floor", 0.05);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Path with cusp at (1.0, 0.0): length 1.0m > 0.6m -> effective_xy_tol = 0.15m
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0, 0), makePose(0.5, 0, 0), makePose(1.0, 0, 0), makePose(0.8, 0, 0)};
+  handler.setPath(plan);
+
+  // Approach cycle 1: robot at x = 0.80 (dist = 0.20m > 0.15m) -> rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.80, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.20, 1e-4);
+
+  // Approach cycle 2: robot at x = 0.845 (dist = 0.155m > 0.150m gate)
+  // Distance is 15.5 cm, within the 2 cm near-miss margin (0.15 + 0.02 = 0.17m),
+  // but distance is currently decreasing -> rejected
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.155, 1e-4);
+
+  // Approach cycle 3: robot passes closest approach and moves back to x = 0.835
+  // (dist = 0.165m > min_dist 0.155m + 0.005m delta)
+  // Near-miss closest-approach handoff triggers!
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.835, 0, 0)));
+
+  // If heading was misaligned (e.g. yaw = 0.50 rad > 0.38 rad tolerance): rejected
+  handler.setPath(plan);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0.50)));
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.835, 0, 0.50)));
+
+  // If far miss (min distance = 0.22m > 0.15 + 0.02 = 0.17m): rejected
+  handler.setPath(plan);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.78, 0, 0)));
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.76, 0, 0)));
+}
+
+TEST(PathHandlerTests, BoundedGhostExtensionPastClosestApproach)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ghost_bound_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  node->declare_parameter("dummy.min_inversion_horizon", 0.80);
+  node->declare_parameter("dummy.ghost_max_extension", 0.35);
+  node->declare_parameter("dummy.ghost_point_spacing", 0.05);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0, 0), makePose(0.5, 0, 0), makePose(1.0, 0, 0), makePose(0.8, 0, 0)};
+  handler.setPath(plan);
+
+  nav_msgs::msg::Path transformed;
+  transformed.header.frame_id = "odom";
+  transformed.poses = {makePose(1.0, 0, 0)}; // real TGP pruned to single cusp point
+
+  // Approach to 0.155m: updates min_cusp_distance_
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0)));
+  EXPECT_NEAR(handler.getMinCuspDistance(), 0.155, 1e-4);
+
+  double cusp_dist = 0.0;
+  double heading = 0.0;
+  // While close (dist = 0.160m <= 0.155 + 0.05m): ghost extension allowed
+  EXPECT_TRUE(handler.shouldUseGhostPathWrapper(
+    transformed, makePose(0.840, 0, 0), 0.0, cusp_dist, heading));
+
+  // Once robot has drifted past closest approach by > 5 cm (e.g. dist = 0.22m > 0.155 + 0.05m):
+  // ghost extension is suppressed!
+  EXPECT_FALSE(handler.shouldUseGhostPathWrapper(
+    transformed, makePose(0.780, 0, 0), 0.0, cusp_dist, heading));
+}
+
+TEST(PathHandlerTests, TerminalGoalSteadyApproachDoesNotAbort)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Single-segment plan (inversion_locale_ == 0) ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot at (-0.02, 0.24) -> dist = 0.16m > 0.10m goal tolerance
+  auto robot_pose = makePose(-0.02, 0.24, 0);
+
+  // Across 150 cycles, transformPath succeeds smoothly without premature aborts
+  for (unsigned int i = 0; i < 150; ++i) {
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
+TEST(PathHandlerTests, TerminalGoalWithinToleranceDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot at (0.0, 0.32) -> dist = 0.08m <= 0.098m goal tolerance bound
+  auto robot_pose = makePose(0, 0.32, 0);
+
+  // For 100 cycles, does not throw because vehicle is within goal tolerance bound
+  for (unsigned int i = 0; i < 100; ++i) {
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
+TEST(PathHandlerTests, TerminalGoalWithDynamicToleranceDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Set dynamic goal tolerance to 0.21m (e.g. M6 tolerance)
+  handler.setGoalTolerance(0.21);
+  EXPECT_DOUBLE_EQ(handler.getGoalTolerance(), 0.21);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot at (0.0, 0.27) -> dist = 0.13m (within 0.21m goal tolerance, but would have failed with 0.085m bound)
+  auto robot_pose = makePose(0, 0.27, 0);
+
+  // For 100 cycles, does not throw because vehicle is within goal tolerance (0.21m)
+  for (unsigned int i = 0; i < 100; ++i) {
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
+TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_stall_node");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &params);
+
+  // Set goal tolerance to 0.07m (e.g. M8 stopped checker tolerance)
+  handler.setGoalTolerance(0.07);
+
+  // Single-segment plan ending at (0.0, 0.40)
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  plan.poses = {makePose(0, 0.40, 0)};
+  handler.setPath(plan);
+
+  // Robot starts at y = 0.22 (dist = 0.18m > 0.07m goal tolerance).
+  // Creeps slowly forward at 1 mm per cycle over 150 cycles (0.5 m/s * dt = 0.001m per cycle).
+  // Because net progress exceeds 10mm every 10 cycles, stall_cycles is continually reset.
+  for (unsigned int i = 0; i < 150; ++i) {
+    double current_y = 0.22 + (static_cast<double>(i) * 0.001);
+    auto robot_pose = makePose(0, current_y, 0);
+    EXPECT_NO_THROW(handler.transformPath(robot_pose));
+  }
+}
+
+
 
