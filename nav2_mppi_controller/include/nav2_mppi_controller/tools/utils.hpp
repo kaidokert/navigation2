@@ -531,23 +531,27 @@ inline unsigned int findFirstPathInversion(nav_msgs::msg::Path & path)
     return path.poses.size();
   }
 
-  // Iterating through the path to determine the position of the path inversion
-  for (unsigned int idx = 1; idx < path.poses.size() - 1; ++idx) {
-    // We have two vectors for the dot product OA and AB. Determining the vectors.
-    float oa_x = path.poses[idx].pose.position.x -
+  // A shared cusp can be repeated when planner segments are concatenated.
+  // Ignore zero-length edges, retaining the previous travel direction so a
+  // duplicate pose cannot hide a reversal. Return the first outgoing pose,
+  // preserving the existing crop / shared-cusp handoff convention.
+  float previous_x = 0.0f;
+  float previous_y = 0.0f;
+  bool have_previous = false;
+  for (unsigned int idx = 1; idx < path.poses.size(); ++idx) {
+    const float dx = path.poses[idx].pose.position.x -
       path.poses[idx - 1].pose.position.x;
-    float oa_y = path.poses[idx].pose.position.y -
+    const float dy = path.poses[idx].pose.position.y -
       path.poses[idx - 1].pose.position.y;
-    float ab_x = path.poses[idx + 1].pose.position.x -
-      path.poses[idx].pose.position.x;
-    float ab_y = path.poses[idx + 1].pose.position.y -
-      path.poses[idx].pose.position.y;
-
-    // Checking for the existance of cusp, in the path, using the dot product.
-    float dot_product = (oa_x * ab_x) + (oa_y * ab_y);
-    if (dot_product < 0.0f) {
-      return idx + 1;
+    if (dx == 0.0f && dy == 0.0f) {
+      continue;
     }
+    if (have_previous && previous_x * dx + previous_y * dy < 0.0f) {
+      return idx;
+    }
+    previous_x = dx;
+    previous_y = dy;
+    have_previous = true;
   }
 
   return path.poses.size();
