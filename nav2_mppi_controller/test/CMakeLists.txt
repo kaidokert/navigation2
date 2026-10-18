@@ -38,3 +38,7 @@ target_link_libraries(critics_tests mppi_controller mppi_critics)
 if(${TEST_DEBUG_INFO})
   target_compile_definitions(critics_tests PUBLIC -DTEST_DEBUG_INFO)
 endif()
+
+ament_add_gtest(collision_critic_tests collision_critic_tests.cpp)
+ament_target_dependencies(collision_critic_tests ${dependencies_pkgs})
+target_link_libraries(collision_critic_tests mppi_controller mppi_critics)
