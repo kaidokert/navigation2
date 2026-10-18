@@ -100,17 +100,21 @@ struct Config
 // Conservative encoded-byte charge, not serialization. Every finite JSON number
 // fits in 32 characters; strings need at most six encoded bytes per source byte.
 // Numeric arrays use one tight type scan instead of formatting every scalar.
+inline size_t escapedStringUpperBound(const std::string & value)
+{
+  size_t bytes = 2;
+  for (unsigned char c : value) {
+    bytes += c < 0x20 ? 6 : (c == '"' || c == '\\') ? 2 : 1;
+  }
+  return bytes;
+}
 inline size_t serializedUpperBound(const Json & value)
 {
   if (value.is_null() || value.is_boolean()) {return 5;}
   if (value.is_number()) {return 32;}
   if (value.is_binary()) {return 2 + 4 * ((value.get_binary().size() + 2) / 3);}
   if (value.is_string()) {
-    size_t bytes = 2;
-    for (unsigned char c : value.get_ref<const std::string &>()) {
-      bytes += c < 0x20 ? 6 : (c == '"' || c == '\\') ? 2 : 1;
-    }
-    return bytes;
+    return escapedStringUpperBound(value.get_ref<const std::string &>());
   }
   size_t bound = 2;
   if (value.is_array()) {
@@ -120,7 +124,7 @@ inline size_t serializedUpperBound(const Json & value)
     for (const auto & item : items) {bound += 1 + serializedUpperBound(item);}
   } else {
     for (auto i = value.begin(); i != value.end(); ++i) {
-      bound += 4 + 6 * i.key().size() + serializedUpperBound(i.value());
+      bound += 2 + escapedStringUpperBound(i.key()) + serializedUpperBound(i.value());
     }
   }
   return bound;
@@ -233,14 +237,38 @@ public:
   }
   void writeExclusive(const std::string & filename) const
   {
-    const auto content = document().dump() + "\n";
+    // Keep at most one encoded invocation and its string alive in the worker.
+    // First pass obtains the identical health byte count; second pass writes
+    // canonical sorted-key JSON, byte-for-byte equal to document().dump().
+    size_t actual_bytes = 0;
+    for (const auto & frame : frames_) {
+      Json copy = frame; encodeBinary(copy); actual_bytes += copy.dump().size();
+    }
     int fd = ::open(filename.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {throw std::runtime_error("exclusive trace open failed");}
-    size_t written = 0;
-    while (written < content.size()) {
-      auto n = ::write(fd, content.data() + written, content.size() - written);
-      if (n <= 0) {::close(fd); throw std::runtime_error("trace write failed");}
-      written += static_cast<size_t>(n);
+    auto write = [&](const std::string & content) {
+        size_t written = 0;
+        while (written < content.size()) {
+          auto n = ::write(fd, content.data() + written, content.size() - written);
+          if (n <= 0) {throw std::runtime_error("trace write failed");}
+          written += static_cast<size_t>(n);
+        }
+      };
+    try {
+      Json health{{"errors", errors_}, {"overflow", overflow_}, {"pre_evictions", evictions_},
+        {"after_window", after_window_}, {"clock_resets", clock_resets_},
+        {"retained_serialized_bytes", actual_bytes}, {"retained_charge_upper_bound_bytes", bytes_},
+        {"maximum_bytes", config_.maximum_bytes}};
+      write("{\"frozen\":" + Json(frozen_).dump() + ",\"health\":" + health.dump() + ",\"invocations\":[");
+      bool first = true;
+      for (const auto & frame : frames_) {
+        if (!first) {write(",");} first = false;
+        Json copy = frame; encodeBinary(copy); write(copy.dump());
+      }
+      write("],\"manifest\":" + manifest_.dump() + ",\"schema\":\"jetacker-decision-trace/1.1.0\",\"termination\":" +
+        Json(reason_).dump() + ",\"triggered\":" + Json(triggered_).dump() + "}\n");
+    } catch (...) {
+      ::close(fd); throw;
     }
     if (::close(fd)) {throw std::runtime_error("trace close failed");}
   }

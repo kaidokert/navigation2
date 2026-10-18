@@ -31,6 +31,45 @@ void tick(rec::LiveRecorder & live,int64_t stamp,double vx=.1)
   live.publication({{"published",true},{"stamp_ns",stamp+1},{"vx",vx},{"vy",0.0},{"wz",0.0}});
 }
 }
+TEST(RecorderResource,EscapedKeyChargeRemainsConservativeWithoutSixfoldAsciiCharge)
+{
+  const std::vector<rec::Json> cases={
+    {{std::string(200,'k'),0}},
+    {{"quote\"\\\n\x1f",rec::Json{nullptr,true,false,-1.2e300}}},
+    {{u8"µ",u8"µ"}},rec::Json::binary({0,1,2,255})};
+  for(const auto & value:cases) {
+    auto encoded=value;rec::encodeBinary(encoded);
+    EXPECT_GE(rec::serializedUpperBound(value),encoded.dump().size());
+  }
+  EXPECT_LT(rec::serializedUpperBound(cases.front()),2*cases.front().dump().size());
+}
+TEST(RecorderResource,StreamedWriterMatchesCanonicalDocumentAndRejectsOverwrite)
+{
+  auto root=directory("resource_streamed_canonical");
+  rec::Config config;config.pre=1;config.post=0;
+  rec::Recorder recorder({{"quoted","a\"b\\c\n"},{"unicode",u8"µ"}},config);
+  for(int i=0;i<2;++i) {
+    if(i==1) {recorder.trigger("quote\"\\\n");}
+    recorder.begin(i+1);
+    recorder.event("payload",[] {return rec::Json{{"encoding","f32le-base64"},
+        {"data",rec::Json::binary({0,1,2,255})}};});
+    recorder.end();
+  }
+  const auto expected=recorder.document().dump()+"\n";
+  const auto path=(root/"trace.json").string();recorder.writeExclusive(path);
+  std::ifstream file(path);const std::string actual((std::istreambuf_iterator<char>(file)),{});
+  EXPECT_EQ(actual,expected);
+  EXPECT_THROW(recorder.writeExclusive(path),std::runtime_error);
+  EXPECT_EQ(read(path),recorder.document());
+}
+TEST(RecorderResource,EmptyStreamedWriterMatchesCanonicalDocument)
+{
+  auto root=directory("resource_streamed_empty");rec::Recorder recorder({{"empty",true}});
+  const auto expected=recorder.document().dump()+"\n";
+  const auto path=(root/"trace.json").string();recorder.writeExclusive(path);
+  std::ifstream file(path);const std::string actual((std::istreambuf_iterator<char>(file)),{});
+  EXPECT_EQ(actual,expected);
+}
 TEST(LiveRecorder,DetachedFlushAndDispatchIdentity)
 {
   auto root=directory("live_adapter_healthy");
