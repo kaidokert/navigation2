@@ -64,7 +64,7 @@ protected:
     * @param theta theta of pose
     * @return Collision information at pose
     */
-  inline CollisionCost costAtPose(float x, float y, float theta);
+  CollisionCost costAtPose(float x, float y, float theta);
 
   /**
     * @brief Distance to obstacle from cost
@@ -87,6 +87,9 @@ protected:
   collision_checker_{nullptr};
 
   bool consider_footprint_{true};
+  // Optional hard perimeter veto while retaining point-based soft clearance costs.
+  bool collision_check_footprint_only_{false};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr hard_check_param_callback_;
   float collision_cost_{0};
   float inflation_scale_factor_{0}, inflation_radius_{0};
 

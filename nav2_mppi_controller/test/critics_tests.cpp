@@ -840,7 +840,7 @@ TEST(CriticTests, PathAlignCriticShortPath)
   critic.score(data);
   EXPECT_GT(xt::sum(costs, immediate)(), 0.0);
 
-  // 5. N = 20, lookahead = 1 (normal path startup -> verify non-terminal short-path behavior is preserved)
+  // 5. N = 20, lookahead = 1: preserve non-terminal short-path behavior.
   path.reset(20);
   for (unsigned int i = 0; i < 20; ++i) {
     path.x(i) = static_cast<float>(i) * 0.1f;
@@ -971,13 +971,10 @@ TEST(CriticTests, ApproachAngleCritic)
   EXPECT_GT(costs(1), costs_at_03);
 }
 
-TEST(CriticTests, ObstaclesCriticGoalTruncation)
+TEST(CriticTests, ObstaclesCriticDoesNotTruncateAtGoal)
 {
-  // M6 regression (notes/cusp_handoff_fix_plan.md, 2026-09-25): rollout tails
-  // extend ~2s PAST the goal; when the goal sits near a wall, every
-  // progress-making sample "collides" beyond it and the optimizer parks at a
-  // standoff (critics_stats showed ObstaclesCritic 0 -> 5e10 at the brake
-  // moment). Points past the goal are fantasy — the executed robot stops.
+  // A forecast crossing the goal still describes motion unless it models a stop.
+  // The deprecated truncation radius cannot hide its later lethal wall sample.
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "dummy_costmap", "", "dummy_costmap", true);
@@ -1027,8 +1024,6 @@ TEST(CriticTests, ObstaclesCriticGoalTruncation)
   critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
 
   critic.score(data);
-  // With goal truncation, the post-goal wall must not veto the trajectory
-  EXPECT_NEAR(xt::sum(costs, immediate)(), 0, 1e-6) <<
-    "post-goal obstacle vetoed a trajectory that stops at the goal";
-  EXPECT_FALSE(data.fail_flag);
+  EXPECT_GE(costs(0), 1000000.0f);
+  EXPECT_TRUE(data.fail_flag);
 }

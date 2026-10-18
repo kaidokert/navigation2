@@ -249,6 +249,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
     // appended == 0 (escape direction blocked by cost): fall through to the
     // normal ghost branch below (review finding 8).
   }
+  const bool short_unhandled_inversion =
+    !escape_handled && real_tgp_length < min_inversion_horizon_ && inversion_locale_ != 0u;
   if (!escape_handled && shouldUseGhostPath(
       transformed_plan, global_pose, real_tgp_length, cusp_dist,
       ghost_heading))
@@ -274,9 +276,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
         appended, ghost_heading, ghost_heading * 180.0 / M_PI,
         real_tgp_length, tgp_length, cusp_dist);
     }
-  } else if (!escape_handled && real_tgp_length < min_inversion_horizon_ &&
-    inversion_locale_ != 0u)
-  {
+  } else if (short_unhandled_inversion) {
     // Log WHY ghost didn't fire when TGP is short
     cusp_dist = getCuspDistance(global_pose);
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
@@ -577,9 +577,9 @@ bool PathHandler::isWithinInversionTolerances(
   // alignment on a 4cm segment overconstrains the Ackermann controller.
   const bool is_micro_cusp =
     current_segment_length_ < micro_cusp_length_threshold_;
-  const double effective_yaw_tol = is_micro_cusp
-    ? inversion_yaw_tolerance_ * micro_cusp_yaw_scale_
-    : inversion_yaw_tolerance_;
+  const double effective_yaw_tol = is_micro_cusp ?
+    inversion_yaw_tolerance_ * micro_cusp_yaw_scale_ :
+    inversion_yaw_tolerance_;
 
   // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
   // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
@@ -597,7 +597,7 @@ bool PathHandler::isWithinInversionTolerances(
       handoff_yaw_relax_per_cycle_ * static_cast<double>(handoff_blocked_cycles_)));
 
   bool result = distance <= inversion_xy_tolerance_ &&
-         std::fabs(angle_distance) <= relaxed_yaw_tol;
+    std::fabs(angle_distance) <= relaxed_yaw_tol;
 
   if (!result && distance <= inversion_xy_tolerance_) {
     ++handoff_blocked_cycles_;
