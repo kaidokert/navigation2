@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 #include <future>
 #include <chrono>
+#include <sstream>
 
 namespace rec=mppi::recorder;
 namespace
@@ -57,7 +58,8 @@ TEST(RecorderResource,StreamedWriterMatchesCanonicalDocumentAndRejectsOverwrite)
   }
   const auto expected=recorder.document().dump()+"\n";
   const auto path=(root/"trace.json").string();recorder.writeExclusive(path);
-  std::ifstream file(path);const std::string actual((std::istreambuf_iterator<char>(file)),{});
+  std::ifstream file(path);ASSERT_TRUE(file.is_open());
+  std::ostringstream bytes;bytes<<file.rdbuf();const std::string actual=bytes.str();
   EXPECT_EQ(actual,expected);
   EXPECT_THROW(recorder.writeExclusive(path),std::runtime_error);
   EXPECT_EQ(read(path),recorder.document());
@@ -67,7 +69,8 @@ TEST(RecorderResource,EmptyStreamedWriterMatchesCanonicalDocument)
   auto root=directory("resource_streamed_empty");rec::Recorder recorder({{"empty",true}});
   const auto expected=recorder.document().dump()+"\n";
   const auto path=(root/"trace.json").string();recorder.writeExclusive(path);
-  std::ifstream file(path);const std::string actual((std::istreambuf_iterator<char>(file)),{});
+  std::ifstream file(path);ASSERT_TRUE(file.is_open());
+  std::ostringstream bytes;bytes<<file.rdbuf();const std::string actual=bytes.str();
   EXPECT_EQ(actual,expected);
 }
 TEST(LiveRecorder,DetachedFlushAndDispatchIdentity)
