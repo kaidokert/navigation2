@@ -87,6 +87,8 @@ protected:
   collision_checker_{nullptr};
 
   bool consider_footprint_{true};
+  // Optional hard perimeter veto while retaining point-based soft clearance costs.
+  bool collision_check_footprint_only_{false};
   float collision_cost_{0};
   float inflation_scale_factor_{0}, inflation_radius_{0};
 

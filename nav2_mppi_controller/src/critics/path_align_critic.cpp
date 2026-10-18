@@ -33,6 +33,10 @@ void PathAlignCritic::initialize()
     threshold_to_consider_,
     "threshold_to_consider", 0.5f);
   getParam(use_path_orientations_, "use_path_orientations", false);
+  getParam(cusp_terminal_heading_weight_, "cusp_terminal_heading_weight", 0.0f);
+  if (cusp_terminal_heading_weight_ < 0.0f) {
+    throw std::invalid_argument("Cusp terminal heading weight must be nonnegative");
+  }
 
   RCLCPP_INFO(
     logger_,
@@ -42,9 +46,11 @@ void PathAlignCritic::initialize()
 
 void PathAlignCritic::score(CriticData & data)
 {
-  // Don't apply close to goal, let the goal critics take over
-  if (!enabled_ || utils::withinPositionGoalTolerance(
-      threshold_to_consider_, data.state.pose.pose, data.goal))
+  // Final-goal proximity must not disable a required intermediate cusp.
+  // On the final segment, preserve the usual handoff to goal critics.
+  if (!enabled_ || (data.active_cusp_direction == 0 &&
+    utils::withinPositionGoalTolerance(
+      threshold_to_consider_, data.state.pose.pose, data.goal)))
   {
     auto node = parent_.lock();
     if (node) {
@@ -55,6 +61,22 @@ void PathAlignCritic::score(CriticData & data)
     return;
   }
 
+  // Averaged tracking cost can prefer an exact-position, wrong-yaw stop over
+  // the transient motion needed to satisfy an intermediate cusp. Apply this
+  // separate terminal objective only to a short real prefix. A distant cusp
+  // must not pull the heading through intervening path curvature; final goals
+  // keep their existing goal critic. Default zero preserves previous scoring.
+  const size_t real_cusp_pts = std::min(
+    data.real_path_point_count.value_or(0), data.path.yaws.size());
+  if (cusp_terminal_heading_weight_ > 0.0f && data.active_cusp_direction != 0 &&
+    real_cusp_pts > 0 && real_cusp_pts <= 4 && data.trajectories.yaws.shape(1) > 0)
+  {
+    auto error = xt::fabs(utils::shortest_angular_distance(
+      xt::view(data.trajectories.yaws, xt::all(), -1),
+      data.path.yaws(real_cusp_pts - 1)));
+    data.costs += cusp_terminal_heading_weight_ * error;
+  }
+
   if (data.path.x.shape(0) < 2) {
     return;
   }
@@ -63,15 +85,36 @@ void PathAlignCritic::score(CriticData & data)
   utils::setPathFurthestPointIfNotSet(data);
   const size_t total_path_pts = data.path.x.shape(0);
   const size_t total_segments = total_path_pts - 1;
-  const size_t path_segments_count =
+  size_t path_segments_count =
     std::min(*data.furthest_reached_path_point, total_segments);
 
-  if (path_segments_count == 0) {
-    return;
+  // Preview ghosts must not turn a short real segment into a long-path startup.
+  // Keep their orientation geometry, but classify the segment before extension.
+  const size_t real_path_pts = std::min(
+    data.real_path_point_count.value_or(total_path_pts), total_path_pts);
+  // A required cusp segment already has a known outgoing bearing. Suppressing
+  // alignment until the random batch makes progress loses curvature guidance
+  // exactly during the steering reversal. Match travelled distance against the
+  // complete real segment; preview ghosts must not extend this reference.
+  const bool active_real_cusp = data.active_cusp_direction != 0 &&
+    data.real_path_point_count.has_value() && real_path_pts > 0;
+  if (active_real_cusp) {
+    path_segments_count = real_path_pts;
   }
-
+  const bool short_real_segment =
+    data.real_path_point_count.has_value() && real_path_pts > 0 && real_path_pts <= 4;
+  if (path_segments_count == 0) {
+    if (!short_real_segment) {
+      return;
+    }
+    // A stationary rollout at a pruned cusp still needs endpoint heading cost.
+    // One path sample suffices; retaining zero would both disable alignment and
+    // underflow the final-pose index below. Long-path startup remains unchanged.
+    path_segments_count = 1;
+  }
   const bool is_terminal_path =
-    (path_segments_count >= total_segments) || (total_path_pts <= 4);
+    active_real_cusp || (path_segments_count >= total_segments) ||
+    (real_path_pts > 0 && real_path_pts <= 4);
 
   if (!is_terminal_path && path_segments_count < offset_from_furthest_) {
     auto node = parent_.lock();
