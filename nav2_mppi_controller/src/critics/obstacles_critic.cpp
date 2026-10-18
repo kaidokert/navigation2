@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include <cmath>
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "nav2_mppi_controller/critics/obstacles_critic.hpp"
 #include "nav2_costmap_2d/inflation_layer.hpp"
 #include "nav2_core/controller_exceptions.hpp"
@@ -25,7 +26,26 @@ void ObstaclesCritic::initialize()
 {
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(consider_footprint_, "consider_footprint", false);
-  getParam(collision_check_footprint_only_, "collision_check_footprint_only", false);
+  // Footprint availability is checked at configure time. Keep this mode fixed
+  // until reconfiguration, and reject ROS writes rather than silently ignoring them.
+  const auto node = parent_.lock();
+  const auto hard_check_name = name_ + ".collision_check_footprint_only";
+  rcl_interfaces::msg::ParameterDescriptor descriptor;
+  descriptor.read_only = true;
+  descriptor.description = "Hard footprint collision mode; requires controller restart";
+  if (node->has_parameter(hard_check_name)) {
+    if (!node->describe_parameter(hard_check_name).read_only) {
+      const auto value = node->get_parameter(hard_check_name).get_parameter_value();
+      node->undeclare_parameter(hard_check_name);
+      // Preserve a predeclared value, including automatically declared overrides.
+      node->declare_parameter(hard_check_name, value, descriptor, true);
+    }
+  } else {
+    // Normal YAML/CLI overrides are consumed by this initial declaration.
+    node->declare_parameter(hard_check_name, false, descriptor);
+  }
+  getParam(collision_check_footprint_only_, "collision_check_footprint_only",
+    false, ParameterType::Static);
   getParam(power_, "cost_power", 1);
   getParam(repulsion_weight_, "repulsion_weight", 1.5f);
   getParam(critical_weight_, "critical_weight", 20.0f);

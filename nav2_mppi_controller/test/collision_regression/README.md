@@ -19,6 +19,8 @@ controller_server:
 The second setting enables unconditional footprint collision checks even where
 the reference-point inflation cost is below the circumscribed-radius threshold.
 It defaults to false, so existing configurations must explicitly enable it.
+The setting is read-only after critic configuration: live activation and
+deactivation are rejected. Change YAML/CLI and restart the controller to change modes. Startup overrides and predeclared values are preserved.
 With `consider_footprint: false`, hard footprint rejection can be enabled while
 retaining point-based soft clearance scoring. A polygon footprint is required.
 

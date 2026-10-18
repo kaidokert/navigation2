@@ -201,6 +201,59 @@ TEST_F(CollisionCriticTest, HardVetoRequiresRectangle)
   round->on_cleanup(lifecycle);
 }
 
+TEST_F(CollisionCriticTest, DynamicActivationOnRadiusMapIsRejected)
+{
+  node->set_parameter(rclcpp::Parameter("critic.collision_check_footprint_only", false));
+  auto round = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dynamic_round_map", "", "dynamic_round_map", true);
+  round->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  ASSERT_EQ(round->on_configure(lifecycle), nav2_util::CallbackReturn::SUCCESS);
+  round->pause();
+  FootprintWitness critic;
+  critic.on_configure(node, "mppi", "critic", round, handler.get());
+  handler->start();  // Reproduce the live controller's dynamic parameter callback.
+  const auto result = node->set_parameter(
+    rclcpp::Parameter("critic.collision_check_footprint_only", true));
+  EXPECT_FALSE(result.successful);
+  EXPECT_FALSE(node->get_parameter("critic.collision_check_footprint_only").as_bool());
+  EXPECT_TRUE(node->describe_parameter("critic.collision_check_footprint_only").read_only);
+  // Continue scoring safely in radius mode after the rejected activation.
+  EXPECT_NO_THROW(critic.sample(1.0f, 1.0f, 0.0f));
+  round->on_cleanup(lifecycle);
+}
+
+TEST_F(CollisionCriticTest, EnabledHardVetoCannotBeDynamicallyDisabled)
+{
+  cornerObstacle();
+  FootprintWitness critic;
+  configure(critic);
+  handler->start();
+  const auto result = node->set_parameter(
+    rclcpp::Parameter("critic.collision_check_footprint_only", false));
+  EXPECT_FALSE(result.successful);
+  EXPECT_TRUE(node->get_parameter("critic.collision_check_footprint_only").as_bool());
+  EXPECT_EQ(critic.sample(0.5028052926f, 0.4304492474f, -2.0596189499f).cost,
+    nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(CollisionCriticTest, StartupOverrideEnablesReadOnlyHardVeto)
+{
+  cornerObstacle();
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("critic.collision_check_footprint_only", true)});
+  auto configured_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
+    "startup_override", options);
+  mppi::ParametersHandler configured_handler(configured_node);
+  FootprintWitness critic;
+  critic.on_configure(configured_node, "mppi", "critic", cm, &configured_handler);
+  EXPECT_TRUE(configured_node->get_parameter("critic.collision_check_footprint_only").as_bool());
+  EXPECT_TRUE(configured_node->describe_parameter(
+      "critic.collision_check_footprint_only").read_only);
+  EXPECT_EQ(critic.sample(0.5028052926f, 0.4304492474f, -2.0596189499f).cost,
+    nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
 TEST_F(CollisionCriticTest, OutOfMapFootprintIsVetoed)
 {
   FootprintWitness critic;
