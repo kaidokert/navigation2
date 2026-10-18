@@ -160,6 +160,7 @@ void CriticManager::evalTrajectoriesScores(
   }
 
   recorder::observe("score_end", [&] {return recorder::Json{
+    {"path_valid_cache",data.path_pts_valid ? recorder::Json(*data.path_pts_valid) : recorder::Json(nullptr)},
     {"costs",recorder::tensor(data.costs)}, {"fail_flag",data.fail_flag},
     {"furthest",data.furthest_reached_path_point ? recorder::Json(*data.furthest_reached_path_point) : recorder::Json(nullptr)}};});
   if (collect_stats && critics_effect_pub_ && stats_msg) {

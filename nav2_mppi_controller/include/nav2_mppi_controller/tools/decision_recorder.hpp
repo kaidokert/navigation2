@@ -180,6 +180,13 @@ public:
         std::abs(*independent_progress) < config_.progress_floor)
       {trigger("delivered_command_without_progress");}
       if (frame.contains("exception")) {trigger("abort");}
+      frame["trigger_inputs"] = Json{{"eligible",eligible},{"has_command",has_command},
+        {"command_vx",vx},{"low_cycles",low_},{"reversal_count",reversals_},
+        {"independent_progress",independent_progress ? Json(*independent_progress) : Json(nullptr)},
+        {"delivered_speed",delivered_speed ? Json(*delivered_speed) : Json(nullptr)},
+        {"collapse_speed",config_.collapse_speed},{"collapse_cycles",config_.collapse_cycles},
+        {"progress_floor",config_.progress_floor},{"moving_command",config_.moving_command},
+        {"reversal_threshold",config_.reversal_count}};
       const auto bytes = serializedUpperBound(frame);
       if (bytes > config_.maximum_bytes) {++overflow_; return;}
       if (!triggered_) {

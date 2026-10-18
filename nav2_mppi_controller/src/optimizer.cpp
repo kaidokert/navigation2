@@ -770,7 +770,11 @@ void Optimizer::prepare(
   path_ = utils::toTensor(plan);
   costs_.fill(0.0f);
   goal_ = goal;
-  recorder::observe("prepared", [&] {return recorder::Json{
+  recorder::observe("prepared", [&] {
+    const auto * model = dynamic_cast<AckermannMotionModel *>(motion_model_.get());
+    return recorder::Json{
+    {"initial_steering",model && model->initialSteering() ? recorder::Json(*model->initialSteering()) : recorder::Json(nullptr)},
+    {"initial_conditioned_steering",model && model->initialConditionedSteering() ? recorder::Json(*model->initialConditionedSteering()) : recorder::Json(nullptr)},
     {"pose",recorder::pose(state_.pose.pose)},{"frame",state_.pose.header.frame_id},
     {"speed",{state_.speed.linear.x,state_.speed.linear.y,state_.speed.angular.z}},
     {"goal",recorder::pose(goal_)},{"path",recorder::path(path_)},

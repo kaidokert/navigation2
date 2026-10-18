@@ -326,6 +326,8 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
         if (visualize_) {
           visualize(std::move(transformed_plan), cmd.header.stamp);
         }
+        mppi::recorder::observe("controller_return", [&] {return mppi::recorder::Json{
+          {"mode","presteer"},{"vx",cmd.twist.linear.x},{"vy",cmd.twist.linear.y},{"wz",cmd.twist.angular.z}};});
         return cmd;
       }
     }
@@ -360,6 +362,8 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
     visualize(std::move(transformed_plan), cmd.header.stamp);
   }
 
+  mppi::recorder::observe("controller_return", [&] {return mppi::recorder::Json{
+    {"mode","optimizer"},{"vx",cmd.twist.linear.x},{"vy",cmd.twist.linear.y},{"wz",cmd.twist.angular.z}};});
   return cmd;
 }
 

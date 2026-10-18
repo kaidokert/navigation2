@@ -76,9 +76,11 @@ struct Scene
   rclcpp_lifecycle::LifecycleNode::SharedPtr node;
   std::unique_ptr<mppi::ParametersHandler> params;
   Probe optimizer;
+  bool optimizer_initialized;
   geometry_msgs::msg::PoseStamped pose;
   nav_msgs::msg::Path path;
-  Scene(bool lateral=false,int batch=64,int steps=16,int iterations=2)
+  Scene(bool lateral=false,int batch=64,int steps=16,int iterations=2,bool initialize_optimizer=true)
+  : optimizer_initialized(initialize_optimizer)
   {
     map=std::make_shared<nav2_costmap_2d::Costmap2DROS>("proof_map","","proof_map",true);
     map->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.15,-0.15],[0.15,-0.15],[0.15,0.15],[-0.15,0.15]]")));
@@ -98,14 +100,14 @@ struct Scene
     overrides.emplace_back("dummy.ObstaclesCritic.consider_footprint",true);
     options.parameter_overrides(overrides);node=getDummyNode(options);
     params=std::make_unique<mppi::ParametersHandler>(node);
-    xt::random::seed(81471);optimizer.initialize(node,"dummy",map,params.get());optimizer.seed();
+    if(optimizer_initialized) {xt::random::seed(81471);optimizer.initialize(node,"dummy",map,params.get());optimizer.seed();}
     pose.header.frame_id="map";pose.header.stamp.sec=1;pose.header.stamp.nanosec=0;
     pose.pose.position.x=2;pose.pose.position.y=2;pose.pose.orientation.w=1;
     path.header=pose.header;
     for(int i=0;i<20;++i){auto p=pose;if(lateral){p.pose.position.y+=.05*i;}else{p.pose.position.x+=.05*i;}path.poses.push_back(p);}
-    optimizer.setRealPathPointCount(path.poses.size());
+    if(optimizer_initialized) {optimizer.setRealPathPointCount(path.poses.size());}
   }
-  ~Scene(){optimizer.shutdown();}
+  ~Scene(){if(optimizer_initialized) {optimizer.shutdown();}}
   rec::Json manifest(const std::string & name) const
   {
     rec::Json parameters=rec::Json::object();
@@ -115,7 +117,7 @@ struct Scene
     return {{"loaded_mppi_mappings",loaded},{"run_id",name},{"goal_uuid","native-fixture-goal"},{"native_baseline","7adf498bbe5db1d68cfe7d109b5b42432004478c"},
       {"parameters",parameters},{"plant","none: native deterministic fixture"},
       {"frame_chain",{{"map_to_controller_base","identity fixture, not a live TF lookup"}}},
-      {"candidate_scope",(name=="healthy" || name=="smoothing" || name=="benchmark") ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
+      {"candidate_scope",(name=="healthy" || name=="smoothing" || name=="benchmark" || name=="symptom_window" || name=="controller_pipeline") ? "production generator/predictor" : "explicitly injected bank; production scoring/update/extraction"}};
   }
 };
 void save(const std::string & name,rec::Recorder & recorder,const geometry_msgs::msg::TwistStamped & command, const rec::Json & witnesses=rec::Json::array())
@@ -137,6 +139,33 @@ TEST(DecisionRecorderProof,HealthyFullOptimizerParity)
   {rec::Session recording(recorder);on=s.optimizer.evalControl(s.pose,speed,s.path,s.path.poses.back().pose,nullptr);}
   EXPECT_EQ(off.twist.linear.x,on.twist.linear.x);EXPECT_EQ(off.twist.angular.z,on.twist.angular.z);
   EXPECT_GT(on.twist.linear.x,.02);save("healthy",recorder,on);
+}
+TEST(DecisionRecorderProof,FullControllerPathHandlerParity)
+{
+  geometry_msgs::msg::Twist speed; speed.linear.x=.1;
+  geometry_msgs::msg::TwistStamped off,on;
+  {
+    Scene s(false,64,41,2,false);
+    auto tf=std::make_shared<tf2_ros::Buffer>(s.node->get_clock());
+    xt::random::seed(81471);
+    auto controller=getDummyController(s.node,tf,s.map);
+    controller->setPlan(s.path);
+    off=controller->computeVelocityCommands(s.pose,speed,nullptr);
+    controller->deactivate();controller->cleanup();
+  }
+  {
+    Scene s(false,64,41,2,false);
+    auto tf=std::make_shared<tf2_ros::Buffer>(s.node->get_clock());
+    xt::random::seed(81471);
+    auto controller=getDummyController(s.node,tf,s.map);
+    controller->setPlan(s.path);
+    rec::Recorder recorder(s.manifest("controller_pipeline"));
+    {rec::Session recording(recorder);on=controller->computeVelocityCommands(s.pose,speed,nullptr);}
+    EXPECT_EQ(off.twist.linear.x,on.twist.linear.x);EXPECT_EQ(off.twist.angular.z,on.twist.angular.z);
+    EXPECT_GT(on.twist.linear.x,.02);
+    save("controller_pipeline",recorder,on);
+    controller->deactivate();controller->cleanup();
+  }
 }
 TEST(DecisionRecorderProof,ActualCriticPrefersStopping)
 {
