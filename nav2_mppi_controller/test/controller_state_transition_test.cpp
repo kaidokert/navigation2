@@ -745,15 +745,15 @@ TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
   // Segment 2: Reverse curving left from (0.30, 0) to (0.10, 0.15)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = costmap_ros->getGlobalFrameID();
-  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.0, 0.0, 0.0}));
-  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.30, 0.0, 0.0}));
+  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.0, 0.0}));
+  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.30, 0.0}));
   // Reverse segment (poses going backwards with left turn)
-  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.20, 0.05, 0.0}));
-  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.10, 0.12, 0.0}));
+  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.20, 0.05}));
+  plan.poses.push_back(getDummyPointStamped(node, TestPose{0.10, 0.12}));
   controller.setPlan(plan);
 
   // Robot reaches cusp at (0.30, 0.0)
-  auto robot_pose = getDummyPointStamped(node, TestPose{0.30, 0.0, 0.0});
+  auto robot_pose = getDummyPointStamped(node, TestPose{0.30, 0.0});
   auto velocity = getDummyTwist();
 
   // On first call reaching cusp: handoff fires and pre-steer engages because target steering != -0.40 rad

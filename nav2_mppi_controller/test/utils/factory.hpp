@@ -197,6 +197,7 @@ geometry_msgs::msg::PoseStamped
 getDummyPointStamped(TNode & node, std::string frame = std::string("odom"))
 {
   geometry_msgs::msg::PoseStamped point;
+  point.pose.orientation.w = 1.0;  // Default test heading is a valid identity rotation.
   detail::setHeader(point, node, frame);
 
   return point;
