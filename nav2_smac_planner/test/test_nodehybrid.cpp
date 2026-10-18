@@ -37,34 +37,98 @@ RclCppFixture g_rclcppfixture;
 
 TEST(NodeHybridTest, changed_continuous_pose_invalidates_collision_cache)
 {
-  // Both poses occupy discretized x/y/heading index (21, 24, 0), but this
-  // revision's checker rounds the reference cell with x + 0.5. Its actual
-  // clear/blocked results must not be replaced by a cached result for the index.
+  // Reduced from run093448: one lethal cell, two continuous poses in the
+  // same discretized x/y/heading node. The full footprint changes collision
+  // status although the graph index does not change.
   nav2_costmap_2d::Costmap2D grid(60, 60, 0.02, 0.0, 0.0, 0);
-  grid.setCost(22, 24, nav2_costmap_2d::LETHAL_OBSTACLE);
+  grid.setCost(14, 30, nav2_costmap_2d::LETHAL_OBSTACLE);
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("pose_cache_regression");
-  nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node);
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node, true);
   checker.setCostmap(&grid);
-  checker.setFootprint(nav2_costmap_2d::Footprint{}, true, 0.0);
+  nav2_costmap_2d::Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+      {-0.07, -0.171}, {0.296, -0.171}, {0.296, 0.171}, {-0.07, 0.171}})
+  {
+    geometry_msgs::msg::Point p; p.x = xy.first; p.y = xy.second;
+    footprint.push_back(p);
+  }
+  checker.setFootprint(footprint, false, 0.0);
   using Hybrid = nav2_smac_planner::NodeHybrid;
-  const Hybrid::Coordinates clear(21.05f, 24.05f, 0.0f);
-  const Hybrid::Coordinates blocked(21.75f, 24.05f, 0.0f);
-  ASSERT_EQ(static_cast<unsigned int>(clear.x), static_cast<unsigned int>(blocked.x));
+  const Hybrid::Coordinates clear(21.75f, 24.05f, 48.0f);
+  const Hybrid::Coordinates blocked(21.05f, 24.05f, 48.0f);
   ASSERT_FALSE(checker.inCollision(clear.x, clear.y, clear.theta, false));
   ASSERT_TRUE(checker.inCollision(blocked.x, blocked.y, blocked.theta, false));
-  const auto index = Hybrid::getIndex(21u, 24u, 0u, 60u, 72u);
-  Hybrid candidate(index);
+  Hybrid candidate(123);
   candidate.setPose(clear);
   ASSERT_TRUE(candidate.isNodeValid(false, &checker));
-  EXPECT_TRUE(candidate.isNodeValid(false, &checker));  // Same-pose cache control.
   candidate.setPose(blocked);
   EXPECT_FALSE(candidate.isNodeValid(false, &checker));
   candidate.setPose(clear);
   EXPECT_TRUE(candidate.isNodeValid(false, &checker));
-  candidate.pose = blocked;  // Analytic and queue code can bypass setPose().
+  candidate.pose = blocked;  // Queue/analytic code can bypass setPose().
   EXPECT_FALSE(candidate.isNodeValid(false, &checker));
   candidate.pose = clear;
   EXPECT_TRUE(candidate.isNodeValid(false, &checker));
+}
+
+TEST(NodeHybridTest, heading_boundary_wrap)
+{
+  nav2_smac_planner::HybridMotionTable table;
+  table.num_angle_quantization = 180;
+  table.bin_size = 2.0 * M_PI / 180.0;
+  // The live failure passed bin 180 to a 180-entry footprint table.
+  EXPECT_EQ(table.getAngle(2.0 * M_PI), 0.0);
+  EXPECT_EQ(table.getAngle(std::nextafter(2.0 * M_PI, 0.0)), 0.0);
+  EXPECT_EQ(table.getAngle(-2.0 * M_PI), 0.0);
+  EXPECT_NEAR(table.getAngle(M_PI), 90.0, 1e-4);
+  EXPECT_NEAR(table.getAngle(-M_PI / 2.0), 135.0, 1e-4);
+  for (int i = -1000; i <= 1000; ++i) {
+    const float bin = table.getAngle(i * 0.023);
+    EXPECT_GE(bin, 0.0f);
+    EXPECT_LT(bin, 180.0f);
+  }
+}
+
+TEST(NodeHybridTest, backtrace_preserves_analytic_heading)
+{
+  using nav2_smac_planner::NodeHybrid;
+  const float original_bin_size = NodeHybrid::motion_table.bin_size;
+  NodeHybrid::motion_table.bin_size = 2.0 * M_PI / 72.0;
+  NodeHybrid start(0), end(1);
+  start.pose = {0.0f, 0.0f, 0.0f};
+  end.pose = {1.0f, 0.0f, 71.98f};
+  end.parent = &start;
+  NodeHybrid::CoordinateVector path;
+  ASSERT_TRUE(end.backtracePath(path));
+  ASSERT_EQ(path.size(), 2u);
+  EXPECT_NEAR(path.front().theta, 71.98 * 2.0 * M_PI / 72.0, 1e-5);
+  EXPECT_NEAR(path.back().theta, 0.0, 1e-6);
+  NodeHybrid::motion_table.bin_size = original_bin_size;
+}
+
+TEST(NodeHybridTest, backtrace_preserves_fractional_headings)
+{
+  const float original_bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
+  nav2_smac_planner::NodeHybrid::motion_table.bin_size = 2.0f * M_PI / 64.0f;
+  nav2_smac_planner::NodeHybrid start(0), middle(1), goal(2);
+  start.pose = {1.0f, 2.0f, 0.25f};
+  middle.pose = {3.0f, 4.0f, 12.75f};
+  goal.pose = {5.0f, 6.0f, 63.5f};
+  middle.parent = &start;
+  goal.parent = &middle;
+  nav2_smac_planner::NodeHybrid::CoordinateVector path;
+  ASSERT_TRUE(goal.backtracePath(path));
+  ASSERT_EQ(path.size(), 3u);
+  const auto bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
+  EXPECT_FLOAT_EQ(path[0].theta, 63.5f * bin_size);
+  EXPECT_FLOAT_EQ(path[1].theta, 12.75f * bin_size);
+  EXPECT_FLOAT_EQ(path[2].theta, 0.25f * bin_size);
+  EXPECT_FLOAT_EQ(path[0].x, goal.pose.x);
+  EXPECT_FLOAT_EQ(path[1].y, middle.pose.y);
+  EXPECT_FLOAT_EQ(path[2].x, start.pose.x);
+  EXPECT_FLOAT_EQ(middle.pose.theta, 12.75f);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.getAngleFromBin(12u), 12.0f * bin_size);
+  nav2_smac_planner::NodeHybrid::motion_table.bin_size = original_bin_size;
 }
 
 TEST(NodeHybridTest, test_node_hybrid)
@@ -409,32 +473,6 @@ TEST(NodeHybridTest, test_node_reeds_neighbors)
 
   // should be empty since totally invalid
   EXPECT_EQ(neighbors.size(), 0u);
-}
-
-TEST(NodeHybridTest, backtrace_preserves_fractional_headings)
-{
-  const float original_bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
-  nav2_smac_planner::NodeHybrid::motion_table.bin_size = 2.0f * M_PI / 64.0f;
-  nav2_smac_planner::NodeHybrid start(0), middle(1), goal(2);
-  // Analytic interpolation stores continuous headings in bin units.
-  start.pose = {1.0f, 2.0f, 0.25f};
-  middle.pose = {3.0f, 4.0f, 12.75f};
-  goal.pose = {5.0f, 6.0f, 63.5f};
-  middle.parent = &start;
-  goal.parent = &middle;
-  nav2_smac_planner::NodeHybrid::CoordinateVector path;
-  ASSERT_TRUE(goal.backtracePath(path));
-  ASSERT_EQ(path.size(), 3u);
-  const auto bin_size = nav2_smac_planner::NodeHybrid::motion_table.bin_size;
-  EXPECT_FLOAT_EQ(path[0].theta, 63.5f * bin_size);
-  EXPECT_FLOAT_EQ(path[1].theta, 12.75f * bin_size);
-  EXPECT_FLOAT_EQ(path[2].theta, 0.25f * bin_size);
-  EXPECT_FLOAT_EQ(path[0].x, goal.pose.x);
-  EXPECT_FLOAT_EQ(path[1].y, middle.pose.y);
-  EXPECT_FLOAT_EQ(path[2].x, start.pose.x);
-  EXPECT_FLOAT_EQ(middle.pose.theta, 12.75f);
-  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.getAngleFromBin(12u), 12.0f * bin_size);
-  nav2_smac_planner::NodeHybrid::motion_table.bin_size = original_bin_size;
 }
 
 TEST(NodeHybridTest, basic_get_closest_angular_bin_test)

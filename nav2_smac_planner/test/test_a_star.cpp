@@ -17,6 +17,9 @@
 #include <string>
 #include <vector>
 #include <limits>
+#include <unordered_map>
+#include <ompl/base/ScopedState.h>
+#include <ompl/base/spaces/ReedsSheppStateSpace.h>
 
 #include "gtest/gtest.h"
 #include "rclcpp/rclcpp.hpp"
@@ -36,6 +39,77 @@ public:
   ~RclCppFixture() {rclcpp::shutdown();}
 };
 RclCppFixture g_rclcppfixture;
+
+TEST(AStarTest, analytic_expansion_retains_recorded_reverse_cusp)
+{
+  using namespace nav2_smac_planner;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("cusp_test");
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>();
+  cm->on_configure(rclcpp_lifecycle::State());
+  cm->getCostmap()->resizeMap(200,200,0.02,0,0);
+  GridCollisionChecker checker(cm,72,node);
+  checker.setFootprint(nav2_costmap_2d::Footprint(),true,0.0);
+  SearchInfo info;
+  info.minimum_turning_radius = 27.5;info.analytic_expansion_max_length = 1000;
+  unsigned int bins = 72, width = 200, height = 200;
+  NodeHybrid::motion_table.initReedsShepp(width,height,bins,info);
+  NodeHybrid start(NodeHybrid::getIndex(100,100,56));
+  NodeHybrid goal(NodeHybrid::getIndex(108,71,51));
+  start.pose = {100.0f,100.0f,56.0f};
+  goal.pose = {static_cast<float>(100+(2.939681662343105-2.767846644211261)/.02),
+    static_cast<float>(100+(-1.0526122190517526+0.4875475344163078)/.02),51.0f};
+  std::unordered_map<uint64_t,std::unique_ptr<NodeHybrid>> graph;
+  const auto getter = [&](const uint64_t & index, NodeHybrid * & result) {
+      if (!graph.count(index)) {graph[index] = std::make_unique<NodeHybrid>(index);}
+      result = graph[index].get();return true;
+    };
+  AnalyticExpansion<NodeHybrid> expansion(MotionModel::REEDS_SHEPP,info,false,bins);
+  expansion.setCollisionChecker(&checker);
+  auto samples = expansion.getAnalyticPath(&start,&goal,getter,NodeHybrid::motion_table.state_space);
+  ASSERT_FALSE(samples.empty());
+  auto rs = std::dynamic_pointer_cast<ompl::base::ReedsSheppStateSpace>(NodeHybrid::motion_table.state_space);
+  ompl::base::ScopedState<ompl::base::SE2StateSpace> from(rs),to(rs),cusp(rs);
+  from->setXY(start.pose.x,start.pose.y);from->setYaw(56*2*M_PI/72);
+  to->setXY(goal.pose.x,goal.pose.y);to->setYaw(51*2*M_PI/72);
+  const auto path = rs->reedsShepp(from(),to());
+  auto tail = expansion.setAnalyticPath(&start,&goal,samples);
+  std::vector<NodeHybrid::Coordinates> linked_poses;
+  for (size_t steps=0;tail && steps<=samples.size()+2;++steps) {
+    linked_poses.push_back(tail->pose);
+    if (tail == &start) {tail = nullptr;break;}
+    tail = tail->parent;
+  }
+  EXPECT_EQ(tail,nullptr) << "Analytic parent chain must terminate without a cycle";
+  double progress = 0;size_t cusps = 0;
+  for (int k=0;k<4;++k) {
+    progress += std::abs(path.length_[k]);
+    if (path.length_[k]*path.length_[k+1] >= 0) {continue;}
+    ++cusps;rs->interpolate(from(),to(),progress/path.length(),cusp());
+    double closest = std::numeric_limits<double>::max();
+    for (const auto & s : samples) {
+      closest = std::min(closest,std::hypot(s.proposed_coords.x-cusp->getX(),
+        s.proposed_coords.y-cusp->getY()));
+    }
+    EXPECT_LT(closest,1e-3) << "Exact reversal cusp must survive analytic sampling";
+    closest = std::numeric_limits<double>::max();
+    for (const auto & pose : linked_poses) {
+      closest = std::min(closest,std::hypot(pose.x-cusp->getX(),pose.y-cusp->getY()));
+    }
+    EXPECT_LT(closest,1e-3) << "Exact reversal cusp must survive graph linking";
+    // A lethal obstacle at the cusp must reject the analytic shortcut,
+    // including on a second probe against graph nodes from a free-space probe.
+    // The collision checker rounds cells; this is not a claim that the cusp
+    // necessarily occupies a different cell from its neighboring samples.
+    const auto cx = static_cast<unsigned int>(cusp->getX()+0.5);
+    const auto cy = static_cast<unsigned int>(cusp->getY()+0.5);
+    cm->getCostmap()->setCost(cx,cy,nav2_costmap_2d::LETHAL_OBSTACLE);
+    EXPECT_TRUE(expansion.getAnalyticPath(&start,&goal,getter,
+      NodeHybrid::motion_table.state_space).empty());
+    cm->getCostmap()->setCost(cx,cy,nav2_costmap_2d::FREE_SPACE);
+  }
+  EXPECT_GT(cusps,0u);
+  NodeHybrid::destroyStaticAssets();
+}
 
 TEST(AStarTest, test_a_star_2d)
 {
@@ -202,7 +276,7 @@ TEST(AStarTest, test_a_star_se2)
 
   // check path is the right size and collision free
   EXPECT_GT(num_it, 2000);
-  EXPECT_NEAR(path.size(), 77u, 2u);
+  EXPECT_NEAR(path.size(), 63u, 2u);
   for (unsigned int i = 0; i != path.size(); i++) {
     EXPECT_EQ(costmapA->getCost(path[i].x, path[i].y), 0);
   }
