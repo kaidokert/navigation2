@@ -73,7 +73,12 @@ struct Scene
   nav_msgs::msg::Path path;
   Scene(bool lateral=false,int batch=64,int steps=16,int iterations=2)
   {
-    TestCostmapSettings ms;map=getDummyCostmapRos(ms);
+    map=std::make_shared<nav2_costmap_2d::Costmap2DROS>("proof_map","","proof_map",true);
+    map->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.15,-0.15],[0.15,-0.15],[0.15,0.15],[-0.15,0.15]]")));
+    map->set_parameter(rclcpp::Parameter("footprint_padding",0.01));
+    map->on_configure(rclcpp_lifecycle::State{});
+    map->getCostmap()->resizeMap(40,40,.1,0,0);
+    std::fill(map->getCostmap()->getCharMap(),map->getCostmap()->getCharMap()+1600,0);
     TestOptimizerSettings os{batch,steps,iterations,1.7,"Ackermann",true};
     auto options=getOptimizerOptions(os,{"PathFollowCritic","ObstaclesCritic"});
     auto overrides=options.parameter_overrides();
