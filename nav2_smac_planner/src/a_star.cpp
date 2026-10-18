@@ -24,9 +24,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <cstdlib>
 
-#include "rclcpp/rclcpp.hpp"
 #include "nav2_smac_planner/a_star.hpp"
 using namespace std::chrono;  // NOLINT
 
@@ -194,8 +192,7 @@ template<>
 void AStarAlgorithm<Node2D>::setGoal(
   const float & mx,
   const float & my,
-  const unsigned int & dim_3,
-  const float & /*continuous_dim_3*/)
+  const unsigned int & dim_3)
 {
   if (dim_3 != 0) {
     throw std::runtime_error("Node type Node2D cannot be given non-zero goal dim 3.");
@@ -213,8 +210,7 @@ template<typename NodeT>
 void AStarAlgorithm<NodeT>::setGoal(
   const float & mx,
   const float & my,
-  const unsigned int & dim_3,
-  const float & continuous_dim_3)
+  const unsigned int & dim_3)
 {
   _goal = addToGraph(
     NodeT::getIndex(
@@ -222,9 +218,7 @@ void AStarAlgorithm<NodeT>::setGoal(
       static_cast<unsigned int>(my),
       dim_3));
 
-  const float angle_bin = (continuous_dim_3 >= 0.0f) ?
-    continuous_dim_3 : static_cast<float>(dim_3);
-  typename NodeT::Coordinates goal_coords(mx, my, angle_bin);
+  typename NodeT::Coordinates goal_coords(mx, my, dim_3);
 
   if (!_search_info.cache_obstacle_heuristic || goal_coords != _goal_coordinates) {
     if (!_start) {
@@ -317,16 +311,8 @@ bool AStarAlgorithm<NodeT>::createPath(
       }
       std::chrono::duration<double> planning_duration =
         std::chrono::duration_cast<std::chrono::duration<double>>(steady_clock::now() - start_time);
-      if (_max_planning_time > 0.0 &&
-        static_cast<double>(planning_duration.count()) >= _max_planning_time)
-      {
-        RCLCPP_FATAL(
-          rclcpp::get_logger("SmacPlannerHybrid"),
-          "CRITICAL TIMING FAILURE: SmacPlannerHybrid exceeded hard planning time ceiling of "
-          "%.1f ms (took %.1f ms)! Iterations: %i, Best heuristic dist: %.3f, Queue size: %zu. Hard terminating planner.",
-          _max_planning_time * 1000.0, planning_duration.count() * 1000.0,
-          iterations, _best_heuristic_node.first, _queue.size());
-        std::abort();
+      if (static_cast<double>(planning_duration.count()) >= _max_planning_time) {
+        return false;
       }
     }
 

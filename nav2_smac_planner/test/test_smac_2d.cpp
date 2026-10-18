@@ -14,8 +14,11 @@
 
 #include <math.h>
 
+#include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -38,6 +41,45 @@ public:
 };
 RclCppFixture g_rclcppfixture;
 
+// Test-only synchronization for the native costmap's background executor.
+class SettledSmacTestCostmap : public nav2_costmap_2d::Costmap2DROS
+{
+public:
+  using nav2_costmap_2d::Costmap2DROS::Costmap2DROS;
+
+  nav2_util::CallbackReturn on_configure(const rclcpp_lifecycle::State & state) override
+  {
+    const auto result = Costmap2DROS::on_configure(state);
+    configured_ = result == nav2_util::CallbackReturn::SUCCESS;
+    if (configured_) {
+      // NodeThread cancels then joins. If cleanup wins the race with spin(),
+      // spin() can subsequently reset the cancellation and leave join blocked.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (!executor_->is_spinning()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          throw std::runtime_error("Native Smac test costmap executor did not start in two seconds");
+        }
+        std::this_thread::yield();
+      }
+    }
+    return result;
+  }
+
+  nav2_util::CallbackReturn on_cleanup(const rclcpp_lifecycle::State & state) override
+  {
+    configured_ = false;
+    return Costmap2DROS::on_cleanup(state);
+  }
+
+  ~SettledSmacTestCostmap() override
+  {
+    if (configured_) {on_cleanup(rclcpp_lifecycle::State{});}
+  }
+
+private:
+  bool configured_{false};
+};
+
 // SMAC smoke tests for plugin-level issues rather than algorithms
 // (covered by more extensively testing in other files)
 // System tests in nav2_system_tests will actually plan with this work
@@ -47,7 +89,7 @@ TEST(SmacTest, test_smac_2d) {
     std::make_shared<rclcpp_lifecycle::LifecycleNode>("Smac2DTest");
 
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
-    std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+    std::make_shared<SettledSmacTestCostmap>("global_costmap");
   costmap_ros->on_configure(rclcpp_lifecycle::State());
 
   node2D->declare_parameter("test.smooth_path", true);
@@ -98,7 +140,7 @@ TEST(SmacTest, test_smac_2d_reconfigure) {
     std::make_shared<rclcpp_lifecycle::LifecycleNode>("Smac2DTest");
 
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
-    std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+    std::make_shared<SettledSmacTestCostmap>("global_costmap");
   costmap_ros->on_configure(rclcpp_lifecycle::State());
 
   auto planner_2d = std::make_unique<nav2_smac_planner::SmacPlanner2D>();

@@ -59,6 +59,10 @@ TEST(collision_footprint, test_basic)
 
   nav2_smac_planner::GridCollisionChecker collision_checker(costmap_ros, 72, node);
   collision_checker.setFootprint(footprint, false /*use footprint*/, 0.0);
+  EXPECT_TRUE(collision_checker.inCollision(5.0, 5.0, 72.0, false));
+  EXPECT_TRUE(collision_checker.inCollision(5.0, 5.0, -1.0, false));
+  EXPECT_TRUE(collision_checker.inCollision(5.0, 5.0,
+    std::numeric_limits<float>::quiet_NaN(), false));
   collision_checker.inCollision(5.0, 5.0, 0.0, false);
   float cost = collision_checker.getCost();
   EXPECT_NEAR(cost, 0.0, 0.001);
@@ -222,4 +226,42 @@ TEST(collision_footprint, test_point_and_line_cost)
   EXPECT_NEAR(other_value, 254.0, 0.001);  // center cost
 
   delete costmap_;
+}
+#include "nav2_smac_planner/utils.hpp"
+#include "nav2_costmap_2d/footprint_collision_checker.hpp"
+
+TEST(collision_footprint, continuous_position_matches_published_world_footprint)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("continuous_footprint");
+  for (bool right_obstacle : {false, true}) {
+    nav2_costmap_2d::Costmap2D grid(30, 30, 0.1, 0, 0, 0);
+    grid.setCost(right_obstacle ? 12 : 9, 10, nav2_costmap_2d::LETHAL_OBSTACLE);
+    const double half_x = right_obstacle ? 0.12 : 0.09;
+    nav2_costmap_2d::Footprint footprint;
+    for (const auto & xy : std::vector<std::pair<double, double>>{
+        {-half_x, -0.04}, {half_x, -0.04}, {half_x, 0.04}, {-half_x, 0.04}})
+    {
+      geometry_msgs::msg::Point p; p.x = xy.first; p.y = xy.second; footprint.push_back(p);
+    }
+    nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node, true);
+    checker.setCostmap(&grid); checker.setFootprint(footprint, false, 0.0);
+    const auto published = nav2_smac_planner::getWorldCoords(10.95f, 10.5f, &grid);
+    nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> direct(&grid);
+    const auto cost = direct.footprintCostAtPose(
+      published.position.x, published.position.y, 0.0, footprint);
+    ASSERT_EQ(cost == nav2_costmap_2d::LETHAL_OBSTACLE, right_obstacle);
+    EXPECT_EQ(checker.inCollision(10.95f, 10.5f, 0.0f, false), right_obstacle)
+      << "Collision must be checked at the same continuous position emitted in the path";
+  }
+}
+
+TEST(collision_footprint, continuous_point_cost_uses_containing_cell)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("continuous_point");
+  nav2_costmap_2d::Costmap2D grid(30, 30, 0.1, 0, 0, 0);
+  grid.setCost(10, 10, nav2_costmap_2d::LETHAL_OBSTACLE);
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node, true);
+  checker.setCostmap(&grid); checker.setFootprint({}, true, 0.0);
+  EXPECT_TRUE(checker.inCollision(10.95f, 10.5f, 0.0f, false));
+  EXPECT_FLOAT_EQ(checker.getCost(), nav2_costmap_2d::LETHAL_OBSTACLE);
 }

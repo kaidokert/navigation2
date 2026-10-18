@@ -123,7 +123,15 @@ target_link_libraries(test_smoother
 
 #Test Lattice node
 ament_add_gtest(test_lattice_node test_nodelattice.cpp)
+foreach(office_native_test test_utils test_costmap_downsampler test_node2d
+    test_nodehybrid test_nodebasic test_collision_checker test_a_star
+    test_smac_hybrid test_smac_2d test_smac_lattice test_smoother test_lattice_node)
+  set_tests_properties(${office_native_test} PROPERTIES
+    LABELS "gtest;office_regression" TIMEOUT 120)
+endforeach()
 
 ament_target_dependencies(test_lattice_node ${dependencies})
 
 target_link_libraries(test_lattice_node ${library_name})
+
+

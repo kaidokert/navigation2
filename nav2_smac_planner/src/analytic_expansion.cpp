@@ -118,15 +118,17 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
 
             float score = 0.0;
             float normalized_cost = 0.0;
-            // Analytic expansions are consistently spaced
-            const float distance = hypotf(
-              expansion[1].proposed_coords.x - expansion[0].proposed_coords.x,
-              expansion[1].proposed_coords.y - expansion[0].proposed_coords.y);
+            // Inserted exact cusps break uniform spacing. Weight each sampled
+            // edge by its own length and the collision cost at that exact pose.
+            Coordinates previous = node->pose;
             const float & weight = expansion[0].node->motion_table.cost_penalty;
             for (auto iter = expansion.begin(); iter != expansion.end(); ++iter) {
-              normalized_cost = iter->node->getCost() / 252.0f;
+              const float distance = hypotf(iter->proposed_coords.x - previous.x,
+                iter->proposed_coords.y - previous.y);
+              normalized_cost = iter->cost / 252.0f;
               // Search's Traversal Cost Function
               score += distance * (1.0 + weight * normalized_cost);
+              previous = iter->proposed_coords;
             }
             return score;
           };
@@ -179,105 +181,67 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
 
   float d = state_space->distance(from(), to());
 
-  // Feasibility-preserving sampling: cap heading change per step at
-  // max_dtheta so chords between samples never imply R < R_min.
-  // spacing (cells) = R_min(cells) * max_dtheta, capped at legacy sqrt(2)
-  // so long gentle expansions keep today's pose count.
+  // A move of sqrt(2) is guaranteed to be in a new cell
   static const float sqrt_2 = sqrtf(2.0f);
-  const float max_dtheta = 0.0873f;  // 5 deg ~= one angular bin (72 bins)
-  const float spacing = std::min(
-    sqrt_2, node->motion_table.min_turning_radius * max_dtheta);
 
-  // If the length is too far or too short, exit. This prevents unsafe shortcutting of paths
+  // If the length is too far, exit. This prevents unsafe shortcutting of paths
   // into higher cost areas far out from the goal itself, let search to the work of getting
-  // close before the analytic expansion brings it home.
+  // close before the analytic expansion brings it home. This should never be smaller than
+  // 4-5x the minimum turning radius being used, or planning times will begin to spike.
   if (d > _search_info.analytic_expansion_max_length || d < sqrt_2) {
     return AnalyticExpansionNodes();
   }
 
-  // Generate per-segment interpolation fractions ensuring samples land exactly
-  // at cusps (segment boundaries) and each segment is densely sampled to avoid
-  // sub-feasible chords.
-  std::vector<float> fractions;
-  auto rs_space = std::dynamic_pointer_cast<ompl::base::ReedsSheppStateSpace>(state_space);
-  auto dubins_space = std::dynamic_pointer_cast<ompl::base::DubinsStateSpace>(state_space);
+  unsigned int num_intervals = static_cast<unsigned int>(std::floor(d / sqrt_2));
 
-  if (rs_space) {
-    auto rs_path = rs_space->reedsShepp(from(), to());
-    double total_len = rs_path.totalLength_;
-    if (total_len > 1e-6) {
-      double t_accum = 0.0;
-      for (int s_idx = 0; s_idx < 5; ++s_idx) {
-        double seg_len = std::abs(rs_path.length_[s_idx]);
-        if (seg_len < 1e-6) {
-          continue;
-        }
-        double seg_cell_dist = seg_len * node->motion_table.min_turning_radius;
-        const float seg_spacing =
-          (rs_path.type_[s_idx] == ompl::base::ReedsSheppStateSpace::RS_STRAIGHT) ?
-          sqrt_2 : spacing;
-        unsigned int num_seg_intervals = std::max(
-          1u, static_cast<unsigned int>(std::ceil(seg_cell_dist / seg_spacing)));
-        for (unsigned int k = 1; k <= num_seg_intervals; ++k) {
-          double t = t_accum + (static_cast<double>(k) / num_seg_intervals) * (seg_len / total_len);
-          fractions.push_back(static_cast<float>(std::min(1.0, t)));
-        }
-        t_accum += seg_len / total_len;
-      }
-    }
-  } else if (dubins_space) {
-    auto dubins_path = dubins_space->dubins(from(), to());
-    double total_len = dubins_path.length();
-    if (total_len > 1e-6) {
-      double t_accum = 0.0;
-      for (int s_idx = 0; s_idx < 3; ++s_idx) {
-        double seg_len = std::abs(dubins_path.length_[s_idx]);
-        if (seg_len < 1e-6) {
-          continue;
-        }
-        double seg_cell_dist = seg_len * node->motion_table.min_turning_radius;
-        const float seg_spacing =
-          ((*dubins_path.type_)[s_idx] == ompl::base::DubinsStateSpace::DUBINS_STRAIGHT) ?
-          sqrt_2 : spacing;
-        unsigned int num_seg_intervals = std::max(
-          1u, static_cast<unsigned int>(std::ceil(seg_cell_dist / seg_spacing)));
-        for (unsigned int k = 1; k <= num_seg_intervals; ++k) {
-          double t = t_accum + (static_cast<double>(k) / num_seg_intervals) * (seg_len / total_len);
-          fractions.push_back(static_cast<float>(std::min(1.0, t)));
-        }
-        t_accum += seg_len / total_len;
-      }
-    }
+  std::vector<double> sample_fractions;
+  sample_fractions.reserve(num_intervals + 4);
+  for (float i = 1; i <= num_intervals; ++i) {
+    sample_fractions.push_back(i / num_intervals);
   }
-
-  if (fractions.empty()) {
-    unsigned int num_intervals = std::max(
-      1u, static_cast<unsigned int>(std::ceil(d / spacing)));
-    for (unsigned int i = 1; i <= num_intervals; ++i) {
-      fractions.push_back(static_cast<float>(i) / num_intervals);
+  // Uniform arc-length sampling can straddle a reversal. Its two poses then
+  // nearly coincide while heading keeps changing, and the consumer identifies
+  // the wrong pose as the cusp. Keep every actual Reeds-Shepp gear boundary.
+  if (auto reeds = std::dynamic_pointer_cast<ompl::base::ReedsSheppStateSpace>(state_space)) {
+    const auto path = reeds->reedsShepp(from(), to());
+    double progress = 0.0;
+    int previous_direction = 0;
+    for (double length : path.length_) {
+      if (std::abs(length) > 1e-6) {
+        const int direction = length > 0 ? 1 : -1;
+        if (previous_direction && direction != previous_direction &&
+          progress > 1e-6 && progress < path.length() - 1e-6)
+        {
+          sample_fractions.push_back(progress / path.length());
+        }
+        previous_direction = direction;
+      }
+      progress += std::abs(length);
     }
+    std::sort(sample_fractions.begin(), sample_fractions.end());
+    sample_fractions.erase(std::unique(sample_fractions.begin(), sample_fractions.end(),
+      [](double a, double b) {return std::abs(a - b) < 1e-10;}), sample_fractions.end());
   }
 
   AnalyticExpansionNodes possible_nodes;
   // When "from" and "to" are zero or one cell away,
-  // fractions.empty()
-  possible_nodes.reserve(fractions.size());  // We won't store this node or the goal
+  // num_intervals == 0
+  possible_nodes.reserve(sample_fractions.size());
   std::vector<double> reals;
   double theta;
 
   // Pre-allocate
-  NodePtr prev(node);
   uint64_t index = 0;
   NodePtr next(nullptr);
   float angle = 0.0;
   Coordinates proposed_coordinates;
   bool failure = false;
   std::vector<float> node_costs;
-  node_costs.reserve(fractions.size());
+  node_costs.reserve(num_intervals);
 
   // Check intermediary poses (non-goal, non-start)
-  for (const float & interp_fraction : fractions) {
-    state_space->interpolate(from(), to(), interp_fraction, s());
+  for (double fraction : sample_fractions) {
+    state_space->interpolate(from(), to(), fraction, s());
     reals = s.reals();
     // Make sure in range [0, 2PI)
     theta = (reals[2] < 0.0) ? (reals[2] + 2.0 * M_PI) : reals[2];
@@ -291,18 +255,21 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
       static_cast<unsigned int>(angle));
     // Get the node from the graph
     if (node_getter(index, next)) {
-      Coordinates initial_node_coords = (next == prev && !possible_nodes.empty()) ?
-        possible_nodes.back().initial_coords : next->pose;
+      Coordinates initial_node_coords = next->pose;
       proposed_coordinates = {static_cast<float>(reals[0]), static_cast<float>(reals[1]), angle};
-      next->setPose(proposed_coordinates);
-      if (next->isNodeValid(_traverse_unknown, _collision_checker)) {
+      // A cusp and its neighboring sample may share a discretized graph index.
+      // Check each exact interpolated pose, without mutating or consulting the
+      // graph node's cached collision result for another fractional pose.
+      if (!_collision_checker->inCollision(
+          proposed_coordinates.x, proposed_coordinates.y, proposed_coordinates.theta,
+          _traverse_unknown))
+      {
         // Save the node, and its previous coordinates in case we need to abort
-        possible_nodes.emplace_back(next, initial_node_coords, proposed_coordinates);
-        node_costs.emplace_back(next->getCost());
-        prev = next;
+        possible_nodes.emplace_back(next, initial_node_coords, proposed_coordinates,
+          _collision_checker->getCost());
+        node_costs.emplace_back(_collision_checker->getCost());
       } else {
         // Abort
-        next->setPose(initial_node_coords);
         failure = true;
         break;
       }
@@ -346,11 +313,6 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     }
   }
 
-  // Reset to initial poses to not impact future searches
-  for (auto it = possible_nodes.rbegin(); it != possible_nodes.rend(); ++it) {
-    it->node->setPose(it->initial_coords);
-  }
-
   if (failure) {
     return AnalyticExpansionNodes();
   }
@@ -365,33 +327,24 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::setAnalytic
   const AnalyticExpansionNodes & expanded_nodes)
 {
   _detached_nodes.clear();
-  if (expanded_nodes.empty()) {
-    return nullptr;
-  }
   // Legitimate final path - set the parent relationships, states, and poses
   NodePtr prev = node;
   for (const auto & node_pose : expanded_nodes) {
-    if (&node_pose == &expanded_nodes.back()) {
-      continue;
-    }
     auto n = node_pose.node;
-    if (n->getIndex() == node->getIndex() ||
-      n->getIndex() == goal_node->getIndex() ||
-      n->wasVisited() ||
-      n == prev)
-    {
-      _detached_nodes.push_back(std::make_unique<NodeT>(-1));
-      n = _detached_nodes.back().get();
-    }
     cleanNode(n);
-    n->parent = prev;
-    n->pose = node_pose.proposed_coords;
-    n->visited();
-    prev = n;
+    if (n->getIndex() != goal_node->getIndex()) {
+      if (n->wasVisited()) {
+        _detached_nodes.push_back(std::make_unique<NodeT>(-1));
+        n = _detached_nodes.back().get();
+      }
+      n->parent = prev;
+      n->pose = node_pose.proposed_coords;
+      n->visited();
+      prev = n;
+    }
   }
   if (goal_node != prev) {
     goal_node->parent = prev;
-    goal_node->pose = expanded_nodes.back().proposed_coords;
     cleanNode(goal_node);
     goal_node->visited();
   }

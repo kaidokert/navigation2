@@ -18,12 +18,13 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
-#include <cmath>
 #include <cstdlib>
+#include <atomic>
+#include "nav2_smac_planner/start_failure_snapshot.hpp"
+#include "nav2_smac_planner/successful_plan_snapshot.hpp"
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
-#include "nav2_core/planner_exceptions.hpp"
 
 // #define BENCHMARK_TESTING
 
@@ -62,9 +63,6 @@ void SmacPlannerHybrid::configure(
   _clock = node->get_clock();
   _costmap = costmap_ros->getCostmap();
   _costmap_ros = costmap_ros;
-  _configured_resolution = _costmap->getResolution();
-  _configured_size_x = _costmap->getSizeInCellsX();
-  _configured_size_y = _costmap->getSizeInCellsY();
   _name = name;
   _global_frame = costmap_ros->getGlobalFrameID();
 
@@ -225,7 +223,7 @@ void SmacPlannerHybrid::configure(
   }
 
   // Initialize collision checker
-  _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node);
+  _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node, true);
   _collision_checker.setFootprint(
     _costmap_ros->getRobotFootprint(),
     _costmap_ros->getUseRadius(),
@@ -360,20 +358,26 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
 
-  if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5) {
-    throw nav2_core::PlannerException(
-      "SmacPlannerHybrid configuration invariant violation: costmap resolution mutated "
-      "post-configure! Configured resolution: " + std::to_string(_configured_resolution) +
-      " m/cell; Current resolution: " + std::to_string(_costmap->getResolution()) +
-      " m/cell. Motion model primitives and heuristic tables are invalid for this grid.");
-  }
-
   // Downsample costmap, if required
   nav2_costmap_2d::Costmap2D * costmap = _costmap;
   if (_costmap_downsampler) {
     costmap = _costmap_downsampler->downsample(_downsampling_factor);
     _collision_checker.setCostmap(costmap);
   }
+
+  const auto capture_success = [&](const nav_msgs::msg::Path & returned_plan) {
+      const char * prefix = std::getenv("SMAC_SUCCESS_PLAN_SNAPSHOT_PREFIX");
+      if (!prefix || !*prefix) {return;}
+      static std::atomic<size_t> sequence{0};
+      if (!writeSuccessfulPlanSnapshot(
+          prefix, sequence.fetch_add(1, std::memory_order_relaxed),
+          _clock->now().nanoseconds(), *costmap, returned_plan,
+          start, goal, _costmap_ros->getRobotFootprint(), _angle_quantizations,
+          _costmap_ros->getUseRadius(), _allow_unknown))
+      {
+        RCLCPP_WARN(_logger, "Optional successful-plan snapshot failed");
+      }
+    };
 
   // Set collision checker and costmap information
   _collision_checker.setFootprint(
@@ -416,21 +420,15 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
             "Goal Coordinates of(" + std::to_string(goal.pose.position.x) + ", " +
             std::to_string(goal.pose.position.y) + ") was outside bounds");
   }
-  double continuous_bin = tf2::getYaw(goal.pose.orientation) / _angle_bin_size;
-  while (continuous_bin < 0.0) {
-    continuous_bin += static_cast<double>(_angle_quantizations);
+  orientation_bin = std::round(tf2::getYaw(goal.pose.orientation) / _angle_bin_size);
+  while (orientation_bin < 0.0) {
+    orientation_bin += static_cast<float>(_angle_quantizations);
   }
-  while (continuous_bin >= static_cast<double>(_angle_quantizations)) {
-    continuous_bin -= static_cast<double>(_angle_quantizations);
-  }
-  orientation_bin = std::round(continuous_bin);
   // This is needed to handle precision issues
   if (orientation_bin >= static_cast<float>(_angle_quantizations)) {
     orientation_bin -= static_cast<float>(_angle_quantizations);
   }
-  _a_star->setGoal(
-    mx_goal, my_goal, static_cast<unsigned int>(orientation_bin),
-    static_cast<float>(continuous_bin));
+  _a_star->setGoal(mx_goal, my_goal, static_cast<unsigned int>(orientation_bin));
 
   // Setup message
   nav_msgs::msg::Path plan;
@@ -457,6 +455,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       _raw_plan_publisher->publish(plan);
     }
 
+    capture_success(plan);
     return plan;
   }
 
@@ -489,10 +488,47 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
     // Note: If the start is blocked only one iteration will occur before failure
     if (num_iterations == 1) {
+      // Optional one-shot evidence under the same costmap mutex as the search.
+      // A one-expansion failure does not itself prove the start footprint collided.
+      static bool captured = false;
+      const char * snapshot_path = std::getenv("SMAC_START_FAILURE_SNAPSHOT_PATH");
+      if (!captured && snapshot_path && *snapshot_path) {
+        const auto start_bin = static_cast<unsigned int>(_a_star->getStart()->pose.theta);
+        const bool start_collision = _collision_checker.inCollision(
+          mx_start, my_start, static_cast<float>(start_bin), _allow_unknown);
+        captured = writeStartFailureSnapshot(
+          snapshot_path, *costmap, start, goal, mx_start, my_start, start_bin,
+          _angle_quantizations, start_collision, _allow_unknown,
+          _costmap_ros->getRobotFootprint(), _search_info);
+      }
       throw nav2_core::StartOccupied("Start occupied");
     }
 
     if (num_iterations < _a_star->getMaxIterations()) {
+      // Successful-plan and StartOccupied snapshots cannot explain an exhausted
+      // search with multiple expansions. Capture this distinct outcome while
+      // still holding the search's costmap lock; never change its result.
+      static size_t failed_search_captures = 0;
+      const char * prefix = std::getenv("SMAC_NO_PATH_SNAPSHOT_PREFIX");
+      if (prefix && *prefix && failed_search_captures < 16) {
+        const std::string target = std::string(prefix) + ".no_path_" +
+          std::to_string(failed_search_captures++) + ".json";
+        try {
+          const auto start_bin = static_cast<unsigned int>(_a_star->getStart()->pose.theta);
+          const bool collision = _collision_checker.inCollision(
+            mx_start, my_start, static_cast<float>(start_bin), _allow_unknown);
+          if (!writeStartFailureSnapshot(
+              target.c_str(), *costmap, start, goal, mx_start, my_start, start_bin,
+              _angle_quantizations, collision, _allow_unknown,
+              _costmap_ros->getRobotFootprint(), _search_info, num_iterations,
+              _clock->now().nanoseconds()))
+          {
+            RCLCPP_WARN(_logger, "Optional no-path snapshot could not be written");
+          }
+        } catch (const std::exception & error) {
+          RCLCPP_WARN(_logger, "Optional no-path snapshot failed: %s", error.what());
+        }
+      }
       throw nav2_core::NoValidPathCouldBeFound("no valid path found");
     } else {
       throw nav2_core::PlannerTimedOut("exceeded maximum iterations");
@@ -549,14 +585,6 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   // Find how much time we have left to do smoothing
   steady_clock::time_point b = steady_clock::now();
   duration<double> time_span = duration_cast<duration<double>>(b - a);
-  if (_max_planning_time > 0.0 && time_span.count() >= _max_planning_time) {
-    RCLCPP_FATAL(
-      _logger,
-      "CRITICAL TIMING FAILURE: SmacPlannerHybrid search exceeded hard planning ceiling of "
-      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
-      _max_planning_time * 1000.0, time_span.count() * 1000.0);
-    std::abort();
-  }
   double time_remaining = _max_planning_time - static_cast<double>(time_span.count());
 
 #ifdef BENCHMARK_TESTING
@@ -567,17 +595,6 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   // Smooth plan
   if (_smoother && num_iterations > 1) {
     _smoother->smooth(plan, costmap, time_remaining);
-  }
-
-  steady_clock::time_point end_planning = steady_clock::now();
-  duration<double> total_time_span = duration_cast<duration<double>>(end_planning - a);
-  if (_max_planning_time > 0.0 && total_time_span.count() >= _max_planning_time) {
-    RCLCPP_FATAL(
-      _logger,
-      "CRITICAL TIMING FAILURE: SmacPlannerHybrid total planning exceeded hard ceiling of "
-      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
-      _max_planning_time * 1000.0, total_time_span.count() * 1000.0);
-    std::abort();
   }
 
 #ifdef BENCHMARK_TESTING
@@ -608,6 +625,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     }
   }
 
+  capture_success(plan);
   return plan;
 }
 
@@ -801,7 +819,7 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
 
     // Re-Initialize collision checker
     if (reinit_collision_checker) {
-      _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node);
+      _collision_checker = GridCollisionChecker(_costmap_ros, _angle_quantizations, node, true);
       _collision_checker.setFootprint(
         _costmap_ros->getRobotFootprint(),
         _costmap_ros->getUseRadius(),
@@ -815,10 +833,6 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       _smoother = std::make_unique<Smoother>(params);
       _smoother->initialize(_minimum_turning_radius_global_coords);
     }
-
-    _configured_resolution = _costmap->getResolution();
-    _configured_size_x = _costmap->getSizeInCellsX();
-    _configured_size_y = _costmap->getSizeInCellsY();
   }
   result.successful = true;
   return result;

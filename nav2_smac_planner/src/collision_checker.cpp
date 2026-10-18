@@ -13,6 +13,7 @@
 // limitations under the License. Reserved.
 
 #include "nav2_smac_planner/collision_checker.hpp"
+#include "nav2_smac_planner/utils.hpp"
 
 namespace nav2_smac_planner
 {
@@ -20,8 +21,10 @@ namespace nav2_smac_planner
 GridCollisionChecker::GridCollisionChecker(
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros,
   unsigned int num_quantizations,
-  rclcpp_lifecycle::LifecycleNode::SharedPtr node)
-: FootprintCollisionChecker(costmap_ros ? costmap_ros->getCostmap() : nullptr)
+  rclcpp_lifecycle::LifecycleNode::SharedPtr node,
+  bool continuous_world_coordinates)
+: FootprintCollisionChecker(costmap_ros ? costmap_ros->getCostmap() : nullptr),
+  continuous_world_coordinates_(continuous_world_coordinates)
 {
   if (node) {
     clock_ = node->get_clock();
@@ -107,6 +110,11 @@ bool GridCollisionChecker::inCollision(
   const float & angle_bin,
   const bool & traverse_unknown)
 {
+  // Fail closed before indexing the precomputed oriented footprints.
+  if (!std::isfinite(angle_bin) || angle_bin < 0.0f || angle_bin >= angles_.size()) {
+    center_cost_ = OCCUPIED;
+    return true;
+  }
   // Check to make sure cell is inside the map
   if (outsideRange(costmap_->getSizeInCellsX(), x) ||
     outsideRange(costmap_->getSizeInCellsY(), y))
@@ -114,9 +122,26 @@ bool GridCollisionChecker::inCollision(
     return true;
   }
 
-  // Assumes setFootprint already set
-  center_cost_ = static_cast<float>(costmap_->getCost(
-    static_cast<unsigned int>(x + 0.5f), static_cast<unsigned int>(y + 0.5f)));
+  // Hybrid publishes origin + continuous_grid_coordinate * resolution.
+  // Other callers retain their previous behavior in this scoped correction.
+  // Check the pose Hybrid publishes rather than silently snapping it.
+  double wx, wy;
+  unsigned int center_x, center_y;
+  if (continuous_world_coordinates_) {
+    const auto world = getWorldCoords(x, y, costmap_);
+    wx = world.position.x;
+    wy = world.position.y;
+    if (!costmap_->worldToMap(wx, wy, center_x, center_y)) {
+      center_cost_ = OCCUPIED;
+      return true;
+    }
+  } else {
+    costmap_->mapToWorld(static_cast<unsigned int>(x), static_cast<unsigned int>(y), wx, wy);
+    center_x = static_cast<unsigned int>(x + 0.5f);
+    center_y = static_cast<unsigned int>(y + 0.5f);
+  }
+  // Assumes setFootprint already set.
+  center_cost_ = static_cast<float>(costmap_->getCost(center_x, center_y));
 
   if (!footprint_is_radius_) {
     // if footprint, then we check for the footprint's points, but first see
@@ -138,8 +163,6 @@ bool GridCollisionChecker::inCollision(
     // if possible inscribed, need to check actual footprint pose.
     // Use precomputed oriented footprints are done on initialization,
     // offset by translation value to collision check
-    double wx, wy;
-    costmap_->mapToWorld(static_cast<double>(x), static_cast<double>(y), wx, wy);
     geometry_msgs::msg::Point new_pt;
     const nav2_costmap_2d::Footprint & oriented_footprint = oriented_footprints_[angle_bin];
     nav2_costmap_2d::Footprint current_footprint;
