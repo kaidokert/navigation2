@@ -1,4 +1,5 @@
 set(TEST_NAMES
+  decision_recorder_proof
   optimizer_smoke_test
   controller_state_transition_test
   models_test
@@ -43,3 +44,5 @@ set_tests_properties(critics_tests PROPERTIES LABELS "gtest;office_regression" T
 if(${TEST_DEBUG_INFO})
   target_compile_definitions(critics_tests PUBLIC -DTEST_DEBUG_INFO)
 endif()
+
+target_link_libraries(decision_recorder_proof mppi_critics)

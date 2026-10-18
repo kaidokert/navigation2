@@ -1,3 +1,4 @@
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 // Copyright (c) 2023 Open Navigation LLC
 //
@@ -160,6 +161,9 @@ void ObstaclesCritic::score(CriticData & data)
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
       if (inCollision(pose_cost.cost)) {
         trajectory_collide = true;
+        recorder::observe("hard_hit", [&] {return recorder::Json{
+          {"candidate",i},{"step",j},{"x",traj.x(i,j)},{"y",traj.y(i,j)},
+          {"yaw",traj.yaws(i,j)},{"cost",pose_cost.cost},{"footprint",pose_cost.using_footprint}};});
         break;
       }
 

@@ -1,3 +1,4 @@
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 // Copyright (c) 2023 Dexory
 // Copyright (c) 2023 Open Navigation LLC
@@ -266,6 +267,11 @@ nav_msgs::msg::Path PathHandler::transformPath(
   const geometry_msgs::msg::PoseStamped & robot_pose,
   const DepartureValidator & departure_validator)
 {
+  recorder::observe("path_before", [&] {return recorder::Json{
+    {"global",recorder::rosPath(global_plan_)},{"incoming",recorder::rosPath(global_plan_up_to_inversion_)},
+    {"robot",recorder::pose(robot_pose.pose)}, {"robot_frame",robot_pose.header.frame_id},
+    {"plan_generation",plan_generation_},{"segment_generation",segment_generation_},
+    {"source_offset",global_source_offset_},{"inversion",inversion_locale_}};});
   did_handoff_ = false;
   retained_departure_approach_.reset();
   // Find relevent bounds of path to use
@@ -609,6 +615,11 @@ nav_msgs::msg::Path PathHandler::transformPath(
     transformed_plan.poses.size(), real_tgp_length, tgp_length,
     inversion_locale_, cusp_dist);
 
+  recorder::observe("path_after", [&] {return recorder::Json{
+    {"transformed",recorder::rosPath(transformed_plan)}, {"real_length",real_tgp_length},
+    {"total_length",tgp_length},{"inversion",inversion_locale_},{"handoff",did_handoff_},
+    {"real_points",real_path_point_count_},{"plan_generation",plan_generation_},
+    {"segment_generation",segment_generation_}};});
   return transformed_plan;
 }
 
@@ -1039,6 +1050,11 @@ bool PathHandler::isWithinInversionTolerances(
     (distance > min_cusp_distance_ + closest_approach_delta);
 
   bool result = (within_xy && within_yaw) || closest_approach_handoff;
+  recorder::observe("cusp_gate", [&] {return recorder::Json{
+    {"robot",recorder::pose(robot_pose.pose)}, {"cusp",recorder::pose(last_pose.pose)},
+    {"frame",robot_pose.header.frame_id}, {"distance",distance},{"yaw_error",angle_distance},
+    {"xy_limit",effective_xy_tol},{"yaw_limit",relaxed_yaw_tol},{"accepted",result},
+    {"closest_approach",closest_approach_handoff},{"blocked_before",handoff_blocked_cycles_}};});
 
   if (closest_approach_handoff && !within_xy && clock_) {
     RCLCPP_INFO(logger_,

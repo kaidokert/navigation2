@@ -1,3 +1,4 @@
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,6 +39,7 @@ void PathFollowCritic::score(CriticData & data)
     (data.active_cusp_direction == 0 &&
     utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal)))
   {
+    recorder::observe("critic_skipped", [&] {return recorder::Json{{"name","PathFollowCritic"},{"reason","entry_gate"}};});
     return;
   }
 
@@ -75,6 +77,10 @@ void PathFollowCritic::score(CriticData & data)
 
   const auto path_x = data.path.x(offseted_idx);
   const auto path_y = data.path.y(offseted_idx);
+  recorder::observe("critic_target", [&] {return recorder::Json{
+    {"name","PathFollowCritic"},{"index",offseted_idx},{"x",path_x},{"y",path_y},
+    {"weight",weight_},{"power",power_},{"real_points",real_points},
+    {"furthest",data.furthest_reached_path_point ? recorder::Json(*data.furthest_reached_path_point) : recorder::Json(nullptr)}};});
 
   // Diagnostic: target point selection
   {

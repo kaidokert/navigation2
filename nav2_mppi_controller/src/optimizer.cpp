@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 #include <limits>
 #include <cstring>
 #include <cstdint>
@@ -272,6 +273,16 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   const geometry_msgs::msg::Pose & goal,
   nav2_core::GoalChecker * goal_checker)
 {
+  recorder::Invocation recording(rclcpp::Time(robot_pose.header.stamp).nanoseconds());
+  recorder::observe("input", [&] {return recorder::Json{
+    {"pose", recorder::pose(robot_pose.pose)}, {"frame", robot_pose.header.frame_id},
+    {"speed", {robot_speed.linear.x, robot_speed.linear.y, robot_speed.angular.z}},
+    {"goal", recorder::pose(goal)}, {"plan", recorder::rosPath(plan)},
+    {"model_dt", settings_.model_dt}, {"temperature", settings_.temperature},
+    {"gamma", settings_.gamma}, {"vx_std", settings_.sampling_std.vx},
+    {"wz_std", settings_.sampling_std.wz}, {"shift", settings_.shift_control_sequence},
+    {"smooth", smooth_control_sequence_}, {"history", recorder::history(control_history_)},
+    {"control", recorder::sequence(control_sequence_)}};});
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
   // Keep the shifted sequence carried into this update. A rejected noisy mean
   // must not restart a crawl-then-cruise delay if that sequence is still valid.
@@ -304,6 +315,11 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       critics_data_.fail_flag = true;
     }
     retry = fallback(critics_data_.fail_flag, warm_start ? &*warm_start : nullptr);
+    recorder::observe("fallback_result", [&] {return recorder::Json{
+      {"retry", retry}, {"fail_flag", critics_data_.fail_flag},
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};});
+    if (retry && recorder::active) {++recorder::active->retry;}
     if (retry) {
       critics_data_.fail_flag = false;
       warm_start.reset();  // Fallback reset invalidates the prior sequence.
@@ -323,7 +339,11 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   if (preserve_filtered_collision_feasibility_) {
     before_filter = control_sequence_;
   }
+  recorder::observe("before_smoothing", [&] {return recorder::Json{
+    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
   smoothControlSequence();
+  recorder::observe("after_smoothing", [&] {return recorder::Json{
+    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
 
   // [F] POST-SG FILTER
   if (diag && ts >= 5) {
@@ -346,10 +366,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       control.twist.linear.x, control.twist.angular.z);
   }
 
-  if (settings_.shift_control_sequence) {
-    shiftControlSequence();
-  }
-
+  if (settings_.shift_control_sequence) {shiftControlSequence();}
+  recorder::observe("after_shift", [&] {return recorder::Json{{"control", recorder::sequence(control_sequence_)}};});
   return control;
 }
 
@@ -438,6 +456,7 @@ void Optimizer::optimize(bool diag)
       if (capture_failed_batch) {capture_cycle = false;}
   }
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    if (recorder::active) {recorder::active->iteration = i;}
     bool capture = capture_cycle && i + 1 == settings_.iteration_count;
     bool capture_successful = snapshot_path && *snapshot_path &&
       !successful_snapshot_attempted && i + 1 == settings_.iteration_count &&
@@ -711,7 +730,11 @@ bool Optimizer::fallback(bool fail)
   const bool gentle_required = gentle_short_cusp_required_;
   const auto completion = gentle_required ? cusp_completion_ : std::nullopt;
   const auto completion_shifts = cusp_completion_shifts_;
+  recorder::observe("fallback_reset_before", [&] {return recorder::Json{
+    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
   reset(false /*Don't reset zone-based speed limits after fallback*/);
+  recorder::observe("fallback_reset_after", [&] {return recorder::Json{
+    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
   effective_cusp_tolerances_ = gates;
   cusp_completion_attempted_ = attempted_completion;
   gentle_short_cusp_required_ = gentle_required;
@@ -747,6 +770,16 @@ void Optimizer::prepare(
   path_ = utils::toTensor(plan);
   costs_.fill(0.0f);
   goal_ = goal;
+  recorder::observe("prepared", [&] {return recorder::Json{
+    {"pose",recorder::pose(state_.pose.pose)},{"frame",state_.pose.header.frame_id},
+    {"speed",{state_.speed.linear.x,state_.speed.linear.y,state_.speed.angular.z}},
+    {"goal",recorder::pose(goal_)},{"path",recorder::path(path_)},
+    {"dt",settings_.model_dt},{"temperature",settings_.temperature},{"gamma",settings_.gamma},
+    {"std",{settings_.sampling_std.vx,settings_.sampling_std.vy,settings_.sampling_std.wz}},
+    {"holonomic",isHolonomic()},{"shift",settings_.shift_control_sequence},{"smooth",smooth_control_sequence_},
+    {"constraints",{{"vx_max",settings_.constraints.vx_max},{"vx_min",settings_.constraints.vx_min},
+      {"wz",settings_.constraints.wz},{"ax_max",settings_.constraints.ax_max},{"ax_min",settings_.constraints.ax_min},
+      {"az_max",settings_.constraints.az_max}}}};});
 
   critics_data_.fail_flag = false;
   critics_data_.goal_checker = goal_checker;
@@ -2584,6 +2617,9 @@ void Optimizer::constrainShortCuspSampleDirections()
 void Optimizer::generateNoisedTrajectories()
 {
   noise_generator_.setNoisedControls(state_, control_sequence_);
+  recorder::observe("sample_draw", [&] {return recorder::Json{
+    {"vx", recorder::tensor(state_.cvx)}, {"vy", recorder::tensor(state_.cvy)},
+    {"wz", recorder::tensor(state_.cwz)}};});
   noise_generator_.generateNextNoises();
   // Bound requested controls before predicting physical acceleration and steering.
   // Measured feedback is never projected. With path-direction conditioning,
@@ -2596,6 +2632,15 @@ void Optimizer::generateNoisedTrajectories()
 
 void Optimizer::applyControlSequenceConstraints()
 {
+  recorder::observe("constraint_begin", [&] {
+    const auto ack = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    return recorder::Json{{"control",recorder::sequence(control_sequence_)},
+      {"dt",settings_.model_dt},{"cusp_gear",shortCuspControlDirection()},
+      {"radius",ack ? recorder::Json(ack->getMinTurningRadius()) : recorder::Json(nullptr)},
+      {"limits",{{"vx_min",settings_.constraints.vx_min},{"vx_max",settings_.constraints.vx_max},
+        {"wz",settings_.constraints.wz},{"ax_max",settings_.constraints.ax_max},
+        {"ax_min",settings_.constraints.ax_min},{"az_max",settings_.constraints.az_max}}}};
+  });
   auto & s = settings_;
 
   if (isHolonomic()) {
@@ -2641,6 +2686,7 @@ void Optimizer::applyControlSequenceConstraints()
   }
 
   motion_model_->applyConstraints(control_sequence_);
+  recorder::observe("constraint_end", [&] {return recorder::Json{{"control",recorder::sequence(control_sequence_)}};});
 }
 
 void Optimizer::updateStateVelocities(
@@ -2939,6 +2985,10 @@ bool Optimizer::conditionControlExponents(xt::xtensor<float, 1> & exponents)
 
 void Optimizer::updateControlSequence(bool diag)
 {
+  recorder::observe("update_begin", [&] {return recorder::Json{
+    {"costs", recorder::tensor(costs_)}, {"control", recorder::sequence(control_sequence_)},
+    {"sampled_vx", recorder::tensor(state_.cvx)}, {"sampled_vy", recorder::tensor(state_.cvy)},
+    {"sampled_wz", recorder::tensor(state_.cwz)}};});
   const bool is_holo = isHolonomic();
   auto & s = settings_;
   auto bounded_noises_vx = state_.cvx - control_sequence_.vx;
@@ -2960,7 +3010,11 @@ void Optimizer::updateControlSequence(bool diag)
 
   auto && costs_normalized = costs_ - xt::amin(costs_, immediate);
   auto && exponents = xt::eval(xt::exp(-1 / settings_.temperature * costs_normalized));
-  conditionControlExponents(exponents);
+  recorder::observe("regularized", [&] {return recorder::Json{
+    {"costs", recorder::tensor(costs_)}, {"raw_exponents", recorder::tensor(exponents)}};});
+  const bool exponents_conditioned = conditionControlExponents(exponents);
+  recorder::observe("conditioned_exponents", [&] {return recorder::Json{
+    {"conditioned", exponents_conditioned}, {"exponents", recorder::tensor(exponents)}};});
   auto && softmaxes = xt::eval(exponents / xt::sum(exponents, immediate));
   auto && softmaxes_extened = xt::eval(xt::view(softmaxes, xt::all(), xt::newaxis()));
 
@@ -2985,6 +3039,8 @@ void Optimizer::updateControlSequence(bool diag)
     xt::noalias(control_sequence_.vy) = xt::sum(state_.cvy * softmaxes_extened, 0, immediate);
   }
 
+  recorder::observe("weighted", [&] {return recorder::Json{
+    {"weights", recorder::tensor(softmaxes)}, {"control", recorder::sequence(control_sequence_)}};});
   // [D2] POST-SOFTMAX (before accel constraints)
   if (diag && settings_.time_steps >= 5) {
     RCLCPP_DEBUG(logger_,
@@ -2995,6 +3051,7 @@ void Optimizer::updateControlSequence(bool diag)
   }
 
   applyControlSequenceConstraints();
+  recorder::observe("constrained", [&] {return recorder::Json{{"control", recorder::sequence(control_sequence_)}};});
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
@@ -3013,17 +3070,31 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start,
   const models::ControlSequence * before_filter)
 {
+  recorder::observe("extract_begin", [&] {return recorder::Json{
+    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
   // Savitzky-Golay filtering follows optimization and can invalidate its
   // bounds. In particular, signed vx can cancel while wz does not, violating
   // the Ackermann cone. Project the final sequence before extracting output.
   applyControlSequenceConstraints();
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",1},{"operation","applyControlSequenceConstraints()"},{"control",recorder::sequence(control_sequence_)}};});
   enforceShortCuspMeanFeasibility(warm_start);
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",2},{"operation","enforceShortCuspMeanFeasibility(warm_start)"},{"control",recorder::sequence(control_sequence_)}};});
   enforceLongEntryCertificate(true);
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",3},{"operation","enforceLongEntryCertificate(true)"},{"control",recorder::sequence(control_sequence_)}};});
   preserveFilteredCollisionFeasibility(before_filter);
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",4},{"operation","preserveFilteredCollisionFeasibility(before_filter)"},{"control",recorder::sequence(control_sequence_)}};});
   enforceLongEntryCertificate(true);  // Nothing may invalidate the final emitted prefix.
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",5},{"operation","enforceLongEntryCertificate(true)"},{"control",recorder::sequence(control_sequence_)}};});
   enforceGentleCuspEmission();  // Recheck after smoothing and collision replacements.
+  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",6},{"operation","enforceGentleCuspEmission()"},{"control",recorder::sequence(control_sequence_)}};});
   unsigned int offset = settings_.shift_control_sequence ? 1 : 0;
 
+  recorder::observe("extract_projected", [&] {return recorder::Json{
+    {"control", recorder::sequence(control_sequence_)}, {"offset", offset},
+    {"deadband_floor", motor_deadband_floor_}, {"deadband_approach_radius", motor_deadband_approach_radius_},
+    {"deadband_terminal_radius", motor_deadband_terminal_radius_},
+    {"deadband_heading_error", motor_deadband_max_heading_error_},
+    {"active_direction", active_cusp_direction_}, {"path_direction", path_direction_}};});
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
 
@@ -3116,6 +3187,9 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     }
   }
 
+  recorder::observe("extract_final", [&] {return recorder::Json{
+    {"vx", vx}, {"wz", wz}, {"vy", isHolonomic() ? control_sequence_.vy(offset) : 0.0f},
+    {"offset", offset}};});
   control_sequence_.vx(offset) = vx;
 
   // Filter history must contain the command actually sent, not the
@@ -3228,12 +3302,14 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     }
   }
 
-  if (isHolonomic()) {
-    auto vy = control_sequence_.vy(offset);
-    return utils::toTwistStamped(vx, vy, wz, stamp, costmap_ros_->getBaseFrameID());
-  }
-
-  return utils::toTwistStamped(vx, wz, stamp, costmap_ros_->getBaseFrameID());
+  auto issued = isHolonomic() ?
+    utils::toTwistStamped(vx, control_sequence_.vy(offset), wz, stamp, costmap_ros_->getBaseFrameID()) :
+    utils::toTwistStamped(vx, wz, stamp, costmap_ros_->getBaseFrameID());
+  recorder::observe("issued", [&] {return recorder::Json{
+    {"vx",issued.twist.linear.x},{"vy",issued.twist.linear.y},{"wz",issued.twist.angular.z},
+    {"stamp_ns",rclcpp::Time(issued.header.stamp).nanoseconds()},{"frame",issued.header.frame_id},
+    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
+  return issued;
 }
 
 void Optimizer::setMotionModel(const std::string & model)

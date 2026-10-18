@@ -1,3 +1,4 @@
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -206,6 +207,7 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
   auto start = std::chrono::system_clock::now();
 #endif
 
+  mppi::recorder::Invocation recording(rclcpp::Time(robot_pose.header.stamp).nanoseconds());
   std::lock_guard<std::mutex> param_lock(*parameters_handler_->getLock());
   // Validate before path pruning can consume a cusp or advance segment state.
   updateSteeringFeedback();

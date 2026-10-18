@@ -12,6 +12,7 @@ set(XTENSOR_USE_XSIMD 1)
 # set(XTENSOR_DEFAULT_TRAVERSAL row_major)  # row_major, column_major
 
 find_package(ament_cmake REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(xsimd REQUIRED)
 find_package(xtensor REQUIRED)
 
