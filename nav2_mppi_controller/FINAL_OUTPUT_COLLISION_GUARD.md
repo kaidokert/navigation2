@@ -16,7 +16,8 @@ forecast. Sequence shifting starts the forecast with index 1 when index 1 is the
 emitted command. An extra state column includes the last command, which the
 model's initial measured-velocity column otherwise displaces. Rectangular
 footprints use the native footprint collision checker at every predicted pose;
-radius mode uses the inflated centre cost. Unknown/out-of-map poses and invalid
+radius mode checks every grid cell intersecting the padded circular body,
+including its interior, without depending on inflation. Unknown/out-of-map poses and invalid
 numeric inputs are rejected. IEEE exponent checks remain effective under the
 package's production `-ffast-math` compiler flags.
 
@@ -29,8 +30,8 @@ check. There is no new parameter or opt-out.
 This does not import PR #14's cusp binding, motor deadband floor, ranked-sample
 fallback, or other maneuver changes. It does not replace hardware command
 timeouts, stall detection, costmap freshness checks, or the critic fix in #15.
-The native checker tests polygon perimeter cells and the reference centre at
-discrete forecast poses; it is not continuous swept-volume or filled-polygon
+The polygon checker tests perimeter cells and the reference centre; the radius
+checker tests the filled disk. Both use discrete forecast poses; it is not continuous swept-volume or filled-polygon
 validation. An already occupied footprint is rejected and requires a separate
 bounded recovery. Physical robot timings and driving remain to be qualified.
 
@@ -42,6 +43,8 @@ smoothing, shifted emission, the final forecast slot, measured-state braking,
 free-centre corner collisions (including the recorded table-leg fixture),
 lethal centres, unknown/map boundaries, invalid numbers under fast-math,
 malformed arrays, Ackermann constraints, and history reset/update behavior.
+Radius tests cover free-centre interior obstacles/unknown cells, body/map
+boundaries, clear motion without inflation, and cells outside the disk.
 
 The standalone CI target compiles the production optimizer, critic manager,
 noise generator, parameter handler and obstacle critic. `nav2_critics_msgs` is

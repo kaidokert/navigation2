@@ -253,6 +253,48 @@ TEST_F(FinalOutputTest, AckermannConeIsAppliedAfterSmoothing)
   EXPECT_LE(std::abs(control.twist.angular.z), 0.100001);
   EXPECT_FLOAT_EQ(opt.control_history_.back().wz, control.twist.angular.z);
 }
+class RadiusOutputTest : public FinalOutputTest
+{
+protected:
+  static void SetUpTestSuite()
+  {
+    cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+      "final_radius_map", "", "final_radius_map", true);
+    // Deliberately no inflation layer: geometry must provide the hard check.
+    cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+    cm->set_parameter(rclcpp::Parameter("robot_radius", 0.2));
+    cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
+    ASSERT_EQ(cm->on_configure(rclcpp_lifecycle::State{}), nav2_util::CallbackReturn::SUCCESS);
+    cm->pause();
+    ASSERT_TRUE(cm->getUseRadius());
+  }
+};
+
+TEST_F(RadiusOutputTest, ClearBodyIsAcceptedWithoutInflation)
+{
+  opt.sequence(0.1f);
+  EXPECT_NO_THROW(opt.emit());
+}
+
+TEST_F(RadiusOutputTest, InteriorObstacleAndUnknownAreRejectedWithFreeCenter)
+{
+  obstacle(0.1, 0.05);
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  obstacle(0.1, 0.05, nav2_costmap_2d::NO_INFORMATION);
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+}
+
+TEST_F(RadiusOutputTest, BodyOutsideMapRejectsEvenWithCenterInside)
+{
+  opt.state_.pose.pose.position.x = 1.85;
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+}
+
+TEST_F(RadiusOutputTest, OutsideCircleCornerCellDoesNotBlock)
+{
+  obstacle(0.19, 0.19);
+  EXPECT_NO_THROW(opt.emit());
+}
 }  // namespace
 
 int main(int argc, char ** argv)

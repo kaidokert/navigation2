@@ -627,7 +627,10 @@ bool Optimizer::controlSequenceCollisionFree() const
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
   const auto footprint = costmap_ros_->getRobotFootprint();
   const bool circle = costmap_ros_->getUseRadius();
-  if (!circle && footprint.size() < 3) {return false;}
+  if (footprint.size() < 3) {return false;}
+  const double radius = circle ?
+    costmap_ros_->getLayeredCostmap()->getCircumscribedRadius() : 0.0;
+  if (circle && (!finiteValue(radius) || radius <= 0.0)) {return false;}
   nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
   const auto in_bounds = [&](double x, double y) {
       return finiteValue(x) && finiteValue(y) &&
@@ -645,7 +648,34 @@ bool Optimizer::controlSequenceCollisionFree() const
       {
         return false;
       }
-      if (circle) {return true;}
+      if (circle) {
+        // Inflation is optional and may be smaller than the body. Check every
+        // cell intersecting the padded circular body, including its interior.
+        if (!in_bounds(x - radius, y - radius) || !in_bounds(x + radius, y + radius)) {
+          return false;
+        }
+        unsigned int x0, y0, x1, y1;
+        if (!costmap_->worldToMap(x - radius, y - radius, x0, y0) ||
+          !costmap_->worldToMap(x + radius, y + radius, x1, y1))
+        {
+          return false;
+        }
+        const double resolution = costmap_->getResolution();
+        for (unsigned int cy = y0; cy <= y1; ++cy) {
+          const double bottom = costmap_->getOriginY() + cy * resolution;
+          const double dy = std::max({bottom - y, 0.0, y - bottom - resolution});
+          for (unsigned int cx = x0; cx <= x1; ++cx) {
+            const double left = costmap_->getOriginX() + cx * resolution;
+            const double dx = std::max({left - x, 0.0, x - left - resolution});
+            if (dx * dx + dy * dy <= radius * radius &&
+              costmap_->getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE)
+            {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
       const double c = std::cos(yaw), sn = std::sin(yaw);
       for (const auto & vertex : footprint) {
         if (!in_bounds(x + c * vertex.x - sn * vertex.y, y + sn * vertex.x + c * vertex.y)) {
