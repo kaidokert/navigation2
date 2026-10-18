@@ -25,6 +25,7 @@ void ObstaclesCritic::initialize()
 {
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(consider_footprint_, "consider_footprint", false);
+  getParam(collision_check_footprint_only_, "collision_check_footprint_only", false);
   getParam(power_, "cost_power", 1);
   getParam(repulsion_weight_, "repulsion_weight", 1.5f);
   getParam(critical_weight_, "critical_weight", 20.0f);
@@ -36,6 +37,11 @@ void ObstaclesCritic::initialize()
 
   collision_checker_.setCostmap(costmap_);
   possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
+
+  if (collision_check_footprint_only_ && costmap_ros_->getUseRadius()) {
+    throw nav2_core::ControllerException(
+      "Hard footprint collision checking requires a configured robot footprint.");
+  }
 
   if (possible_collision_cost_ < 1.0f) {
     RCLCPP_ERROR(
@@ -124,7 +130,7 @@ void ObstaclesCritic::score(CriticData & data)
     return;
   }
 
-  if (consider_footprint_) {
+  if (consider_footprint_ || collision_check_footprint_only_) {
     // footprint may have changed since initialization if user has dynamic footprints
     possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
   }
@@ -149,25 +155,15 @@ void ObstaclesCritic::score(CriticData & data)
     repulsive_cost[i] = 0.0f;
 
     for (size_t j = 0; j < traj_len; j++) {
-      if (goal_truncation_distance_ > 0.0f) {
-        // The rollout has reached the goal: the executed robot stops here,
-        // everything past this point is fantasy — do not let a post-goal
-        // obstacle veto the trajectory (goal-near-wall standoff, M6).
-        const float dxg = traj.x(i, j) - static_cast<float>(data.goal.position.x);
-        const float dyg = traj.y(i, j) - static_cast<float>(data.goal.position.y);
-        if (dxg * dxg + dyg * dyg <
-          goal_truncation_distance_ * goal_truncation_distance_)
-        {
-          break;
-        }
-      }
+      // Check the initial and entry footprint before any terminal truncation.
+      // Near-goal proximity cannot turn a lethal sample into a valid rollout.
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
-      if (pose_cost.cost < 1.0f) {continue;}  // In free space
-
       if (inCollision(pose_cost.cost)) {
         trajectory_collide = true;
         break;
       }
+
+      if (pose_cost.cost < 1.0f) {continue;}  // In free space
 
       // Cannot process repulsion if inflation layer does not exist
       if (inflation_radius_ == 0.0f || inflation_scale_factor_ == 0.0f) {
@@ -244,12 +240,24 @@ CollisionCost ObstaclesCritic::costAtPose(float x, float y, float theta)
   }
   cost = collision_checker_.pointCost(x_i, y_i);
 
-  if (consider_footprint_ &&
-    (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f))
+  // The continuous circumscribed-radius threshold is not conservative for
+  // rasterized footprint edges. A corner can visit a lethal cell while the
+  // reference cell is one inflation-cost bin below that threshold. Hard-only
+  // checking must agree with the unconditional final-output footprint guard.
+  if (collision_check_footprint_only_ || (consider_footprint_ &&
+    (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f)))
   {
-    cost = static_cast<float>(collision_checker_.footprintCostAtPose(
+    const float footprint_cost = static_cast<float>(collision_checker_.footprintCostAtPose(
         x, y, theta, costmap_ros_->getRobotFootprint()));
-    collision_cost.using_footprint = true;
+    // Full-footprint soft scoring remains unchanged. In hard-only mode, preserve
+    // the existing point cost unless the perimeter is lethal or outside the map.
+    // An inscribed inflation cost on the perimeter is not a physical collision.
+    if (consider_footprint_ || footprint_cost == nav2_costmap_2d::LETHAL_OBSTACLE ||
+      footprint_cost == nav2_costmap_2d::NO_INFORMATION)
+    {
+      cost = footprint_cost;
+      collision_cost.using_footprint = true;
+    }
   }
 
   return collision_cost;
