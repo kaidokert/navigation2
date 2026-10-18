@@ -3,6 +3,7 @@
 #define NAV2_MPPI_CONTROLLER__TOOLS__DECISION_RECORDER_HPP_
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -31,12 +32,13 @@ template<typename Tensor> Json tensor(const Tensor & t)
 {
   Json data = Json::array(), shape = Json::array();
   if (t.size() > 2048 * 128) {throw std::runtime_error("tensor capture bound");}
+  data.get_ref<Json::array_t &>().reserve(t.size());
   for (auto n : t.shape()) {shape.push_back(n);}
   for (auto x : t) {
     if (!finite(static_cast<double>(x))) {throw std::runtime_error("nonfinite tensor");}
     data.push_back(x);
   }
-  return Json{{"shape", shape}, {"data", data}};
+  return Json{{"shape", std::move(shape)}, {"data", std::move(data)}};
 }
 template<typename Sequence> Json sequence(const Sequence & s)
 {return Json{{"vx", tensor(s.vx)}, {"vy", tensor(s.vy)}, {"wz", tensor(s.wz)}};}
@@ -67,6 +69,27 @@ struct Config
   unsigned collapse_cycles{20}, reversal_count{4};
   double collapse_speed{0.02}, progress_floor{0.005}, moving_command{0.05};
 };
+// Conservative encoded-byte charge, not serialization. Every finite JSON number
+// fits in 32 characters; strings need at most six encoded bytes per source byte.
+// Numeric arrays use one tight type scan instead of formatting every scalar.
+inline size_t serializedUpperBound(const Json & value)
+{
+  if (value.is_null() || value.is_boolean()) {return 5;}
+  if (value.is_number()) {return 32;}
+  if (value.is_string()) {return 2 + 6 * value.get_ref<const std::string &>().size();}
+  size_t bound = 2;
+  if (value.is_array()) {
+    const auto & items = value.get_ref<const Json::array_t &>();
+    if (std::all_of(items.begin(), items.end(), [](const Json & j) {return j.is_number();}))
+    {return 2 + 33 * items.size();}
+    for (const auto & item : items) {bound += 1 + serializedUpperBound(item);}
+  } else {
+    for (auto i = value.begin(); i != value.end(); ++i) {
+      bound += 4 + 6 * i.key().size() + serializedUpperBound(i.value());
+    }
+  }
+  return bound;
+}
 class Recorder
 {
 public:
@@ -122,7 +145,7 @@ public:
         std::abs(*independent_progress) < config_.progress_floor)
       {trigger("delivered_command_without_progress");}
       if (frame.contains("exception")) {trigger("abort");}
-      const auto bytes = frame.dump().size();
+      const auto bytes = serializedUpperBound(frame);
       if (bytes > config_.maximum_bytes) {++overflow_; return;}
       if (!triggered_) {
         while (frames_.size() >= config_.pre && !frames_.empty()) {evict();}
@@ -143,11 +166,15 @@ public:
   {try {if (current_) {(*current_)["exception"] = message;}} catch (...) {++errors_;}}
   Json document() const
   {
+    // Called on explicit flush/inspection, outside the observed control scope.
+    size_t actual_bytes = 0;
+    for (const auto & frame : frames_) {actual_bytes += frame.dump().size();}
     return Json{{"schema", "jetacker-decision-trace/1.0.0"}, {"manifest", manifest_},
       {"termination", reason_}, {"triggered", triggered_}, {"frozen", frozen_},
       {"health", {{"errors", errors_}, {"overflow", overflow_}, {"pre_evictions", evictions_},
         {"after_window", after_window_}, {"clock_resets", clock_resets_},
-        {"retained_serialized_bytes", bytes_}, {"maximum_bytes", config_.maximum_bytes}}},
+        {"retained_serialized_bytes", actual_bytes}, {"retained_charge_upper_bound_bytes", bytes_},
+        {"maximum_bytes", config_.maximum_bytes}}},
       {"invocations", frames_}};
   }
   void writeExclusive(const std::string & filename) const
