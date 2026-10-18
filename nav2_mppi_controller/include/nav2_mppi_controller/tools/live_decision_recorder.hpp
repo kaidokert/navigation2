@@ -41,7 +41,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     const auto op = input.at("operation").get<std::string>();
     if (op == "arm") {
-      if (armed_) {throw std::runtime_error("close current recorder session before rearming");}
+      if (armed_ || close_pending_.load()) {throw std::runtime_error("wait for successful recorder closure before rearming");}
       const auto id = input.at("run_id").get<std::string>();
       if(input.contains("maximum_episodes") && !input.at("maximum_episodes").is_number_integer()) {
         throw std::invalid_argument("maximum_episodes must be an integer");}
@@ -63,7 +63,7 @@ public:
     } else if (op == "trigger") {
       if (recorder_) {recorder_->trigger(input.value("reason",std::string("manual")));}
     } else if (op == "close") {
-      detach("session_closed"); armed_ = false;
+      detach("session_closed"); armed_ = false;close_pending_=true;
       enqueue({folder_,"closed",{{"kind","session_closed"},{"run_id",run_},
         {"host_ns",monotonicNs()},{"queue_drops",drops_.load()-drop_start_},
         {"worker_errors",worker_errors_.load()-error_start_},
@@ -106,7 +106,7 @@ public:
           dense_status="session_capture_budget_exhausted";++owner_->budget_wait_ticks_;
         } else {
           bool available;
-          {std::lock_guard<std::mutex> queue_lock(owner_->queue_mutex_);available=owner_->pending_captures_==0;}
+          {std::lock_guard<std::mutex> queue_lock(owner_->queue_mutex_);available=owner_->pending_captures_<2;}
           if(!available) {dense_status="capture_capacity_wait";++owner_->capture_wait_ticks_;}
           else {
             Json m=owner_->manifest_;m["run_id"]=owner_->run_;
@@ -114,9 +114,12 @@ public:
             m["mission_uuid"]=owner_->session_.value("mission_uuid",std::string("unknown"));
             m["episode_id"]=owner_->episode_+1;
             m["recording_policy"]={{"maximum_episodes",owner_->maximum_episodes_},
-              {"maximum_in_flight",1},{"maximum_episode_bytes",268435456},
-              {"maximum_session_dense_bytes_bound",owner_->maximum_episodes_*size_t(268435456)}};
-            owner_->recorder_=std::make_unique<Recorder>(std::move(m));++owner_->episode_;
+              {"maximum_capture_objects",2},{"maximum_episode_bytes",268435456},
+              {"maximum_session_frame_payload_bytes_bound",owner_->maximum_episodes_*size_t(268435456)}};
+            Config capture_config;capture_config.collapse_speed=owner_->episode_==0?.02:.005;
+            m["recording_policy"]["collapse_speed_mps"]=capture_config.collapse_speed;
+            m["recording_policy"]["maximum_live_frame_payload_bytes"]=size_t(2)*268435456;
+            owner_->recorder_=std::make_unique<Recorder>(std::move(m),capture_config);++owner_->episode_;
           }
         }
       }
@@ -210,7 +213,7 @@ private:
   void enqueue(Job job)
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (queue_.size()>=4096 || (job.capture && pending_captures_>=1)) {++drops_;return;}
+    if (queue_.size()>=4096 || (job.capture && pending_captures_>=2)) {++drops_;return;}
     const bool capture=bool(job.capture);
     queue_.push_back(std::move(job));if(capture) {++pending_captures_;} wake_.notify_one();
   }
@@ -254,11 +257,12 @@ private:
           const auto value=job.row.dump()+"\n";
           const auto n=::write(fd,value.data(),value.size());::close(fd);
           if(n!=static_cast<ssize_t>(value.size())) {throw std::runtime_error("closure receipt write failed");}
+          close_pending_=false;
         } else {
           append(job.folder,job.row,job.row.value("kind",std::string())=="session_armed");
         }
       } catch (...) {++worker_errors_;}
-      if (job.capture) {std::lock_guard<std::mutex> lock(queue_mutex_);--pending_captures_;}
+      if (job.capture) {job.capture.reset();std::lock_guard<std::mutex> lock(queue_mutex_);--pending_captures_;}
     }
   }
   inline static thread_local LiveRecorder * current_scope_=nullptr;
@@ -270,6 +274,7 @@ private:
   std::string dense_status_;size_t maximum_episodes_{8},capture_wait_ticks_{0},budget_wait_ticks_{0};
   size_t episode_{0},pending_captures_{0},drop_start_{0},error_start_{0};uint64_t tick_{0};
   std::atomic<size_t> drops_{0},worker_errors_{0};
+  std::atomic<bool> close_pending_{false};
   // Declared last so the thread cannot observe uninitialized synchronization state.
   std::function<void()> before_flush_;
   std::thread worker_;

@@ -16,11 +16,19 @@ std::filesystem::path directory(const std::string & name)
 }
 rec::Json read(const std::filesystem::path & path)
 {std::ifstream file(path);rec::Json value;file>>value;return value;}
-void tick(rec::LiveRecorder & live,int64_t stamp)
+bool armAfterClose(rec::LiveRecorder & live,const rec::Json & request)
+{
+  for(int i=0;i<2000;++i) {
+    try {live.command(request);return true;} catch(const std::runtime_error &) {}
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+void tick(rec::LiveRecorder & live,int64_t stamp,double vx=.1)
 {
   rec::LiveRecorder::Scope scope(&live,"actual-native-goal",stamp);
-  rec::observe("issued",[] {return rec::Json{{"vx",.1},{"vy",0.0},{"wz",0.0}};});
-  live.publication({{"published",true},{"stamp_ns",stamp+1},{"vx",.1},{"vy",0.0},{"wz",0.0}});
+  rec::observe("issued",[&] {return rec::Json{{"vx",vx},{"vy",0.0},{"wz",0.0}};});
+  live.publication({{"published",true},{"stamp_ns",stamp+1},{"vx",vx},{"vy",0.0},{"wz",0.0}});
 }
 }
 TEST(LiveRecorder,DetachedFlushAndDispatchIdentity)
@@ -61,7 +69,8 @@ TEST(LiveRecorder,RejectCrossRunCommandsAndClearMotion)
     auto unproven=motion;unproven["consumer_coverage"]=false;EXPECT_THROW(live.command(unproven),std::invalid_argument);
     auto bad=motion;bad["window_s"]=-1;EXPECT_THROW(live.command(bad),std::invalid_argument);
     live.command({{"operation","close"},{"run_id","first"}});
-    live.command({{"operation","arm"},{"run_id","second"}});
+    for(int i=0;i<2000 && !std::filesystem::exists(root/"first/session.closed.json");++i) {std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+    ASSERT_TRUE(armAfterClose(live,{{"operation","arm"},{"run_id","second"}}));
     EXPECT_THROW(live.command(motion),std::invalid_argument);
     tick(live,2000);
     live.command({{"operation","close"},{"run_id","second"}});
@@ -96,34 +105,72 @@ TEST(LiveRecorder,RecurringCaptureCapacityBudgetAndRearmIsolation)
     rec::LiveRecorder live(root.string(),{{"native_baseline","fixture"}},[&] {
       if(++flushes==1) {started.set_value();released.wait_for(5s);}
     });
-    live.command({{"operation","arm"},{"run_id","recurring"},{"maximum_episodes",2}});
+    live.command({{"operation","arm"},{"run_id","recurring"},{"maximum_episodes",3}});
     int64_t stamp=1000;
     auto call=[&] {tick(live,stamp++);};
     call();live.command({{"operation","trigger"},{"run_id","recurring"},{"reason","test_first"}});
     for(int i=0;i<3;++i) {call();}
     EXPECT_EQ(started_future.wait_for(2s),std::future_status::ready);
+    call();live.command({{"operation","trigger"},{"run_id","recurring"},{"reason","test_second_while_writer_blocked"}});
     for(int i=0;i<10;++i) {call();}
     EXPECT_FALSE(std::filesystem::exists(root/"recurring/episode_2.trace.json"));
     release.set_value();
-    for(int i=0;i<2000 && !std::filesystem::exists(root/"recurring/episode_2.trace.json");++i) {
+    for(int i=0;i<2000 && !std::filesystem::exists(root/"recurring/episode_3.trace.json");++i) {
       call();live.command({{"operation","trigger"},{"run_id","recurring"},{"reason","test_repeat"}});
       std::this_thread::sleep_for(1ms);
     }
     for(int i=0;i<10;++i) {call();}
     live.command({{"operation","close"},{"run_id","recurring"}});
-    // Rearm before old closure is processed: queued jobs must retain their folder/identity.
-    live.command({{"operation","arm"},{"run_id","next"},{"maximum_episodes",1}});
+    // Closure is an actual fence; do not attribute old worker errors to a new run.
+
     for(int i=0;i<2000 && !std::filesystem::exists(root/"recurring/session.closed.json");++i) {
-      call();std::this_thread::sleep_for(1ms);
+      std::this_thread::sleep_for(1ms);
     }
+    ASSERT_TRUE(armAfterClose(live,{{"operation","arm"},{"run_id","next"},{"maximum_episodes",1}}));
     call();live.command({{"operation","close"},{"run_id","next"}});
   }
   const auto receipt=read(root/"recurring/session.closed.json");
-  EXPECT_EQ(receipt["episodes_started"],2);EXPECT_GT(receipt["capture_wait_ticks"],0);
+  EXPECT_EQ(receipt["episodes_started"],3);EXPECT_GT(receipt["capture_wait_ticks"],0);
   EXPECT_GT(receipt["budget_exhausted_ticks"],0);EXPECT_EQ(receipt["queue_drops"],0);
   EXPECT_EQ(receipt["worker_errors"],0);
   EXPECT_EQ(read(root/"recurring/episode_1.trace.json")["manifest"]["episode_id"],1);
   EXPECT_EQ(read(root/"recurring/episode_2.trace.json")["manifest"]["episode_id"],2);
   EXPECT_EQ(read(root/"next/episode_1.trace.json")["manifest"]["run_id"],"next");
   EXPECT_EQ(read(root/"next/session.closed.json")["worker_errors"],0);
+}
+
+TEST(LiveRecorder,RefinedCollapseCapturedWhileFirstWriterBlocked)
+{
+  using namespace std::chrono_literals;
+  auto root=directory("live_adapter_refined");
+  std::promise<void> started,release;auto ready=started.get_future();auto released=release.get_future().share();std::atomic<unsigned> flushes{0};
+  {
+    rec::LiveRecorder live(root.string(),{{"native_baseline","fixture"}},[&] {if(++flushes==1) {started.set_value();released.wait_for(5s);}});
+    live.command({{"operation","arm"},{"run_id","refined"},{"maximum_episodes",2}});
+    int64_t stamp=1000;
+    for(int i=0;i<24;++i) {tick(live,stamp++,.01);}
+    EXPECT_EQ(ready.wait_for(2s),std::future_status::ready);
+    for(int i=0;i<30;++i) {tick(live,stamp++,.01);}
+    for(int i=0;i<24;++i) {tick(live,stamp++,.001);}
+    live.command({{"operation","close"},{"run_id","refined"}});
+    EXPECT_THROW(live.command({{"operation","arm"},{"run_id","too_early"}}),std::runtime_error);
+    release.set_value();
+  }
+  auto first=read(root/"refined/episode_1.trace.json");auto second=read(root/"refined/episode_2.trace.json");
+  EXPECT_EQ(first["manifest"]["recording_policy"]["collapse_speed_mps"],.02);
+  EXPECT_EQ(second["manifest"]["recording_policy"]["collapse_speed_mps"],.005);
+  bool coarse=false,fine=false;
+  for(const auto & f:second["invocations"]) {
+    coarse=coarse||f["trigger_inputs"]["command_vx"]==.01;
+    fine=fine||f["trigger_inputs"]["command_vx"]==.001;
+  }
+  EXPECT_TRUE(coarse);EXPECT_TRUE(fine);
+  auto receipt=read(root/"refined/session.closed.json");
+  EXPECT_EQ(receipt["episodes_started"],2);EXPECT_EQ(receipt["queue_drops"],0);EXPECT_EQ(receipt["worker_errors"],0);
+  std::ifstream journal(root/"refined/server.events.jsonl");std::string line;unsigned ends=0;
+  while(std::getline(journal,line)) {
+    auto e=rec::Json::parse(line);
+    if(e["kind"]=="tick_end") {EXPECT_EQ(e["run_id"],"refined");++ends;}
+  }
+  EXPECT_EQ(ends,78);
 }
