@@ -14,15 +14,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <cstring>
+#include <cstdint>
 
 #include "nav2_mppi_controller/tools/path_handler.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
+#include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 
 namespace mppi
 {
+namespace
+{
+int segmentDirection(const nav_msgs::msg::Path & path)
+{
+  for (size_t k = 1; k < path.poses.size(); ++k) {
+    const auto & a = path.poses[k - 1].pose;
+    const auto & b = path.poses[k].pose;
+    const double dx = b.position.x - a.position.x;
+    const double dy = b.position.y - a.position.y;
+    if (std::hypot(dx, dy) > 1e-6) {
+      const double yaw = tf2::getYaw(a.orientation);
+      return dx * std::cos(yaw) + dy * std::sin(yaw) >= 0 ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+double nextSegmentLength(const nav_msgs::msg::Path & plan, unsigned int inversion)
+{
+  if (inversion == 0u || inversion >= plan.poses.size()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  nav_msgs::msg::Path next;
+  next.poses.assign(plan.poses.begin() + inversion - 1, plan.poses.end());
+  utils::removePosesAfterFirstInversion(next);
+  const double length = static_cast<double>(utils::pathLength(next));
+  return length > 0.0 ? length : std::numeric_limits<double>::infinity();
+}
+}  // namespace
 
 void PathHandler::initialize(
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent, const std::string & name,
@@ -48,6 +84,15 @@ void PathHandler::initialize(
   if (enforce_path_inversion_) {
     getParam(inversion_xy_tolerance_, "inversion_xy_tolerance", 0.2);
     getParam(inversion_yaw_tolerance_, "inversion_yaw_tolerance", 0.4);
+    getParam(inversion_segment_ratio_, "inversion_segment_ratio", 0.25);
+    getParam(inversion_xy_floor_, "inversion_xy_floor", 0.05);
+    // Experimental policy: previous unconditional version regressed the loop.
+    // Keep opt-in so paired frozen-path diagnostics can test it independently.
+    getParam(bound_handoff_by_next_segment_, "bound_handoff_by_next_segment", false);
+    getParam(validate_long_forward_departure_, "validate_long_forward_departure", false);
+    getParam(validate_short_forward_departure_, "validate_short_forward_departure", false);
+    getParam(preserve_cusp_direction_edge_, "preserve_cusp_direction_edge", false);
+    getParam(replan_on_cusp_overrun_, "replan_on_cusp_overrun", false);
     getParam(min_inversion_horizon_, "min_inversion_horizon", 0.15);
     getParam(ghost_max_extension_, "ghost_max_extension", 0.35);
     getParam(ghost_point_spacing_, "ghost_point_spacing", 0.05);
@@ -61,6 +106,8 @@ void PathHandler::initialize(
     handoff_yaw_relax_per_cycle_ = std::max(handoff_yaw_relax_per_cycle_, 0.0);
     handoff_yaw_relax_cap_ = std::max(
       handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
+    inversion_segment_ratio_ = std::clamp(inversion_segment_ratio_, 0.05, 1.0);
+    inversion_xy_floor_ = std::max(0.0, inversion_xy_floor_);
     if (min_inversion_horizon_ < 0.0) {
       RCLCPP_WARN(logger_,
         "min_inversion_horizon (%.3f) is negative, disabling ghost extension",
@@ -99,6 +146,66 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
       return euclidean_distance(global_pose, ps);
     });
 
+  // An active cusp pruned to its endpoint has no real edge defining gear.
+  // Retain the preceding genuine edge (including any duplicate cusp poses),
+  // only inside the local window. Final-goal pruning remains unchanged.
+  if (preserve_cusp_direction_edge_ && enforce_path_inversion_ &&
+    inversion_locale_ != 0u && closest_point != begin &&
+    std::all_of(closest_point, global_plan_up_to_inversion_.poses.end(),
+      [&](const auto & p) {return euclidean_distance(*closest_point, p) < 1e-6;}))
+  {
+    auto edge_start = closest_point;
+    do {--edge_start;} while (edge_start != begin &&
+      euclidean_distance(*edge_start, *closest_point) < 1e-6);
+    const double edge_length = euclidean_distance(*edge_start, *closest_point);
+    auto candidate = *edge_start;
+    candidate.header.stamp = global_pose.header.stamp;
+    candidate.header.frame_id = global_plan_.header.frame_id;
+    geometry_msgs::msg::PoseStamped local_candidate;
+    unsigned int mx, my;
+    if (edge_length > 1e-6 && edge_length <= prune_distance_ &&
+      transformPose(costmap_->getGlobalFrameID(), candidate, local_candidate) &&
+      costmap_->getCostmap()->worldToMap(local_candidate.pose.position.x,
+        local_candidate.pose.position.y, mx, my))
+    {
+      closest_point = edge_start;
+    }
+  }
+
+  PathBinding binding;
+  binding.canonical_plan=canonical_plan_;binding.generation=plan_generation_;
+  binding.segment=segment_generation_;binding.segment_begin=segment_source_begin_;
+  binding.segment_end=segment_source_end_;
+  const auto local_frame=costmap_->getGlobalFrameID();
+  try {
+    if(local_frame==global_plan_.header.frame_id) {
+      binding.canonical_to_local.header.frame_id=local_frame;
+      binding.canonical_to_local.child_frame_id=global_plan_.header.frame_id;
+      binding.canonical_to_local.header.stamp=global_pose.header.stamp;
+      binding.canonical_to_local.transform.rotation.w=1.0;
+    } else {
+      binding.canonical_to_local=tf_buffer_->lookupTransform(local_frame,
+        global_plan_.header.frame_id,global_pose.header.stamp,
+        tf2::durationFromSec(transform_tolerance_));
+    }
+  } catch(const tf2::TransformException & ex) {
+    path_binding_.reset();throw nav2_core::ControllerTFError(ex.what());
+  }
+  binding.canonical_to_local.header.stamp=global_pose.header.stamp;
+  // Reject malformed canonical transforms before doTransform/worldToMap casts.
+  const auto & tf=binding.canonical_to_local;
+  const auto & t=tf.transform.translation;const auto & q=tf.transform.rotation;
+  const auto finite=diagnostic::isFiniteCaptureValue;
+  if(tf.header.frame_id.empty() || tf.child_frame_id.empty() ||
+    tf.header.frame_id!=local_frame || tf.child_frame_id!=global_plan_.header.frame_id ||
+    !finite(t.x) || !finite(t.y) || !finite(t.z) || !finite(q.x) ||
+    !finite(q.y) || !finite(q.z) || !finite(q.w) ||
+    std::abs(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w-1.0)>1e-6 ||
+    std::abs(q.x)>1e-6 || std::abs(q.y)>1e-6 || std::abs(t.z)>1e-6)
+  {
+    path_binding_.reset();
+    throw nav2_core::ControllerTFError("Invalid canonical path transform");
+  }
   nav_msgs::msg::Path transformed_plan;
   transformed_plan.header.frame_id = costmap_->getGlobalFrameID();
   transformed_plan.header.stamp = global_pose.header.stamp;
@@ -118,19 +225,23 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
     geometry_msgs::msg::PoseStamped costmap_plan_pose;
     global_plan_pose->header.stamp = global_pose.header.stamp;
     global_plan_pose->header.frame_id = global_plan_.header.frame_id;
-    transformPose(costmap_->getGlobalFrameID(), *global_plan_pose, costmap_plan_pose);
+    tf2::doTransform(*global_plan_pose,costmap_plan_pose,binding.canonical_to_local);
 
     // Check if pose is inside the costmap
     if (!costmap_->getCostmap()->worldToMap(
         costmap_plan_pose.pose.position.x, costmap_plan_pose.pose.position.y, mx, my))
     {
+      path_binding_=std::move(binding);
       return {transformed_plan, closest_point};
     }
 
     // Filling the transformed plan to return with the transformed pose
+    binding.real_ids.push_back(inversion_source_offset_+
+      static_cast<size_t>(std::distance(begin,global_plan_pose)));
     transformed_plan.poses.push_back(costmap_plan_pose);
   }
 
+  path_binding_=std::move(binding);
   return {transformed_plan, closest_point};
 }
 
@@ -151,8 +262,11 @@ geometry_msgs::msg::PoseStamped PathHandler::transformToGlobalPlanFrame(
 }
 
 nav_msgs::msg::Path PathHandler::transformPath(
-  const geometry_msgs::msg::PoseStamped & robot_pose)
+  const geometry_msgs::msg::PoseStamped & robot_pose,
+  const DepartureValidator & departure_validator)
 {
+  did_handoff_ = false;
+  retained_departure_approach_.reset();
   // Find relevent bounds of path to use
   geometry_msgs::msg::PoseStamped global_pose =
     transformToGlobalPlanFrame(robot_pose);
@@ -161,12 +275,105 @@ nav_msgs::msg::Path PathHandler::transformPath(
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
   if (enforce_path_inversion_ && inversion_locale_ != 0u) {
-    if (isWithinInversionTolerances(global_pose)) {
-      prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_);
+    bool accept_handoff = isWithinInversionTolerances(global_pose);
+    const int64_t approach_stamp = static_cast<int64_t>(global_pose.header.stamp.sec) *
+      1000000000LL + global_pose.header.stamp.nanosec;
+    if (departure_approach_budget_ && (!accept_handoff ||
+      departure_approach_budget_->exhausted || approach_stamp < departure_approach_budget_->last_ns ||
+      approach_stamp - departure_approach_budget_->started_ns > 2000000000LL))
+    {
+      departure_approach_budget_->exhausted = true;
+      throw nav2_core::FailedToMakeProgress("Retained departure approach left cusp gates");
+    }
+    const bool short_departure = validate_short_forward_departure_ &&
+      next_segment_length_ > 0.0 && next_segment_length_ <= 0.30;
+    const bool long_departure = validate_long_forward_departure_ && next_segment_length_ > 0.8;
+    if (accept_handoff && current_segment_direction_ == -1 &&
+      (short_departure || long_departure))
+    {
+      // Preview without consuming either the global plan or its incoming cusp.
+      nav_msgs::msg::Path outgoing;
+      outgoing.header = global_plan_.header;
+      outgoing.poses.assign(global_plan_.poses.begin() + inversion_locale_ - 1,
+        global_plan_.poses.end());
+      const auto outgoing_inversion = utils::removePosesAfterFirstInversion(outgoing);
+      // Short endpoint validation is only for another internal cusp, never the final goal.
+      if (segmentDirection(outgoing) == 1 && (!short_departure || outgoing_inversion != 0u)) {
+      if (!departure_validator) {
+        throw nav2_core::NoValidControl("Enabled departure guard has no validator");
+      }
+        nav_msgs::msg::Path local;
+        local.header.frame_id = costmap_->getGlobalFrameID();
+        local.header.stamp = global_pose.header.stamp;
+        if (short_departure && outgoing.poses.size() > 64) {
+          throw nav2_core::FailedToMakeProgress("Short departure exceeds bounded validation size");
+        }
+        const size_t preview_size = short_departure ? outgoing.poses.size() :
+          std::min<size_t>(outgoing.poses.size(), 9);
+        for (size_t k = 0; k < preview_size; ++k) {
+          auto source = outgoing.poses[k];
+          source.header = outgoing.header;
+          source.header.stamp = global_pose.header.stamp;
+          geometry_msgs::msg::PoseStamped target;
+          if (!transformPose(local.header.frame_id, source, target)) {
+            throw nav2_core::ControllerTFError("Cannot transform outgoing departure prefix");
+          }
+          local.poses.push_back(target);
+        }
+        geometry_msgs::msg::PoseStamped local_robot;
+        if (!transformPose(local.header.frame_id, robot_pose, local_robot)) {
+          throw nav2_core::ControllerTFError("Cannot transform departure robot pose");
+        }
+        const auto gates = effectiveInversionTolerances();
+        accept_handoff = departure_validator(local_robot, local, gates.first, gates.second, short_departure);
+        if (!accept_handoff && short_departure &&
+          !retainRejectedShortDeparture(global_pose, local.poses.front(), gates.first))
+        {
+          // Do not enter a segment with no validated continuation, or wait forever
+          // inside the incoming tolerance zone. Preserve the cusp for stopped replanning.
+          RCLCPP_WARN(logger_, "[SHORT_DEPARTURE_GUARD] rejected; cusp retained for stopped replan");
+          throw nav2_core::FailedToMakeProgress("No validated short forward departure; stopped replan required");
+        }
+        if (!accept_handoff) {
+          RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+            "[DEPARTURE_GUARD] bounded forward search rejected; retaining reverse cusp");
+        }
+      }
+    }
+    if (accept_handoff) {
+      departure_approach_budget_.reset();
+      const auto & handed_off_cusp = global_plan_up_to_inversion_.poses.back();
+      const double handoff_dist = std::hypot(
+        global_pose.pose.position.x - handed_off_cusp.pose.position.x,
+        global_pose.pose.position.y - handed_off_cusp.pose.position.y);
+      const double handoff_yaw_err = angles::shortest_angular_distance(
+        tf2::getYaw(global_pose.pose.orientation), tf2::getYaw(handed_off_cusp.pose.orientation));
+      const auto [effective_xy_tol, relaxed_yaw_tol] = effectiveInversionTolerances();
+      const double robot_yaw = tf2::getYaw(global_pose.pose.orientation);
+      const double cusp_yaw = tf2::getYaw(handed_off_cusp.pose.orientation);
+      RCLCPP_INFO(logger_,
+        "[CUSP_HANDOFF_EVENT] cusp_idx=%u dist=%.4fm (xy_gate=%.4fm) "
+        "yaw_err=%.2fdeg (yaw_gate=%.2fdeg) seg_len=%.3fm "
+        "robot=(%.3f,%.3f,%.1fdeg) cusp=(%.3f,%.3f,%.1fdeg)",
+        inversion_locale_, handoff_dist, effective_xy_tol,
+        handoff_yaw_err * 180.0 / M_PI, relaxed_yaw_tol * 180.0 / M_PI,
+        current_segment_length_,
+        global_pose.pose.position.x, global_pose.pose.position.y, robot_yaw * 180.0 / M_PI,
+        handed_off_cusp.pose.position.x, handed_off_cusp.pose.position.y, cusp_yaw * 180.0 / M_PI);
+
+      // inversion_locale_ is the first pose AFTER the shared cusp. Keep the
+      // cusp as the start of the outgoing segment: dropping it removes that
+      // segment's first edge, and erases a one-edge reversal entirely.
+      prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_ - 1);
       global_plan_up_to_inversion_ = global_plan_;
+      inversion_source_offset_=global_source_offset_;
+      ++segment_generation_;segment_source_begin_=global_source_offset_;
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+      segment_source_end_=inversion_source_offset_+global_plan_up_to_inversion_.poses.size();
+      current_segment_direction_ = segmentDirection(global_plan_up_to_inversion_);
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
+      next_segment_length_ = nextSegmentLength(global_plan_, inversion_locale_);
       {
         const auto & cusp_pose = global_plan_up_to_inversion_.poses.back();
         double dx = global_pose.pose.position.x - cusp_pose.pose.position.x;
@@ -188,16 +395,102 @@ nav_msgs::msg::Path PathHandler::transformPath(
         getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
       transformed_plan = std::move(refreshed_plan);
       prunePlan(global_plan_up_to_inversion_, refreshed_bound);
+      did_handoff_ = true;
+      cusp_overrun_snapshot_written_ = false;
     }
   }
 
+  real_path_point_count_ = transformed_plan.poses.size();
+  // Optional recovery policy, not an assertion of global unreachability:
+  // once pruning consumes the real segment, continuing past its endpoint in
+  // the commanded gear can keep the displacement-only progress checker alive
+  // indefinitely. Stop and let the BT request a fresh plan. Never skip a cusp,
+  // issue an escape command, or apply this to the final goal.
+  if (replan_on_cusp_overrun_ && enforce_path_inversion_ &&
+    inversion_locale_ != 0u && current_segment_direction_ != 0 &&
+    (real_path_point_count_ == 1u ||
+    (preserve_cusp_direction_edge_ && real_path_point_count_ > 1u)))
+  {
+    const auto & cusp = global_plan_up_to_inversion_.poses.back().pose;
+    const double yaw = tf2::getYaw(cusp.orientation);
+    const double overrun = current_segment_direction_ * (
+      (global_pose.pose.position.x - cusp.position.x) * std::cos(yaw) +
+      (global_pose.pose.position.y - cusp.position.y) * std::sin(yaw));
+    const double gate = effectiveInversionTolerances().first;
+    // Edge preservation keeps a genuine tangent for the critics; it must not
+    // make a consumed endpoint appear unconsumed to this recovery policy.
+    // Use the same nearest-position criterion as pruning, without changing
+    // either the retained geometry or the cusp handoff tolerances.
+    const double cusp_distance = std::hypot(
+      global_pose.pose.position.x - cusp.position.x,
+      global_pose.pose.position.y - cusp.position.y);
+    const bool endpoint_consumed = real_path_point_count_ == 1u || std::all_of(
+      global_plan_up_to_inversion_.poses.begin(), global_plan_up_to_inversion_.poses.end(),
+      [&](const auto & p) {
+        return cusp_distance <= std::hypot(
+          global_pose.pose.position.x - p.pose.position.x,
+          global_pose.pose.position.y - p.pose.position.y);
+      });
+    if (endpoint_consumed && overrun > gate) {
+      const char * prefix = std::getenv("MPPI_STALL_SNAPSHOT_PATH");
+      if (prefix && *prefix && !cusp_overrun_snapshot_written_) {
+        cusp_overrun_snapshot_written_ = true;
+        try {
+          const auto stamp = rclcpp::Time(global_pose.header.stamp).nanoseconds();
+          std::ofstream out(std::string(prefix) + ".cusp_overrun." +
+            std::to_string(stamp) + ".json");
+          out.exceptions(std::ios::failbit | std::ios::badbit);
+          out << std::setprecision(17);
+          const auto pose = [&out](const geometry_msgs::msg::Pose & p) {
+              out << '[' << p.position.x << ',' << p.position.y << ',' <<
+                tf2::getYaw(p.orientation) << ']';
+            };
+          const auto path = [&out, &pose](const nav_msgs::msg::Path & p) {
+              out << '[';
+              for (size_t i = 0; i < p.poses.size(); ++i) {
+                if (i) {out << ',';}
+                pose(p.poses[i].pose);
+              }
+              out << ']';
+            };
+          out << "{\"stamp_ns\":" << stamp << ",\"frame\":" <<
+            std::quoted(global_pose.header.frame_id) << ",\"robot\":";
+          pose(global_pose.pose);
+          out << ",\"gear\":" << current_segment_direction_ <<
+            ",\"inversion_locale\":" << inversion_locale_ <<
+            ",\"current_segment_length\":" << current_segment_length_ <<
+            ",\"next_segment_length\":" << next_segment_length_ <<
+            ",\"gate\":" << gate << ",\"overrun\":" << overrun <<
+            ",\"xy_tolerance\":" << inversion_xy_tolerance_ <<
+            ",\"yaw_tolerance\":" << inversion_yaw_tolerance_ <<
+            ",\"bound_next\":" << (bound_handoff_by_next_segment_ ? "true" : "false") <<
+            ",\"real_path_point_count\":" << real_path_point_count_ <<
+            ",\"global_plan\":";
+          path(global_plan_);
+          out << ",\"active_plan\":";
+          path(global_plan_up_to_inversion_);
+          out << "}\n";
+          out.close();
+        } catch (const std::exception & e) {
+          RCLCPP_WARN(logger_, "Cusp overrun diagnostic capture failed: %s", e.what());
+        }
+      }
+      RCLCPP_WARN(logger_, "[CUSP_OVERRUN] consumed gear=%d overrun=%.4fm gate=%.4fm; "
+        "requesting stopped replanning without consuming cusp",
+        current_segment_direction_, overrun, gate);
+      // The consumed endpoint needs a new plan, not another evaluation of
+      // the same segment through ControllerServer's NoValidControl patience
+      // loop. Preserve the cusp and let the stopped recovery tree replan.
+      throw nav2_core::FailedToMakeProgress("Consumed cusp overrun requires a fresh plan");
+    }
+  }
   const double real_tgp_length = static_cast<double>(utils::pathLength(transformed_plan));
   double tgp_length = real_tgp_length;
   double cusp_dist = std::numeric_limits<double>::infinity();
   double ghost_heading = 0.0;
 
   // Layer 2 escape (notes/cusp_handoff_fix_plan.md): the handoff has been
-  // blocked long enough that extrapolating the consumed segment cannot help —
+  // blocked long enough that extrapolating the consumed segment cannot help â€”
   // extend along the NEXT segment's travel direction instead, so the optimizer
   // has a reachable objective that also reduces the blocking yaw error.
   double escape_heading_plan = 0.0;
@@ -232,7 +525,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
       // Path poses carry NOSE orientation; on a reversing post-cusp segment
       // that is travel+pi. appendGhostPath stamps the travel heading, which
       // would make PathAlignCritic(use_path_orientations) penalize exactly
-      // the reverse move the escape encourages — use the post-cusp pose's
+      // the reverse move the escape encourages â€” use the post-cusp pose's
       // own orientation instead (review finding 5, 2026-09-25).
       for (size_t i = before; i < transformed_plan.poses.size(); ++i) {
         transformed_plan.poses[i].pose.orientation = tb.pose.orientation;
@@ -255,7 +548,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
   {
     // Cap ghost extension proportional to remaining segment length.
     // For micro-segments (e.g. 11cm), extending by ghost_max_extension_ (70cm)
-    // overwhelms the actual maneuver — MPPI commits to a long trajectory in the
+    // overwhelms the actual maneuver â€” MPPI commits to a long trajectory in the
     // wrong direction.  Instead, extend by at most the real TGP length (doubling
     // the visible path) with a floor of ghost_point_spacing_ * 4 so even a fully
     // consumed segment gets a minimal gradient signal.
@@ -337,32 +630,42 @@ bool PathHandler::estimateGhostHeading(
   seed_arc_length = 0.0;
 
   // Single-point fallback: use the pose orientation as heading, but detect
-  // reverse segments and flip by 180°. The pose orientation is the robot's
+  // reverse segments and flip by 180Â°. The pose orientation is the robot's
   // nose direction; for reverse segments, travel direction is opposite.
   if (transformed_plan.poses.size() == 1) {
     double pose_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
 
-    // Peek at the active segment plan to detect reverse travel direction.
-    // Use global_plan_up_to_inversion_ which is pruned near the robot each tick,
-    // so its first points reflect the local travel direction. global_plan_ is NOT
-    // pruned each tick and may retain points from the segment start, giving a stale
-    // direction on long curved segments (>90° arcs).
-    if (global_plan_up_to_inversion_.poses.size() >= 2) {
-      const auto & p0 = global_plan_up_to_inversion_.poses[0].pose.position;
-      const auto & p1 = global_plan_up_to_inversion_.poses[1].pose.position;
-      double travel_dir = std::atan2(p1.y - p0.y, p1.x - p0.x);
-      if (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2) {
+    // Once pruning removes the active segment's last edge, recover its gear
+    // from the last real edge before the current cusp in the unpruned plan
+    // (advanced at every handoff). Compare displacement with the heading AT
+    // THAT EDGE, not an earlier heading on a long curve. Skip duplicate points
+    // and exclude future segments, whose gear may be opposite.
+    const auto & segment = global_plan_up_to_inversion_.poses.size() >= 2
+      ? global_plan_up_to_inversion_ : global_plan_;
+    const size_t end = (&segment == &global_plan_ && inversion_locale_ > 0u)
+      ? std::min<size_t>(inversion_locale_, segment.poses.size()) : segment.poses.size();
+    for (size_t i = end; i > 1; --i) {
+      const auto & p0 = segment.poses[i - 2].pose;
+      const auto & p1 = segment.poses[i - 1].pose;
+      const double dx = p1.position.x - p0.position.x;
+      const double dy = p1.position.y - p0.position.y;
+      if (std::hypot(dx, dy) < 1e-6) {
+        continue;
+      }
+      const double edge_yaw = tf2::getYaw(p0.orientation);
+      if (dx * std::cos(edge_yaw) + dy * std::sin(edge_yaw) < 0.0) {
         pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
         RCLCPP_INFO(logger_,
           "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
           tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
           pose_yaw * 180.0 / M_PI);
       }
+      break;
     }
 
     heading = pose_yaw;
     heading_variance = 0.0;
-    seed_arc_length = 0.0;  // Single point — no arc, but heading is valid
+    seed_arc_length = 0.0;  // Single point â€” no arc, but heading is valid
     return true;
   }
 
@@ -450,7 +753,13 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  // heading describes travel, whereas path orientations describe the chassis.
+  // A reverse continuation must keep the chassis facing opposite its travel;
+  // otherwise orientation-aware critics see a synthetic 180-degree turn.
+  const double chassis_heading = tf2::getYaw(next_pose.pose.orientation);
+  const bool reversing = std::cos(heading - chassis_heading) < 0.0;
+  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
+    heading + (reversing ? M_PI : 0.0));
 
   while (appended_length + 1e-4 < requested_extension) {
     const double step = std::min(
@@ -527,19 +836,32 @@ double PathHandler::getMaxCostmapDist()
 
 void PathHandler::setPath(const nav_msgs::msg::Path & plan)
 {
+  departure_approach_budget_.reset();
+  retained_departure_approach_.reset();
+  canonical_plan_=std::make_shared<const nav_msgs::msg::Path>(plan);
+  ++plan_generation_;++segment_generation_;path_binding_.reset();
+  global_source_offset_=0;inversion_source_offset_=0;segment_source_begin_=0;
   global_plan_ = plan;
+  cusp_overrun_snapshot_written_ = false;
   global_plan_up_to_inversion_ = global_plan_;
+  current_segment_direction_ = 0;
   if (enforce_path_inversion_) {
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+    current_segment_direction_ = segmentDirection(global_plan_up_to_inversion_);
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
+    next_segment_length_ = nextSegmentLength(global_plan_, inversion_locale_);
   }
+  segment_source_end_=global_plan_up_to_inversion_.poses.size();
 }
 
 nav_msgs::msg::Path & PathHandler::getPath() {return global_plan_;}
 
 void PathHandler::prunePlan(nav_msgs::msg::Path & plan, const PathIterator end)
 {
+  const auto removed=static_cast<size_t>(std::distance(plan.poses.begin(),end));
+  if(&plan==&global_plan_) {global_source_offset_+=removed;}
+  if(&plan==&global_plan_up_to_inversion_) {inversion_source_offset_+=removed;}
   plan.poses.erase(plan.poses.begin(), end);
 }
 
@@ -559,19 +881,8 @@ geometry_msgs::msg::PoseStamped PathHandler::getTransformedGoal(
   return transformed_goal;
 }
 
-bool PathHandler::isWithinInversionTolerances(
-  const geometry_msgs::msg::PoseStamped & robot_pose) const
+std::pair<double, double> PathHandler::effectiveInversionTolerances() const
 {
-  // Keep full path if we are within tolerance of the inversion pose
-  const auto last_pose = global_plan_up_to_inversion_.poses.back();
-  float distance = hypotf(
-    robot_pose.pose.position.x - last_pose.pose.position.x,
-    robot_pose.pose.position.y - last_pose.pose.position.y);
-
-  float angle_distance = angles::shortest_angular_distance(
-    tf2::getYaw(robot_pose.pose.orientation),
-    tf2::getYaw(last_pose.pose.orientation));
-
   // Relax yaw tolerance for micro-cusps: segments shorter than the threshold
   // are planner artifacts, not meaningful maneuvers. Demanding precise yaw
   // alignment on a 4cm segment overconstrains the Ackermann controller.
@@ -580,6 +891,20 @@ bool PathHandler::isWithinInversionTolerances(
   const double effective_yaw_tol = is_micro_cusp
     ? inversion_yaw_tolerance_ * micro_cusp_yaw_scale_
     : inversion_yaw_tolerance_;
+
+  // A fixed handoff radius can encompass an entire short segment, consuming
+  // its cusp before any of the required motion takes place. Restrict that
+  // radius to a fraction (inversion_segment_ratio_) of the segment length,
+  // floored at inversion_xy_floor_ to avoid deadband stalls on micro-segments.
+  // Longer segments retain the configured gate.
+  const double gate_segment_length = bound_handoff_by_next_segment_
+    ? std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
+  const double max_allowed = static_cast<double>(inversion_xy_tolerance_);
+  const double scaled_gate = inversion_segment_ratio_ * gate_segment_length;
+  const double floor_val = std::min<double>(inversion_xy_floor_, max_allowed);
+  const double effective_xy_tol = is_micro_cusp
+    ? max_allowed
+    : std::max<double>(floor_val, std::min<double>(max_allowed, scaled_gate));
 
   // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
   // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
@@ -596,19 +921,116 @@ bool PathHandler::isWithinInversionTolerances(
       effective_yaw_tol +
       handoff_yaw_relax_per_cycle_ * static_cast<double>(handoff_blocked_cycles_)));
 
-  bool result = distance <= inversion_xy_tolerance_ &&
+  return {effective_xy_tol, relaxed_yaw_tol};
+}
+
+bool PathHandler::retainRejectedShortDeparture(
+  const geometry_msgs::msg::PoseStamped & pose,
+  const geometry_msgs::msg::PoseStamped & local_cusp, double xy_gate)
+{
+  // Diagnostic policy bounds, not a reachability claim. The controller must
+  // separately validate the final emitted forecast against this stop margin.
+  const auto finite = [](double value) {
+      uint64_t bits; std::memcpy(&bits, &value, sizeof(bits));
+      return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+    };
+  const auto & cusp = global_plan_up_to_inversion_.poses.back().pose;
+  const double dx = pose.pose.position.x - cusp.position.x;
+  const double dy = pose.pose.position.y - cusp.position.y;
+  const double yaw = tf2::getYaw(cusp.orientation);
+  const double remaining = dx * std::cos(yaw) + dy * std::sin(yaw);
+  const double distance = std::hypot(dx,dy);
+  const double stop_margin = 0.1 * xy_gate;
+  const int64_t stamp = static_cast<int64_t>(pose.header.stamp.sec) * 1000000000LL +
+    pose.header.stamp.nanosec;
+  const auto reject = [&]() {
+      if (departure_approach_budget_) {departure_approach_budget_->exhausted = true;}
+      return false;
+    };
+  if (!finite(remaining) || !finite(distance) || !finite(xy_gate) ||
+    !(xy_gate > 0) || remaining <= stop_margin || stamp < 0 ||
+    current_segment_direction_ != -1) {return reject();}
+  if (!departure_approach_budget_) {
+    if (remaining <= 0.5 * xy_gate) {return false;}
+    departure_approach_budget_ = DepartureApproachBudget{
+      stamp, stamp, stamp, remaining, remaining, distance, remaining, 0, false};
+  }
+  auto & budget = *departure_approach_budget_;
+  if (budget.exhausted || stamp < budget.last_ns || stamp - budget.started_ns > 2000000000LL ||
+    ++budget.calls > 64 || budget.first_remaining - remaining > 0.5 * xy_gate ||
+    remaining > budget.best_remaining + 0.001 || distance > budget.best_distance + 0.001)
+  {
+    return reject();
+  }
+  if (stamp - budget.progress_ns >= 1000000000LL) {
+    if (budget.progress_remaining - remaining < 0.002) {return reject();}
+    budget.progress_ns = stamp; budget.progress_remaining = remaining;
+  }
+  budget.last_ns = stamp;
+  budget.best_remaining = std::min(budget.best_remaining,remaining);
+  budget.best_distance = std::min(budget.best_distance,distance);
+  auto stamped_cusp = local_cusp;
+  stamped_cusp.header.frame_id = costmap_->getGlobalFrameID();
+  stamped_cusp.header.stamp = pose.header.stamp;
+  retained_departure_approach_ = RetainedDepartureApproach{stamped_cusp,stop_margin};
+  return true;
+}
+
+bool PathHandler::isWithinInversionTolerances(
+  const geometry_msgs::msg::PoseStamped & robot_pose) const
+{
+  const auto last_pose = global_plan_up_to_inversion_.poses.back();
+  const float distance = hypotf(
+    robot_pose.pose.position.x - last_pose.pose.position.x,
+    robot_pose.pose.position.y - last_pose.pose.position.y);
+  const float angle_distance = angles::shortest_angular_distance(
+    tf2::getYaw(robot_pose.pose.orientation), tf2::getYaw(last_pose.pose.orientation));
+  const auto [effective_xy_tol, relaxed_yaw_tol] = effectiveInversionTolerances();
+  const bool is_micro_cusp = current_segment_length_ < micro_cusp_length_threshold_;
+
+  bool result = distance <= effective_xy_tol &&
          std::fabs(angle_distance) <= relaxed_yaw_tol;
 
-  if (!result && distance <= inversion_xy_tolerance_) {
+  // Optional forensic trace of the exact pose and gates used at this call.
+  // Sampled /tf or ground truth cannot establish that a handoff evaluation
+  // coincided with a brief gate entry. This trace never changes the decision.
+  const char * gate_trace = std::getenv("MPPI_CUSP_GATE_TRACE_PATH");
+  if (gate_trace && *gate_trace && distance <= 0.1f) {
+    try {
+      std::ofstream out(gate_trace, std::ios::app);
+      out.exceptions(std::ios::failbit | std::ios::badbit);
+      const auto pose = [&out](const geometry_msgs::msg::Pose & p) {
+          out << '[' << p.position.x << ',' << p.position.y << ',' <<
+            tf2::getYaw(p.orientation) << ']';
+        };
+      out << std::setprecision(17) << "{\"stamp_ns\":" <<
+        rclcpp::Time(robot_pose.header.stamp).nanoseconds() <<
+        ",\"frame\":" << std::quoted(robot_pose.header.frame_id) << ",\"robot\":";
+      pose(robot_pose.pose);
+      out << ",\"cusp\":";
+      pose(last_pose.pose);
+      out << ",\"distance_m\":" << distance <<
+        ",\"yaw_error_rad\":" << angle_distance <<
+        ",\"xy_gate_m\":" << effective_xy_tol <<
+        ",\"yaw_gate_rad\":" << relaxed_yaw_tol <<
+        ",\"blocked_cycles_before\":" << handoff_blocked_cycles_ <<
+        ",\"accepted\":" << (result ? "true" : "false") << "}\n";
+      out.close();
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(logger_, "Cusp gate diagnostic trace failed: %s", e.what());
+    }
+  }
+
+  if (!result && distance <= effective_xy_tol) {
     ++handoff_blocked_cycles_;
     // clock_ is only set by initialize(); guard so the tolerance check stays
-    // callable on a bare PathHandler (unit tests construct it without a node —
+    // callable on a bare PathHandler (unit tests construct it without a node â€”
     // dereferencing the null clock here was a SIGSEGV in path_handler_test).
     if (clock_) {
       RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
         "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) "
         "seg_len=%.3fm blocked=%u",
-        distance, inversion_xy_tolerance_,
+        distance, effective_xy_tol,
         std::fabs(angle_distance), relaxed_yaw_tol,
         is_micro_cusp ? " MICRO" : "",
         current_segment_length_, handoff_blocked_cycles_);
@@ -630,7 +1052,7 @@ bool PathHandler::isWithinInversionTolerances(
 bool PathHandler::computeEscapeHeading(double & heading) const
 {
   // Layer 2: after enough consecutive blocked cycles, offer the optimizer the
-  // FUTURE — the travel direction of the segment after the cusp — instead of
+  // FUTURE â€” the travel direction of the segment after the cusp â€” instead of
   // more extrapolation of the segment it has already consumed. Plan frame.
   if (handoff_escape_after_cycles_ <= 0 ||  // policy disabled
     inversion_locale_ == 0u ||
