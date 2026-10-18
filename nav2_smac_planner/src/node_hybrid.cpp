@@ -333,15 +333,21 @@ unsigned int HybridMotionTable::getClosestAngularBin(const double & theta)
   return bin < num_angle_quantization ? bin : 0u;
 }
 
-float HybridMotionTable::getAngleFromBin(const float & bin_coordinate)
+float HybridMotionTable::getAngleFromBin(const unsigned int & bin_idx)
 {
-  return bin_coordinate * bin_size;
+  return bin_idx * bin_size;
 }
-
 
 double HybridMotionTable::getAngle(const double & theta)
 {
-  return theta / bin_size;
+  // Analytic expansion can reach 2*pi, or round a nearby float bin to N.
+  // Normalize before the bin is used as a node/footprint index.
+  double wrapped = std::fmod(theta, 2.0 * M_PI);
+  if (wrapped < 0.0) {
+    wrapped += 2.0 * M_PI;
+  }
+  const float bin = static_cast<float>(wrapped / bin_size);
+  return bin >= num_angle_quantization ? 0.0 : bin;
 }
 
 NodeHybrid::NodeHybrid(const uint64_t index)
@@ -378,8 +384,10 @@ bool NodeHybrid::isNodeValid(
   const bool & traverse_unknown,
   GridCollisionChecker * collision_checker)
 {
-  // Cached validity belongs to the checked continuous pose, not only the
-  // graph index. Queue restoration can assign pose directly without setPose().
+  // A discretized graph index can be approached at multiple continuous poses.
+  // Cached footprint validity belongs to the checked pose, not just its index.
+  // Compare here because queue restoration and analytic expansion can also
+  // assign the public pose directly, bypassing setPose().
   if (!std::isnan(_cell_cost) && pose.x == _collision_checked_pose.x &&
     pose.y == _collision_checked_pose.y && pose.theta == _collision_checked_pose.theta)
   {
@@ -885,14 +893,17 @@ bool NodeHybrid::backtracePath(CoordinateVector & path)
   while (current_node->parent) {
     path.push_back(current_node->pose);
     // Convert angle to radians
-    path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
+    // Analytic expansion stores fractional bins. Converting through the
+    // integer-bin API truncates headings (e.g. -0.1 deg becomes -5 deg with
+    // 72 bins), even though the accompanying positions remain continuous.
+    path.back().theta *= NodeHybrid::motion_table.bin_size;
     current_node = current_node->parent;
   }
 
   // add the start pose
   path.push_back(current_node->pose);
   // Convert angle to radians
-  path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
+  path.back().theta *= NodeHybrid::motion_table.bin_size;
 
   return true;
 }

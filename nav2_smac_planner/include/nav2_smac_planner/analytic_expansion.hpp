@@ -46,16 +46,19 @@ public:
     AnalyticExpansionNode(
       NodePtr & node_in,
       Coordinates & initial_coords_in,
-      Coordinates & proposed_coords_in)
+      Coordinates & proposed_coords_in,
+      float cost_in)
     : node(node_in),
       initial_coords(initial_coords_in),
-      proposed_coords(proposed_coords_in)
+      proposed_coords(proposed_coords_in),
+      cost(cost_in)
     {
     }
 
     NodePtr node;
     Coordinates initial_coords;
     Coordinates proposed_coords;
+    float cost;
   };
 
   typedef std::vector<AnalyticExpansionNode> AnalyticExpansionNodes;
