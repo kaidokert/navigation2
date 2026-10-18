@@ -53,9 +53,10 @@ TEST(LiveRecorder,RejectCrossRunCommandsAndClearMotion)
     live.command({{"operation","arm"},{"run_id","first"}});
     const rec::Json motion={{"operation","motion"},{"run_id","first"},{"source","gazebo_ground_truth"},
       {"frame","world"},{"clock_epoch",0},{"window_s",1.0},{"stamp_ns",1000},
-      {"displacement_m",0.0},{"minimum_delivered_speed",.1}};
+      {"displacement_m",0.0},{"max_excursion_m",0.0},{"consumer_coverage",true},{"minimum_delivered_speed",.1}};
     live.command(motion);
     EXPECT_THROW(live.command({{"operation","close"},{"run_id","old"}}),std::invalid_argument);
+    auto unproven=motion;unproven["consumer_coverage"]=false;EXPECT_THROW(live.command(unproven),std::invalid_argument);
     auto bad=motion;bad["window_s"]=-1;EXPECT_THROW(live.command(bad),std::invalid_argument);
     live.command({{"operation","close"},{"run_id","first"}});
     live.command({{"operation","arm"},{"run_id","second"}});

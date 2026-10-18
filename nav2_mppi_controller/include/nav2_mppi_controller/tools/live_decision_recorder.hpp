@@ -63,7 +63,7 @@ public:
         {"worker_errors",worker_errors_.load()-error_start_},
         {"drop_start",drop_start_},{"error_start",error_start_}},nullptr});
     } else if (op == "motion") {
-      const auto displacement=input.at("displacement_m").get<double>();
+      const auto displacement=input.at("max_excursion_m").get<double>();
       const auto window=input.at("window_s").get<double>();
       if(input.at("source")!="gazebo_ground_truth" || input.at("frame")!="world" ||
         input.at("clock_epoch").get<int64_t>()<0 || !finite(displacement) || displacement<0 ||
@@ -71,7 +71,7 @@ public:
       {throw std::invalid_argument("invalid independent motion evidence");}
       if(!input.at("minimum_delivered_speed").is_null()) {
         const auto speed=input.at("minimum_delivered_speed").get<double>();
-        if(!finite(speed)||speed<0||speed>2) {throw std::invalid_argument("invalid delivered-speed evidence");}
+        if(!input.value("consumer_coverage",false)||!finite(speed)||speed<0||speed>2) {throw std::invalid_argument("invalid delivered-speed evidence");}
       }
       motion_ = input;
     } else {throw std::invalid_argument("unknown recorder command");}
@@ -115,7 +115,8 @@ public:
           const auto age=stamp-owner_->motion_.value("stamp_ns",int64_t(0));
           if (age>=0 && age<=250000000 && owner_->motion_.value("window_s",0.0)>=1.0 &&
             owner_->motion_.at("clock_epoch")==r.currentIdentity().at("clock_epoch")) {
-            r.independent_progress=owner_->motion_.at("displacement_m").get<double>();
+            r.independent_progress=owner_->motion_.at("max_excursion_m").get<double>();
+            owner_->context_["motion_evidence"]=owner_->motion_;
             if (!owner_->motion_.at("minimum_delivered_speed").is_null()) {
               r.delivered_speed=owner_->motion_.at("minimum_delivered_speed").get<double>();
             }
