@@ -93,7 +93,7 @@ public:
     * @brief Score trajectories by the set of loaded critic functions
     * @param CriticData Struct of necessary information to pass to the critic functions
     */
-  void evalTrajectoriesScores(CriticData & data) const;
+  void evalTrajectoriesScores(CriticData & data, bool publish_stats = true) const;
 
 protected:
   /**

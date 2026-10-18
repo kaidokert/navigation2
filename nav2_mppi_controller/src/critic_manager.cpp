@@ -95,12 +95,13 @@ std::string CriticManager::getFullName(const std::string & name)
 }
 
 void CriticManager::evalTrajectoriesScores(
-  CriticData & data) const
+  CriticData & data, bool publish_stats) const
 {
+  const bool collect_stats = publish_critics_stats_ && publish_stats;
   std::unique_ptr<nav2_critics_msgs::msg::CriticsStats> stats_msg;
   // Per-critic cost deltas for each trajectory (to extract best trajectory costs)
   std::vector<xt::xtensor<float, 1>> per_critic_deltas;
-  if (publish_critics_stats_) {
+  if (collect_stats) {
     stats_msg = std::make_unique<nav2_critics_msgs::msg::CriticsStats>();
     stats_msg->critics.reserve(critic_names_.size());
     stats_msg->changed.reserve(critic_names_.size());
@@ -115,13 +116,13 @@ void CriticManager::evalTrajectoriesScores(
     }
 
     xt::xtensor<float, 1> costs_before;
-    if (publish_critics_stats_) {
+    if (collect_stats) {
       costs_before = data.costs;
     }
 
     critics_[i]->score(data);
 
-    if (publish_critics_stats_) {
+    if (collect_stats) {
       auto delta = data.costs - costs_before;
       stats_msg->critics.push_back(critic_names_[i]);
       float costs_sum = static_cast<float>(xt::sum(delta)());
@@ -131,7 +132,7 @@ void CriticManager::evalTrajectoriesScores(
     }
   }
 
-  if (publish_critics_stats_ && critics_effect_pub_ && stats_msg) {
+  if (collect_stats && critics_effect_pub_ && stats_msg) {
     // Find the best (lowest total cost) trajectory
     if (data.costs.size() > 0) {
       size_t best_idx = 0;
