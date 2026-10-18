@@ -232,6 +232,19 @@ protected:
   getControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
 
   /**
+   * @brief Check the actual emitted control sequence using the measured state.
+   */
+  bool controlSequenceCollisionFree() const;
+
+  /**
+   * @brief Apply final constraints and veto colliding output before conversion.
+   */
+  geometry_msgs::msg::TwistStamped
+  getValidatedControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
+
+  bool controlSequenceFinite() const;
+
+  /**
    * @brief Whether the motion model is holonomic
    * @return Bool if holonomic to populate `y` axis of state
    */
