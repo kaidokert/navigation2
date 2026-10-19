@@ -422,7 +422,7 @@ TEST(ControllerStateTransitionTest, LongEntryCertificateSurvivesActualFeedbackRe
   controller.deactivate();controller.cleanup();cm->on_cleanup(lifecycle);
 }
 
-TEST(ControllerStateTransitionTest, RetainedApproachChecksFinalCommandBeforeReturningIt)
+void exerciseRetainedApproachFinalCommand(bool recorded_collision)
 {
   namespace f = retained_departure_fixture;
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("retained_command");
@@ -449,6 +449,11 @@ TEST(ControllerStateTransitionTest, RetainedApproachChecksFinalCommandBeforeRetu
   cm->on_configure(lifecycle);
   cm->getCostmap()->resizeMap(150, 150, 0.02, f::origin[0], f::origin[1]);
   std::copy(f::grid.begin(), f::grid.end(), cm->getCostmap()->getCharMap());
+  // Clearing this raster is a labelled synthetic control: it isolates the
+  // retained-command envelope from the independent full-horizon collision veto.
+  if (!recorded_collision) {
+    std::fill_n(cm->getCostmap()->getCharMap(), 22500, nav2_costmap_2d::FREE_SPACE);
+  }
   HandoffMemoryController controller;
   controller.configure(node, "mppi", cm->getTfBuffer(), cm);
   controller.activate();
@@ -484,13 +489,27 @@ TEST(ControllerStateTransitionTest, RetainedApproachChecksFinalCommandBeforeRetu
   // not be returned merely because PathHandler allowed a bounded approach.
   controller.seedCommand(-0.3f, -0.3f / 0.401f);
   robot.header.stamp = node->now();
-  try {
-    controller.computeVelocityCommands(robot, speed, {});
-    ADD_FAILURE() << "Unsafe final command escaped the retained approach envelope";
-  } catch (const nav2_core::FailedToMakeProgress & error) {
-    EXPECT_NE(std::string(error.what()).find("approach command exceeds"), std::string::npos);
+  if (recorded_collision) {
+    EXPECT_THROW(controller.computeVelocityCommands(robot, speed, {}), nav2_core::NoValidControl);
+  } else {
+    try {
+      controller.computeVelocityCommands(robot, speed, {});
+      ADD_FAILURE() << "Unsafe final command escaped the retained approach envelope";
+    } catch (const nav2_core::FailedToMakeProgress & error) {
+      EXPECT_NE(std::string(error.what()).find("approach command exceeds"), std::string::npos);
+    }
   }
   controller.deactivate();controller.cleanup();cm->on_cleanup(lifecycle);
+}
+
+TEST(ControllerStateTransitionTest, RetainedApproachChecksFinalCommandBeforeReturningIt)
+{
+  exerciseRetainedApproachFinalCommand(false);
+}
+
+TEST(ControllerStateTransitionTest, RetainedApproachCollisionVetoPrecedesEnvelope)
+{
+  exerciseRetainedApproachFinalCommand(true);
 }
 
 void exerciseHandoffMemory(bool clear_history, bool steering_feedback = false)
@@ -586,6 +605,22 @@ TEST(ControllerStateTransitionTest, SteeringFeedbackFailsClosedOnMissingStaleOrI
   node->declare_parameter("test.critics", std::vector<std::string>{});
   node->declare_parameter("test.AckermannConstraints.predict_steering_conditioning", true);
   auto costmap_ros = getDummyCostmapRos();
+  const double origin = obstacle_case == 2 ? 0.0 : -2.5;
+  costmap_ros->getCostmap()->resizeMap(500, 500, 0.01, origin, origin);
+  std::fill_n(costmap_ros->getCostmap()->getCharMap(), 250000, nav2_costmap_2d::FREE_SPACE);
+  if (obstacle_case == 1 || obstacle_case == 3) {
+    unsigned int mx, my;
+    const double obstacle_x = obstacle_case == 1 ? 0.30 : 0.17;
+    ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(obstacle_x, 0.0, mx, my));
+    if (obstacle_case == 1) {
+      costmap_ros->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    } else {
+      // A wall outside the current body, but within the held-creep forecast.
+      for (unsigned int y = 0; y < 500; ++y) {
+        costmap_ros->getCostmap()->setCost(mx, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+      }
+    }
+  }
   auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   HandoffMemoryController controller;
   controller.configure(node, "test", tf, costmap_ros);
@@ -712,13 +747,14 @@ TEST(ControllerStateTransitionTest, ControllerNotFail)
   controller->cleanup();
 }
 
-TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
+void exerciseStandstillPresteer(int obstacle_case)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("presteer_test_node");
   node->declare_parameter("controller_frequency", 20.0);
   node->declare_parameter("test.model_dt", 0.05);
   node->declare_parameter("test.motion_model", std::string("Ackermann"));
   node->declare_parameter("test.critics", std::vector<std::string>{});
+  node->declare_parameter("test.iteration_count", 0);
   node->declare_parameter("test.enforce_path_inversion", true);
   node->declare_parameter("test.inversion_xy_tolerance", 0.20);
   node->declare_parameter("test.inversion_yaw_tolerance", 0.35);
@@ -758,6 +794,13 @@ TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
   robot_pose.header = plan.header;
   auto velocity = getDummyTwist();
 
+  if (obstacle_case != 0) {
+    EXPECT_THROW(controller.computeVelocityCommands(robot_pose, velocity, nullptr), nav2_core::NoValidControl);
+    controller.deactivate();
+    controller.cleanup();
+    return;
+  }
+
   // On first call reaching cusp: handoff fires and pre-steer engages because target steering != -0.40 rad
   auto cmd = controller.computeVelocityCommands(robot_pose, velocity, nullptr);
   EXPECT_TRUE(controller.isPresteering());
@@ -776,4 +819,24 @@ TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
 
   controller.deactivate();
   controller.cleanup();
+}
+
+TEST(ControllerStateTransitionTest, StandstillPresteerOnHandoff)
+{
+  exerciseStandstillPresteer(0);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRejectsOccupiedCurrentFootprint)
+{
+  exerciseStandstillPresteer(1);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRejectsOutOfMapFootprint)
+{
+  exerciseStandstillPresteer(2);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRejectsCollisionInHeldCommandForecast)
+{
+  exerciseStandstillPresteer(3);
 }
