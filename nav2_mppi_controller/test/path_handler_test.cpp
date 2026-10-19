@@ -978,6 +978,9 @@ TEST(PathHandlerTests, RecordedIncomingHandoffLeavesMicroReverseEndpointAhead)
   node->declare_parameter("dummy.enforce_path_inversion",true);
   node->declare_parameter("dummy.inversion_xy_tolerance",0.0676);
   node->declare_parameter("dummy.inversion_yaw_tolerance",0.3);
+  // Isolate the adjacent-distance policy at the unchanged captured pose.
+  // The later default base-yaw cap (0.20) would reject both variants first.
+  node->declare_parameter("dummy.inversion_yaw_base",0.3);
   node->declare_parameter("dummy.bound_handoff_by_next_segment",bound);
   auto cm=makeConfiguredCostmapRos();ParametersHandler params(node);PathHandlerWrapper handler;
   handler.initialize(node,"dummy",cm,cm->getTfBuffer(),&params);
@@ -1864,6 +1867,120 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.06, 0, 0)));
   // Robot at x = 0.08 (dist = 0.04m <= 0.05m gate): accepted
   EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0.08, 0, 0)));
+}
+
+TEST(PathHandlerTests, StructuralHandoffBoundSurvivesMicroAllowanceAndDeadbandFloor)
+{
+  for (int gear : {-1, 1}) {
+    for (bool micro : {false, true}) {
+      auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("structural_gate_bound");
+      node->declare_parameter("dummy.enforce_path_inversion", true);
+      node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+      node->declare_parameter("dummy.micro_cusp_length_threshold", micro ? 0.25 : 0.001);
+      node->declare_parameter("dummy.inversion_xy_floor", 0.05);
+      auto cm = makeConfiguredCostmapRos();
+      ParametersHandler params(node);
+      PathHandlerWrapper handler;
+      handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+      nav_msgs::msg::Path plan;
+      plan.header.frame_id = "odom";
+      plan.poses = {makePose(0, 0, 0), makePose(gear * 0.01, 0, 0),
+        makePose(gear * 0.02, 0, 0), makePose(gear * 0.01, 0, 0)};
+      handler.setPath(plan);
+      ASSERT_EQ(handler.getActiveCuspDirection(), gear);
+      const auto gates = handler.getCuspTolerances();
+      ASSERT_TRUE(gates.has_value());
+      EXPECT_NEAR(gates->first, 0.01, 1e-6);
+      EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0, 0, 0)));
+      EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(gear * 0.015, 0, 0)));
+    }
+  }
+}
+
+TEST(PathHandlerTests, ClosestApproachCannotBankAnEarlierInsideGateVisit)
+{
+  for (int gear : {-1, 1}) {
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("inside_gate_history");
+    node->declare_parameter("dummy.enforce_path_inversion", true);
+    node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+    auto cm = makeConfiguredCostmapRos();
+    ParametersHandler params(node);
+    PathHandlerWrapper handler;
+    handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+    nav_msgs::msg::Path plan;
+    plan.header.frame_id = "odom";
+    plan.poses = {makePose(0, 0, 0), makePose(gear * 0.5, 0, 0),
+      makePose(gear, 0, 0), makePose(gear * 0.8, 0, 0)};
+    handler.setPath(plan);
+    // Querying the predicate alone does not consume the cusp. Its history
+    // must not turn a later pose outside the ordinary gate into a handoff.
+    EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(gear, 0, 0)));
+    EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(gear * 0.84, 0, 0)));
+    EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(gear * 10.0, 0, 0)));
+  }
+}
+
+TEST(PathHandlerTests, ClosestApproachRequiresCurrentProximityAndStructuralBound)
+{
+  for (int gear : {-1, 1}) {
+    for (bool adjacent_bound : {false, true}) {
+      auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("current_near_miss_bound");
+      node->declare_parameter("dummy.enforce_path_inversion", true);
+      node->declare_parameter("dummy.inversion_xy_tolerance", 0.15);
+      node->declare_parameter("dummy.bound_handoff_by_next_segment", adjacent_bound);
+      auto cm = makeConfiguredCostmapRos();
+      ParametersHandler params(node);
+      PathHandlerWrapper handler;
+      handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+      nav_msgs::msg::Path plan;
+      plan.header.frame_id = "odom";
+      const double outgoing = adjacent_bound ? 0.10 : 0.20;
+      plan.poses = {makePose(0, 0, 0), makePose(gear * 0.5, 0, 0),
+        makePose(gear, 0, 0), makePose(gear * (1.0 - outgoing), 0, 0)};
+      handler.setPath(plan);
+      const double gate = adjacent_bound ? 0.05 : 0.15;
+      EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(
+          makePose(gear * (1.0 - gate - 0.005), 0, 0)));
+      if (adjacent_bound) {
+        // The two-centimetre near-miss allowance cannot enlarge a structural
+        // half-leg cap, even while both poses are close to the ordinary gate.
+        EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(
+            makePose(gear * (1.0 - gate - 0.015), 0, 0)));
+      } else {
+        EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(
+            makePose(gear * (1.0 - gate - 0.015), 0, 0)));
+        EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(
+            makePose(gear * (1.0 - gate - 0.030), 0, 0)));
+      }
+    }
+  }
+}
+
+TEST(PathHandlerTests, DefaultBaseYawGateRejectsRecordedIncomingHeading)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("recorded_default_yaw_gate");
+  node->declare_parameter("dummy.enforce_path_inversion", true);
+  node->declare_parameter("dummy.inversion_xy_tolerance", 0.0676);
+  node->declare_parameter("dummy.inversion_yaw_tolerance", 0.30);
+  node->declare_parameter("dummy.handoff_yaw_relax_per_cycle", 0.0);
+  auto cm = makeConfiguredCostmapRos();
+  ParametersHandler params(node);
+  PathHandlerWrapper handler;
+  handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "odom";
+  const double cusp_yaw = -1.7808306852923794;
+  const double incoming_length = 1.0;
+  plan.poses = {makePose(-incoming_length * std::cos(cusp_yaw),
+      -incoming_length * std::sin(cusp_yaw), cusp_yaw), makePose(0, 0, cusp_yaw),
+    makePose(-0.10 * std::cos(cusp_yaw), -0.10 * std::sin(cusp_yaw), cusp_yaw)};
+  handler.setPath(plan);
+  ASSERT_EQ(handler.getActiveCuspDirection(), 1);
+  const auto gates = handler.getCuspTolerances();
+  ASSERT_TRUE(gates.has_value());
+  EXPECT_NEAR(gates->second, 0.20, 1e-6);
+  EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0, 0, -1.5681685397934615)));
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(makePose(0, 0, cusp_yaw + 0.19)));
 }
 
 TEST(PathHandlerTests, ClosestApproachHandoffNearMiss)

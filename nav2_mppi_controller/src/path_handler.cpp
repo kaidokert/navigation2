@@ -947,9 +947,13 @@ std::pair<double, double> PathHandler::effectiveInversionTolerances() const
   const double max_allowed = static_cast<double>(inversion_xy_tolerance_);
   const double scaled_gate = inversion_segment_ratio_ * gate_segment_length;
   const double floor_val = std::min<double>(inversion_xy_floor_, max_allowed);
-  const double effective_xy_tol = is_micro_cusp
+  const double policy_xy_tol = is_micro_cusp
     ? max_allowed
     : std::max<double>(floor_val, std::min<double>(max_allowed, scaled_gate));
+  // A deadband floor or micro-cusp allowance must not cover the entire
+  // required maneuver. The structural bound also applies to the outgoing
+  // segment when adjacent-segment protection is explicitly enabled.
+  const double effective_xy_tol = std::min(policy_xy_tol, 0.5 * gate_segment_length);
 
   // Layer 1 (cusp handoff deadlock, notes/cusp_handoff_fix_plan.md): each
   // consecutive blocked cycle (xy met, yaw not) widens the yaw gate toward a
@@ -1045,8 +1049,17 @@ bool PathHandler::isWithinInversionTolerances(
   // accept handoff so non-holonomic near misses do not stall or reverse into obstacles.
   constexpr float closest_approach_margin = 0.02f;
   constexpr float closest_approach_delta = 0.005f;
+  const double gate_segment_length = bound_handoff_by_next_segment_
+    ? std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
+  const double near_miss_limit = std::min(
+    effective_xy_tol + closest_approach_margin, 0.5 * gate_segment_length);
+  // Only an outside-gate near miss is eligible. A previous visit inside the
+  // gate cannot authorize a later distant handoff, and the escape allowance
+  // must not bypass the same structural bound as the ordinary gate.
   const bool closest_approach_handoff = within_yaw &&
-    (min_cusp_distance_ <= effective_xy_tol + closest_approach_margin) &&
+    (min_cusp_distance_ > effective_xy_tol) &&
+    (min_cusp_distance_ <= near_miss_limit) &&
+    (distance <= near_miss_limit) &&
     (distance > min_cusp_distance_ + closest_approach_delta);
 
   bool result = (within_xy && within_yaw) || closest_approach_handoff;
