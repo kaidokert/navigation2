@@ -490,7 +490,13 @@ void exerciseRetainedApproachFinalCommand(bool recorded_collision)
   controller.seedCommand(-0.3f, -0.3f / 0.401f);
   robot.header.stamp = node->now();
   if (recorded_collision) {
-    EXPECT_THROW(controller.computeVelocityCommands(robot, speed, {}), nav2_core::NoValidControl);
+    try {
+      controller.computeVelocityCommands(robot, speed, {});
+      ADD_FAILURE() << "Colliding retained forecast escaped the final veto";
+    } catch (const nav2_core::NoValidControl & error) {
+      EXPECT_NE(std::string(error.what()).find("Final MPPI control sequence is not collision-free"),
+        std::string::npos);
+    }
   } else {
     try {
       controller.computeVelocityCommands(robot, speed, {});
@@ -794,8 +800,18 @@ void exerciseStandstillPresteer(int obstacle_case)
   robot_pose.header = plan.header;
   auto velocity = getDummyTwist();
 
-  if (obstacle_case != 0) {
-    EXPECT_THROW(controller.computeVelocityCommands(robot_pose, velocity, nullptr), nav2_core::NoValidControl);
+  const auto expect_presteer_veto = [&]() {
+      try {
+        controller.computeVelocityCommands(robot_pose, velocity, nullptr);
+        ADD_FAILURE() << "Unsafe presteer command escaped final forecast validation";
+      } catch (const nav2_core::NoValidControl & error) {
+        EXPECT_NE(std::string(error.what()).find("Presteer command forecast is not collision-free"),
+          std::string::npos);
+        EXPECT_TRUE(controller.isPresteering());
+      }
+    };
+  if (obstacle_case > 0 && obstacle_case < 4) {
+    expect_presteer_veto();
     controller.deactivate();
     controller.cleanup();
     return;
@@ -807,6 +823,15 @@ void exerciseStandstillPresteer(int obstacle_case)
   // Presteer commands sub-deadband reverse creep (-0.038 m/s)
   EXPECT_NEAR(cmd.twist.linear.x, -0.038, 1e-4);
   EXPECT_NE(cmd.twist.angular.z, 0.0);
+  if (obstacle_case == 4) {
+    unsigned int mx, my;
+    ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(0.30, 0.0, mx, my));
+    costmap_ros->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    expect_presteer_veto();
+    controller.deactivate();
+    controller.cleanup();
+    return;
+  }
 
   // Update steering feedback to match target angle
   feedback->header.stamp = node->now();
@@ -839,4 +864,9 @@ TEST(ControllerStateTransitionTest, PresteerRejectsOutOfMapFootprint)
 TEST(ControllerStateTransitionTest, PresteerRejectsCollisionInHeldCommandForecast)
 {
   exerciseStandstillPresteer(3);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRevalidatesEachReturnAgainstCurrentMap)
+{
+  exerciseStandstillPresteer(4);
 }
