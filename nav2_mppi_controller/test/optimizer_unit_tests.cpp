@@ -1977,6 +1977,7 @@ public:
     motor_deadband_floor_ = 0.050f;
     motor_deadband_approach_radius_ = 0.15f;
     motor_deadband_terminal_radius_ = 0.04f;
+    goal_.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
 
     // 1a. Intermediate forward cusp within approach radius (10 cm away) -> floored forward
     setActiveCuspDirection(1);
@@ -2101,7 +2102,7 @@ public:
     path_direction_ = -1;
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
-    state_.pose.pose.orientation = geometry_msgs::msg::Quaternion(); // yaw = 0.0
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
     path_.yaws.fill(0.0f);
     goal_.position.x = 0.10; // in front
     goal_.position.y = 0.0;
@@ -2115,14 +2116,14 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.180f, 1e-4);
 
-    // 10. Final segment with goal abeam (|d_long| <= d_long_deadband = 0.08m)
+    // 10. Final segment with goal abeam (|d_long| <= d_long_deadband = 0.02m)
     // -> Follows optimizer's commanded sign without chatter or gear flipping
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
-    state_.pose.pose.orientation = geometry_msgs::msg::Quaternion(); // yaw = 0.0
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
     path_.yaws.fill(0.0f);
     goal_.position.x = 0.0;
-    goal_.position.y = 0.10; // 10 cm directly abeam (d_long = 0.0 <= 0.08m deadband)
+    goal_.position.y = 0.10; // 10 cm directly abeam (d_long = 0.0 <= 0.02m deadband)
 
     // 10a. Commanded forward creep (+0.015f) -> floored to +0.050f
     control_sequence_.vx.fill(0.015f);
@@ -2138,6 +2139,59 @@ public:
     control_sequence_.vx.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.0f, 1e-4);
+
+    // 11. Neither stale forward/reverse direction nor the unknown-direction fallback
+    // may turn an abeam zero/noise command into propulsion. Include both closed
+    // longitudinal boundaries and both closed command-noise boundaries.
+    for (const int stale_direction : {-1, 0, 1}) {
+      path_direction_ = stale_direction;
+      for (const float longitudinal : {-0.02f, 0.0f, 0.02f}) {
+        goal_.position.x = longitudinal;
+        for (const float noise : {-0.005f, 0.0f, 0.005f}) {
+          SCOPED_TRACE(testing::Message() << "stale_direction=" << stale_direction <<
+            " longitudinal=" << longitudinal << " noise=" << noise);
+          control_sequence_.vx.fill(noise);
+          cmd = getControlFromSequenceAsTwistWrapper();
+          EXPECT_NEAR(cmd.twist.linear.x, noise, 1e-6);
+        }
+      }
+    }
+
+    // 12. The narrow abeam exception must not release the existing floor when
+    // a zero/noise command has an unambiguous target ahead or behind.
+    for (const float longitudinal : {-0.0201f, 0.0201f}) {
+      goal_.position.x = longitudinal;
+      for (const float noise : {-0.005f, 0.0f, 0.005f}) {
+        SCOPED_TRACE(testing::Message() << "outside band longitudinal=" << longitudinal <<
+          " noise=" << noise);
+        control_sequence_.vx.fill(noise);
+        cmd = getControlFromSequenceAsTwistWrapper();
+        EXPECT_NEAR(cmd.twist.linear.x, longitudinal > 0.0f ? 0.050f : -0.050f, 1e-6);
+      }
+    }
+
+    // 13. Purposeful commands just outside the noise band still receive a
+    // sign-preserving floor throughout the abeam band, including its boundaries.
+    for (const float longitudinal : {-0.02f, 0.0f, 0.02f}) {
+      goal_.position.x = longitudinal;
+      for (const float purposeful : {-0.0051f, 0.0051f}) {
+        SCOPED_TRACE(testing::Message() << "abeam longitudinal=" << longitudinal <<
+          " purposeful=" << purposeful);
+        control_sequence_.vx.fill(purposeful);
+        cmd = getControlFromSequenceAsTwistWrapper();
+        EXPECT_NEAR(cmd.twist.linear.x, purposeful > 0.0f ? 0.050f : -0.050f, 1e-6);
+      }
+    }
+
+    // 14. A purposeful command away from the target just outside the abeam
+    // band must be preserved rather than amplified or reversed by the floor.
+    for (const float longitudinal : {-0.0201f, 0.0201f}) {
+      goal_.position.x = longitudinal;
+      const float purposeful = longitudinal > 0.0f ? -0.015f : 0.015f;
+      control_sequence_.vx.fill(purposeful);
+      cmd = getControlFromSequenceAsTwistWrapper();
+      EXPECT_NEAR(cmd.twist.linear.x, purposeful, 1e-6);
+    }
   }
 };
 

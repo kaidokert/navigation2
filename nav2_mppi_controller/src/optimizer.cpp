@@ -3298,13 +3298,15 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
               effective_direction = (d_long <= d_long_deadband) ? -1 : 0;
             } else {
               // Commanded standstill or noise (|vx| <= 0.005):
-              // If target is clearly ahead/behind, apply floor toward target; if abeam, preserve path direction.
+              // If target is clearly ahead/behind, apply floor toward target. When it is
+              // abeam, preserve the optimizer's zero/noise command: a stale path direction
+              // must not create propulsion or prevent arrest for the goal checker.
               if (d_long > d_long_deadband) {
                 effective_direction = 1;
               } else if (d_long < -d_long_deadband) {
                 effective_direction = -1;
               } else {
-                effective_direction = (path_direction_ != 0) ? path_direction_ : 1;
+                effective_direction = 0;
               }
             }
           }
