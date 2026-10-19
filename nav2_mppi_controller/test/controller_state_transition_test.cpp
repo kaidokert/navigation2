@@ -605,22 +605,6 @@ TEST(ControllerStateTransitionTest, SteeringFeedbackFailsClosedOnMissingStaleOrI
   node->declare_parameter("test.critics", std::vector<std::string>{});
   node->declare_parameter("test.AckermannConstraints.predict_steering_conditioning", true);
   auto costmap_ros = getDummyCostmapRos();
-  const double origin = obstacle_case == 2 ? 0.0 : -2.5;
-  costmap_ros->getCostmap()->resizeMap(500, 500, 0.01, origin, origin);
-  std::fill_n(costmap_ros->getCostmap()->getCharMap(), 250000, nav2_costmap_2d::FREE_SPACE);
-  if (obstacle_case == 1 || obstacle_case == 3) {
-    unsigned int mx, my;
-    const double obstacle_x = obstacle_case == 1 ? 0.30 : 0.17;
-    ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(obstacle_x, 0.0, mx, my));
-    if (obstacle_case == 1) {
-      costmap_ros->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
-    } else {
-      // A wall outside the current body, but within the held-creep forecast.
-      for (unsigned int y = 0; y < 500; ++y) {
-        costmap_ros->getCostmap()->setCost(mx, y, nav2_costmap_2d::LETHAL_OBSTACLE);
-      }
-    }
-  }
   auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   HandoffMemoryController controller;
   controller.configure(node, "test", tf, costmap_ros);
@@ -764,6 +748,22 @@ void exerciseStandstillPresteer(int obstacle_case)
   node->declare_parameter("test.presteer_angle_tolerance", 0.05);
 
   auto costmap_ros = getDummyCostmapRos();
+  const double origin = obstacle_case == 2 ? 0.0 : -2.5;
+  costmap_ros->getCostmap()->resizeMap(500, 500, 0.01, origin, origin);
+  std::fill_n(costmap_ros->getCostmap()->getCharMap(), 250000, nav2_costmap_2d::FREE_SPACE);
+  if (obstacle_case == 1 || obstacle_case == 3) {
+    unsigned int mx, my;
+    const double obstacle_x = obstacle_case == 1 ? 0.30 : 0.17;
+    ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(obstacle_x, 0.0, mx, my));
+    if (obstacle_case == 1) {
+      costmap_ros->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    } else {
+      // A wall outside the current body, but within the held-creep forecast.
+      for (unsigned int y = 0; y < 500; ++y) {
+        costmap_ros->getCostmap()->setCost(mx, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+      }
+    }
+  }
   auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   HandoffMemoryController controller;
   controller.configure(node, "test", tf, costmap_ros);
