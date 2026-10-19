@@ -57,7 +57,8 @@ public:
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
       while (!executor_->is_spinning()) {
         if (std::chrono::steady_clock::now() >= deadline) {
-          throw std::runtime_error("Native Smac test costmap executor did not start in two seconds");
+          throw std::runtime_error(
+            "Native Smac test costmap executor did not start in two seconds");
         }
         std::this_thread::yield();
       }

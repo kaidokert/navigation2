@@ -239,7 +239,7 @@ TEST(collision_footprint, continuous_position_matches_published_world_footprint)
     const double half_x = right_obstacle ? 0.12 : 0.09;
     nav2_costmap_2d::Footprint footprint;
     for (const auto & xy : std::vector<std::pair<double, double>>{
-        {-half_x, -0.04}, {half_x, -0.04}, {half_x, 0.04}, {-half_x, 0.04}})
+      {-half_x, -0.04}, {half_x, -0.04}, {half_x, 0.04}, {-half_x, 0.04}})
     {
       geometry_msgs::msg::Point p; p.x = xy.first; p.y = xy.second; footprint.push_back(p);
     }

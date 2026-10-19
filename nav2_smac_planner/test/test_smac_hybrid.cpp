@@ -13,6 +13,8 @@
 // limitations under the License. Reserved.
 
 #include <math.h>
+#include <cstdio>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,6 +28,8 @@
 #include "nav2_smac_planner/node_hybrid.hpp"
 #include "nav2_smac_planner/a_star.hpp"
 #include "nav2_smac_planner/collision_checker.hpp"
+#include "nav2_smac_planner/start_failure_snapshot.hpp"
+#include "nav2_smac_planner/successful_plan_snapshot.hpp"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
 #include "nav2_smac_planner/smac_planner_2d.hpp"
 
@@ -172,11 +176,6 @@ TEST(SmacTest, test_smac_se2_reconfigure)
 }
 
 
-#include <fstream>
-#include <cstdio>
-#include "nav2_smac_planner/start_failure_snapshot.hpp"
-#include "nav2_smac_planner/successful_plan_snapshot.hpp"
-
 TEST(SmacTest, SuccessfulPlanSnapshotIsOptionalAtomicAndBounded)
 {
   nav2_costmap_2d::Costmap2D grid(3, 2, 0.02, -1.0, 2.0, 0);
@@ -200,7 +199,8 @@ TEST(SmacTest, SuccessfulPlanSnapshotIsOptionalAtomicAndBounded)
     ASSERT_TRUE(nav2_smac_planner::writeSuccessfulPlanSnapshot(
       prefix, sequence, 42000000000, grid, plan, start, goal, footprint, 72, false, false));
     std::ifstream input(file);
-    const std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const std::string text((std::istreambuf_iterator<char>(input)),
+      std::istreambuf_iterator<char>());
     EXPECT_NE(text.find("\"sequence\":" + std::to_string(sequence)), std::string::npos);
     EXPECT_NE(text.find("\"plan_world_xy_quaternion\":[[1.25,0,0,0,0,1]]"), std::string::npos);
     EXPECT_NE(text.find("\"data\":[0,0,0,0,0,254]"), std::string::npos);

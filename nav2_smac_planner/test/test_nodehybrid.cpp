@@ -47,7 +47,7 @@ TEST(NodeHybridTest, changed_continuous_pose_invalidates_collision_cache)
   checker.setCostmap(&grid);
   nav2_costmap_2d::Footprint footprint;
   for (const auto & xy : std::vector<std::pair<double, double>>{
-      {-0.07, -0.171}, {0.296, -0.171}, {0.296, 0.171}, {-0.07, 0.171}})
+    {-0.07, -0.171}, {0.296, -0.171}, {0.296, 0.171}, {-0.07, 0.171}})
   {
     geometry_msgs::msg::Point p; p.x = xy.first; p.y = xy.second;
     footprint.push_back(p);
