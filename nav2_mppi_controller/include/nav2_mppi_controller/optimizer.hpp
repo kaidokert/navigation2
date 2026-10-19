@@ -80,6 +80,14 @@ public:
     const geometry_msgs::msg::Twist & command,
     const geometry_msgs::msg::PoseStamped & cusp, double stop_margin) const;
 
+  /** Validate an external command over the configured held-command horizon.
+   * Uses the supplied invocation state and the same full-footprint guard as
+   * optimized output. Does not clamp commands or mutate optimizer memory.
+   */
+  bool isCommandCollisionFree(
+    const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & speed,
+    const geometry_msgs::msg::Twist & command) const;
+
   /**
    * @brief Destructor for mppi::Optimizer
    */
@@ -337,6 +345,8 @@ protected:
    * @brief Check the actual emitted control sequence using the measured state.
    */
   bool controlSequenceCollisionFree() const;
+  bool controlSequenceCollisionFree(
+    const models::ControlSequence & sequence, const models::State & initial) const;
 
   /**
    * @brief Apply final constraints and veto colliding output before conversion.
@@ -348,6 +358,7 @@ protected:
     const models::ControlSequence * before_filter = nullptr);
 
   bool controlSequenceFinite() const;
+  bool controlSequenceFinite(const models::ControlSequence & sequence) const;
 
   /**
    * @brief Whether the motion model is holonomic

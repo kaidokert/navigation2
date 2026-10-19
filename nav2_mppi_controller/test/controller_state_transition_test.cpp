@@ -57,6 +57,16 @@ public:
   using MPPIController::receiveSteeringFeedback;
   using MPPIController::receiveConditionedSteering;
   using MPPIController::updateSteeringFeedback;
+  auto commandMemoryForTest() const
+  {
+    return std::make_pair(mppi::recorder::sequence(optimizer_.*OptimizerMemoryAccess::sequenceMember()),
+      mppi::recorder::history(optimizer_.*OptimizerMemoryAccess::historyMember()));
+  }
+  bool externalCommandClearForTest(const geometry_msgs::msg::PoseStamped & pose,
+    const geometry_msgs::msg::Twist & speed, const geometry_msgs::msg::Twist & command) const
+  {
+    return optimizer_.isCommandCollisionFree(pose, speed, command);
+  }
   bool hasLongEntryCertificate() const
   {return (optimizer_.*OptimizerMemoryAccess::entryMember()).has_value();}
   size_t longEntryShifts() const
@@ -488,6 +498,9 @@ void exerciseRetainedApproachFinalCommand(bool recorded_collision)
   // A later optimizer result can differ from the safe carried sequence. It must
   // not be returned merely because PathHandler allowed a bounded approach.
   controller.seedCommand(-0.3f, -0.3f / 0.401f);
+  feedback->header.stamp = node->now();
+  controller.receiveSteeringFeedback(feedback);
+  controller.receiveConditionedSteering(target);
   robot.header.stamp = node->now();
   if (recorded_collision) {
     try {
@@ -743,6 +756,9 @@ void exerciseStandstillPresteer(int obstacle_case)
   node->declare_parameter("controller_frequency", 20.0);
   node->declare_parameter("test.model_dt", 0.05);
   node->declare_parameter("test.motion_model", std::string("Ackermann"));
+  if (obstacle_case == 7) {
+    node->declare_parameter("test.AckermannConstraints.min_turning_r", 0.5);
+  }
   node->declare_parameter("test.critics", std::vector<std::string>{});
   node->declare_parameter("test.iteration_count", 0);
   node->declare_parameter("test.enforce_path_inversion", true);
@@ -780,7 +796,10 @@ void exerciseStandstillPresteer(int obstacle_case)
   feedback->header.stamp = node->now();
   feedback->name = {"front_steering_joint"};
   feedback->position = {-0.40};
-  controller.receiveSteeringFeedback(feedback);
+  if (obstacle_case == 6) {
+    feedback->header.stamp = node->now() - rclcpp::Duration::from_seconds(1.0);
+  }
+  if (obstacle_case != 5) {controller.receiveSteeringFeedback(feedback);}
 
   // Two-segment plan with a cusp at (0.30, 0.0):
   // Segment 1: Forward from (0,0) to (0.30, 0)
@@ -799,6 +818,32 @@ void exerciseStandstillPresteer(int obstacle_case)
   auto robot_pose = getDummyPointStamped(node, TestPose{0.30, 0.0});
   robot_pose.header = plan.header;
   auto velocity = getDummyTwist();
+  if (obstacle_case == 5 || obstacle_case == 6) {
+    try {
+      controller.computeVelocityCommands(robot_pose, velocity, nullptr);
+      ADD_FAILURE() << "Presteer accepted missing or stale measured steering";
+    } catch (const nav2_core::NoValidControl & error) {
+      EXPECT_NE(std::string(error.what()).find(obstacle_case == 5 ?
+        "Missing measured steering feedback" : "Stale or future measured steering feedback"),
+        std::string::npos);
+      EXPECT_FALSE(controller.isPresteering());
+    }
+    controller.deactivate();
+    controller.cleanup();
+    return;
+  }
+  // The optimizer has not prepared this pose. Explicit-state validation must
+  // ignore its stale/default state and leave carried controls/history intact.
+  const auto memory = controller.commandMemoryForTest();
+  geometry_msgs::msg::Twist stopped;
+  EXPECT_EQ(controller.externalCommandClearForTest(robot_pose, velocity, stopped),
+    obstacle_case != 1 && obstacle_case != 2);
+  EXPECT_EQ(controller.commandMemoryForTest(), memory);
+  geometry_msgs::msg::Twist outside_cone;
+  outside_cone.linear.x = 0.038;
+  outside_cone.angular.z = 0.038 / 0.1;
+  EXPECT_FALSE(controller.externalCommandClearForTest(robot_pose, velocity, outside_cone));
+  EXPECT_EQ(controller.commandMemoryForTest(), memory);
 
   const auto expect_presteer_veto = [&]() {
       try {
@@ -810,7 +855,7 @@ void exerciseStandstillPresteer(int obstacle_case)
         EXPECT_TRUE(controller.isPresteering());
       }
     };
-  if (obstacle_case > 0 && obstacle_case < 4) {
+  if ((obstacle_case > 0 && obstacle_case < 4) || obstacle_case == 7) {
     expect_presteer_veto();
     controller.deactivate();
     controller.cleanup();
@@ -827,6 +872,8 @@ void exerciseStandstillPresteer(int obstacle_case)
     unsigned int mx, my;
     ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(0.30, 0.0, mx, my));
     costmap_ros->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    feedback->header.stamp = node->now();
+    controller.receiveSteeringFeedback(feedback);
     expect_presteer_veto();
     controller.deactivate();
     controller.cleanup();
@@ -869,4 +916,15 @@ TEST(ControllerStateTransitionTest, PresteerRejectsCollisionInHeldCommandForecas
 TEST(ControllerStateTransitionTest, PresteerRevalidatesEachReturnAgainstCurrentMap)
 {
   exerciseStandstillPresteer(4);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRequiresMeasuredSteeringEvenWithoutActuatorPrediction)
+{
+  exerciseStandstillPresteer(5);
+  exerciseStandstillPresteer(6);
+}
+
+TEST(ControllerStateTransitionTest, PresteerRejectsCommandOutsideConfiguredAckermannCone)
+{
+  exerciseStandstillPresteer(7);
 }

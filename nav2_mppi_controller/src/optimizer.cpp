@@ -3038,16 +3038,47 @@ void Optimizer::updateControlSequence(bool diag)
 
 bool Optimizer::controlSequenceFinite() const
 {
+  return controlSequenceFinite(control_sequence_);
+}
+
+bool Optimizer::isCommandCollisionFree(
+  const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & speed,
+  const geometry_msgs::msg::Twist & command) const
+{
+  models::ControlSequence sequence;
+  sequence.reset(settings_.time_steps);
+  sequence.vx.fill(static_cast<float>(command.linear.x));
+  sequence.vy.fill(static_cast<float>(command.linear.y));
+  sequence.wz.fill(static_cast<float>(command.angular.z));
+  if (!controlSequenceFinite(sequence)) {return false;}
+  // Prediction may project an infeasible Ackermann command onto its cone.
+  // Reject that input rather than validate one arc and emit a different one.
+  auto constrained = sequence;
+  motion_model_->applyConstraints(constrained);
+  for (size_t j = 0; j < settings_.time_steps; ++j) {
+    if (constrained.vx(j) != sequence.vx(j) || constrained.vy(j) != sequence.vy(j) ||
+      constrained.wz(j) != sequence.wz(j))
+    {
+      return false;
+    }
+  }
+  models::State initial;
+  initial.pose = pose;
+  initial.speed = speed;
+  return controlSequenceCollisionFree(sequence, initial);
+}
+
+bool Optimizer::controlSequenceFinite(const models::ControlSequence & sequence) const
+{
   const size_t n = settings_.time_steps;
   if (!motion_model_ || n < 2 || !finiteValue(settings_.model_dt) || settings_.model_dt <= 0 ||
-    control_sequence_.vx.size() != n || control_sequence_.wz.size() != n ||
-    control_sequence_.vy.size() != n)
+    sequence.vx.size() != n || sequence.wz.size() != n || sequence.vy.size() != n)
   {
     return false;
   }
   for (size_t j = 0; j < n; ++j) {
-    if (!finiteValue(control_sequence_.vx(j)) || !finiteValue(control_sequence_.wz(j)) ||
-      (isHolonomic() && !finiteValue(control_sequence_.vy(j))))
+    if (!finiteValue(sequence.vx(j)) || !finiteValue(sequence.wz(j)) ||
+      (isHolonomic() && !finiteValue(sequence.vy(j))))
     {
       return false;
     }
@@ -3057,16 +3088,22 @@ bool Optimizer::controlSequenceFinite() const
 
 bool Optimizer::controlSequenceCollisionFree() const
 {
+  return controlSequenceCollisionFree(control_sequence_, state_);
+}
+
+bool Optimizer::controlSequenceCollisionFree(
+  const models::ControlSequence & sequence, const models::State & initial) const
+{
   // Adapted from PR #14's final filtered-sequence guard. It is unconditional
   // here: scoring sampled rollouts is not proof that the emitted mean is clear.
-  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite()) {return false;}
-  const auto & p = state_.pose.pose.position;
-  const auto & q = state_.pose.pose.orientation;
+  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite(sequence)) {return false;}
+  const auto & p = initial.pose.pose.position;
+  const auto & q = initial.pose.pose.orientation;
   if (!finiteValue(p.x) || !finiteValue(p.y) || !finiteValue(q.x) || !finiteValue(q.y) ||
     !finiteValue(q.z) || !finiteValue(q.w) ||
     q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1e-12 ||
-    !finiteValue(state_.speed.linear.x) || !finiteValue(state_.speed.angular.z) ||
-    (isHolonomic() && !finiteValue(state_.speed.linear.y)))
+    !finiteValue(initial.speed.linear.x) || !finiteValue(initial.speed.angular.z) ||
+    (isHolonomic() && !finiteValue(initial.speed.linear.y)))
   {
     return false;
   }
@@ -3077,13 +3114,13 @@ bool Optimizer::controlSequenceCollisionFree() const
   // The first state column is measured velocity. Include one additional column
   // so every command in the emitted horizon contributes to the forecast.
   predicted.reset(1, n + 1);
-  predicted.pose = state_.pose;
-  predicted.speed = state_.speed;
+  predicted.pose = initial.pose;
+  predicted.speed = initial.speed;
   for (size_t j = 0; j <= n; ++j) {
     const size_t k = std::min(j + offset, n - 1);
-    predicted.cvx(0, j) = control_sequence_.vx(k);
-    predicted.cwz(0, j) = control_sequence_.wz(k);
-    if (isHolonomic()) {predicted.cvy(0, j) = control_sequence_.vy(k);}
+    predicted.cvx(0, j) = sequence.vx(k);
+    predicted.cwz(0, j) = sequence.wz(k);
+    if (isHolonomic()) {predicted.cvy(0, j) = sequence.vy(k);}
   }
   updateStateVelocities(predicted);
   models::Trajectories trajectory;

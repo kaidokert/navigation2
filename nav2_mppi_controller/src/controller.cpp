@@ -148,7 +148,7 @@ void MPPIController::receiveSteeringFeedback(
 
 void MPPIController::updateSteeringFeedback()
 {
-  if (!optimizer_.requiresSteeringFeedback()) {return;}
+  if (!optimizer_.requiresSteeringFeedback() && !enable_presteer_on_handoff_) {return;}
   optimizer_.setInitialSteering(std::nullopt);
   optimizer_.setInitialConditionedSteering(std::nullopt);
   sensor_msgs::msg::JointState::ConstSharedPtr message;
@@ -323,6 +323,11 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
         geometry_msgs::msg::TwistStamped cmd = utils::toTwistStamped(
           static_cast<float>(vx), static_cast<float>(wz),
           robot_pose.header.stamp, costmap_ros_->getBaseFrameID());
+        // Custom handoff creep bypasses evalControl, but must obey the same
+        // current-body and full-horizon collision contract as optimized output.
+        if (!optimizer_.isCommandCollisionFree(robot_pose, robot_speed, cmd.twist)) {
+          throw nav2_core::NoValidControl("Presteer command forecast is not collision-free");
+        }
         if (visualize_) {
           visualize(std::move(transformed_plan), cmd.header.stamp);
         }
