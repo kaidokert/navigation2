@@ -23,6 +23,7 @@
 #include <nav2_costmap_2d/costmap_2d_ros.hpp>
 
 #include "nav2_mppi_controller/controller.hpp"
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 
 #include "utils/utils.hpp"
 #include "settled_costmap.hpp"
