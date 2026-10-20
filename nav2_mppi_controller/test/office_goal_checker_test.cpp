@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Kaido Kert
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Regression reductions for the small-gym dynamic-tolerance claim.
 #include <memory>
 #include "gtest/gtest.h"
@@ -35,7 +49,7 @@ TEST_F(DynamicStoppedGoalChecker, TightenAndWidenXYUpdatesDecisionAndReportedTol
 {
   EXPECT_TRUE(reached(0.20));
   set({rclcpp::Parameter("checker.xy_goal_tolerance", 0.08),
-    rclcpp::Parameter("checker.stateful", false)});
+      rclcpp::Parameter("checker.stateful", false)});
   checker.reset();
   EXPECT_FALSE(reached(0.20));
   EXPECT_TRUE(reached(0.06));
@@ -71,10 +85,10 @@ TEST_F(DynamicStoppedGoalChecker, StatefulToggleAndResetAreEffective)
 TEST_F(DynamicStoppedGoalChecker, CombinedPoseAndStoppedVelocityUpdatePreservesArrest)
 {
   set({rclcpp::Parameter("checker.xy_goal_tolerance", 0.08),
-    rclcpp::Parameter("checker.yaw_goal_tolerance", 0.10),
-    rclcpp::Parameter("checker.stateful", false),
-    rclcpp::Parameter("checker.trans_stopped_velocity", 0.02),
-    rclcpp::Parameter("checker.rot_stopped_velocity", 0.02)});
+      rclcpp::Parameter("checker.yaw_goal_tolerance", 0.10),
+      rclcpp::Parameter("checker.stateful", false),
+      rclcpp::Parameter("checker.trans_stopped_velocity", 0.02),
+      rclcpp::Parameter("checker.rot_stopped_velocity", 0.02)});
   EXPECT_TRUE(reached(0.06, 0.05, 0.01, 0.01));
   EXPECT_FALSE(reached(0.06, 0.05, 0.03, 0.01));
   EXPECT_FALSE(reached(0.06, 0.05, 0.01, 0.03));

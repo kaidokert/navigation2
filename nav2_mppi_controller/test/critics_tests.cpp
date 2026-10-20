@@ -672,7 +672,9 @@ TEST(CriticTests, TwirlingCritic)
 
   // Equal positive/negative yaw rates have zero signed mean but nonzero
   // twirling cost: mean absolute rate .5 times weight 10 is exactly 5.
-  for (size_t i = 0; i < 30; ++i) {traj_view(i) = i % 2 == 0 ? 0.5f : -0.5f;}
+  for (size_t i = 0; i < 30; ++i) {
+    traj_view(i) = i % 2 == 0 ? 0.5f : -0.5f;
+                                                                            }
   critic.score(data);
   EXPECT_NEAR(costs(0), 5.0, 1e-6);
   EXPECT_NEAR(xt::sum(costs, immediate)(), 5.0, 1e-6);
@@ -792,7 +794,9 @@ TEST(CriticTests, PathFollowDoesNotRewardGhostOvershootAtCusp)
   trajectories.reset(2, 3);
   models::Path path;
   path.reset(5);
-  for (size_t i = 0; i < 5; ++i) {path.x(i) = 0.05f * i;}
+  for (size_t i = 0; i < 5; ++i) {
+    path.x(i) = 0.05f * i;
+                                                        }
   geometry_msgs::msg::Pose goal;
   goal.position.x = 5.0;
   xt::xtensor<float, 1> costs = xt::zeros<float>({2});
@@ -1094,7 +1098,9 @@ TEST(CriticTests, PathAlignShortRealEndpointKeepsYawCostAtZeroProgress)
   models::State state; state.reset(2, 12);
   models::Trajectories trajectories; trajectories.reset(2, 12);
   trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
-  for (size_t i = 0; i < 12; ++i) {trajectories.yaws(1, i) = 0.4f;}
+  for (size_t i = 0; i < 12; ++i) {
+    trajectories.yaws(1, i) = 0.4f;
+                                                                  }
   models::Path path; path.reset(5);
   for (size_t i = 0; i < 5; ++i) {
     path.x(i) = static_cast<float>(i) * 0.05f;
@@ -1385,7 +1391,9 @@ TEST(CriticTests, HardFootprintVetoPreservesPointSoftScoring)
   models::State state; state.reset(2, 10);
   models::Trajectories trajectories; trajectories.reset(2, 10);
   trajectories.x.fill(0.0); trajectories.y.fill(1.0); trajectories.yaws.fill(0.0);
-  for (size_t t = 0; t < 10; ++t) {trajectories.x(0, t) = 1.0;}
+  for (size_t t = 0; t < 10; ++t) {
+    trajectories.x(0, t) = 1.0;
+                                                              }
   models::Path path; path.reset(2);
   geometry_msgs::msg::Pose goal; goal.position.x = 100.0;
   xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05;
@@ -1628,7 +1636,9 @@ TEST(CriticTests, IntermediateCuspKeepsPathCostsNearFinalGoal)
   models::State state; state.reset(2, 12);
   models::Trajectories trajectories; trajectories.reset(2, 12);
   trajectories.x.fill(0.0f); trajectories.y.fill(0.0f); trajectories.yaws.fill(0.0f);
-  for (size_t i = 0; i < 12; ++i) {trajectories.yaws(1, i) = 0.4f;}
+  for (size_t i = 0; i < 12; ++i) {
+    trajectories.yaws(1, i) = 0.4f;
+                                                                  }
   models::Path path; path.reset(5);
   geometry_msgs::msg::Pose goal; goal.position.x = 0.008;
   xt::xtensor<float, 1> costs = xt::zeros<float>({2}); float dt = 0.05f;

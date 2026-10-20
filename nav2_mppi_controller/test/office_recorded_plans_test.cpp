@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Kaido Kert
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Frozen real planner paths: cusp classification and combined pose gate contracts.
 // These reductions do not certify that a closed-loop vehicle can execute the paths.
 #include <fstream>
@@ -68,10 +82,23 @@ static void check(const char * name, const std::vector<unsigned int> & outgoing)
   EXPECT_FALSE(gate.accepts(wrong));
 }
 
-TEST(OfficeRecordedPlans, FinalReverse) {check("final_reverse_20261009_144012", {});}
-TEST(OfficeRecordedPlans, MicroPrimitive) {check("micro_primitive_20261009_191015", {2,4,9});}
+TEST(OfficeRecordedPlans, FinalReverse) {
+                                         check("final_reverse_20261009_144012", {});
+}
+TEST(OfficeRecordedPlans, MicroPrimitive) {
+                                           check("micro_primitive_20261009_191015", {2, 4, 9});
+}
 TEST(OfficeRecordedPlans, PassageMicroReverse)
-{check("passage_micro_reverse_20261009_165857", {17,20,270,271,274,280,284,289,439,462,463,471,576});}
-TEST(OfficeRecordedPlans, Turnaround134935) {check("turnaround_20261009_134935", {6,12});}
-TEST(OfficeRecordedPlans, Turnaround171715) {check("turnaround_20261009_171715", {13,14,17});}
-TEST(OfficeRecordedPlans, Turnaround222841) {check("turnaround_20261009_222841", {13,16});}
+{
+ check("passage_micro_reverse_20261009_165857",
+    {17, 20, 270, 271, 274, 280, 284, 289, 439, 462, 463, 471, 576});
+}
+TEST(OfficeRecordedPlans, Turnaround134935) {
+                                             check("turnaround_20261009_134935", {6, 12});
+}
+TEST(OfficeRecordedPlans, Turnaround171715) {
+                                             check("turnaround_20261009_171715", {13, 14, 17});
+}
+TEST(OfficeRecordedPlans, Turnaround222841) {
+                                             check("turnaround_20261009_222841", {13, 16});
+}

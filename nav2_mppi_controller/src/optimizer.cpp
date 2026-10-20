@@ -12,32 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "nav2_mppi_controller/tools/decision_recorder.hpp"
-#include <limits>
-#include <cstring>
-#include <cstdint>
-#include "nav2_mppi_controller/optimizer.hpp"
-
-#include <type_traits>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <vector>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
-#include <sstream>
+#include <limits>
+#include <memory>
 #include <numeric>
-#include <algorithm>
-#include <xtensor/xmath.hpp>
-#include <xtensor/xrandom.hpp>
-#include <xtensor/xnoalias.hpp>
-
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
 #include "nav2_core/controller_exceptions.hpp"
-#include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
+#include "nav2_costmap_2d/footprint_collision_checker.hpp"
+#include "nav2_mppi_controller/optimizer.hpp"
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 #include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
+#include <xtensor/xmath.hpp>
+#include <xtensor/xnoalias.hpp>
+#include <xtensor/xrandom.hpp>
+
 
 namespace mppi
 {
@@ -171,7 +170,8 @@ void Optimizer::getParams()
     (!seed_short_cusp_on_handoff_ || !preserve_short_cusp_feasibility_))
   {
     throw nav2_core::ControllerException(
-            "extend_short_cusp_completion requires short cusp seed and feasibility preservation");
+            "extend_short_cusp_completion requires short cusp seed and fe"
+      "asibility preservation");
   }
   getParam(initialize_long_cusp_entry_, "initialize_long_cusp_entry",
     false, ParameterType::Static);
@@ -183,7 +183,8 @@ void Optimizer::getParams()
     false, ParameterType::Static);
   if (retain_collision_free_long_path_sample_ && !preserve_filtered_collision_feasibility_) {
     throw nav2_core::ControllerException(
-            "retain_collision_free_long_path_sample requires preserve_filtered_collision_feasibility");
+            "retain_collision_free_long_path_sample requires preserve_fil"
+      "tered_collision_feasibility");
   }
   if (repair_long_cusp_warm_start_ && !initialize_long_cusp_entry_) {
     throw nav2_core::ControllerException(
@@ -193,7 +194,8 @@ void Optimizer::getParams()
     (!seed_short_cusp_on_handoff_ || !preserve_short_cusp_feasibility_))
   {
     throw nav2_core::ControllerException(
-            "initialize_long_cusp_entry requires short cusp seed and feasibility preservation");
+            "initialize_long_cusp_entry requires short cusp seed and feas"
+      "ibility preservation");
   }
   if (preserve_short_cusp_feasibility_ && !seed_short_cusp_on_handoff_) {
     throw nav2_core::ControllerException(
@@ -209,14 +211,16 @@ void Optimizer::getParams()
     s.base_constraints.ax_min = -1.0 * s.base_constraints.ax_min;
     RCLCPP_WARN(
       logger_,
-      "Sign of the parameter ax_min is incorrect, consider setting it negative.");
+      "Sign of the parameter ax_min is incorrect, consider setting "
+      "it negative.");
   }
 
   if (s.base_constraints.ay_min > 0.0) {
     s.base_constraints.ay_min = -1.0 * s.base_constraints.ay_min;
     RCLCPP_WARN(
       logger_,
-      "Sign of the parameter ay_min is incorrect, consider setting it negative.");
+      "Sign of the parameter ay_min is incorrect, consider setting "
+      "it negative.");
   }
 
   getParam(motion_model_name, "motion_model", std::string("DiffDrive"));
@@ -289,15 +293,17 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   nav2_core::GoalChecker * goal_checker)
 {
   recorder::Invocation recording(rclcpp::Time(robot_pose.header.stamp).nanoseconds());
-  recorder::observe("input", [&] {return recorder::Json{
-    {"pose", recorder::pose(robot_pose.pose)}, {"frame", robot_pose.header.frame_id},
-    {"speed", {robot_speed.linear.x, robot_speed.linear.y, robot_speed.angular.z}},
-    {"goal", recorder::pose(goal)}, {"plan", recorder::rosPath(plan)},
-    {"model_dt", settings_.model_dt}, {"temperature", settings_.temperature},
-    {"gamma", settings_.gamma}, {"vx_std", settings_.sampling_std.vx},
-    {"wz_std", settings_.sampling_std.wz}, {"shift", settings_.shift_control_sequence},
-    {"smooth", smooth_control_sequence_}, {"history", recorder::history(control_history_)},
-    {"control", recorder::sequence(control_sequence_)}};});
+  recorder::observe("input", [&] {
+      return recorder::Json{
+      {"pose", recorder::pose(robot_pose.pose)}, {"frame", robot_pose.header.frame_id},
+      {"speed", {robot_speed.linear.x, robot_speed.linear.y, robot_speed.angular.z}},
+      {"goal", recorder::pose(goal)}, {"plan", recorder::rosPath(plan)},
+      {"model_dt", settings_.model_dt}, {"temperature", settings_.temperature},
+      {"gamma", settings_.gamma}, {"vx_std", settings_.sampling_std.vx},
+      {"wz_std", settings_.sampling_std.wz}, {"shift", settings_.shift_control_sequence},
+      {"smooth", smooth_control_sequence_}, {"history", recorder::history(control_history_)},
+      {"control", recorder::sequence(control_sequence_)}};
+                                                        });
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
   // Keep the shifted sequence carried into this update. A rejected noisy mean
   // must not restart a crawl-then-cruise delay if that sequence is still valid.
@@ -312,7 +318,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   // [A] INPUT: robot feedback velocity + control_sequence_ carried from last tick
   if (diag && ts >= 3) {
     RCLCPP_DEBUG(logger_,
-      "[MPPI] A.input  robot_vx=%.4f robot_wz=%.3f  ctrl[0..2]=(%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      "[MPPI] A.input  robot_vx=%.4f robot_wz=%.3f  ctrl[0..2]=(%.4"
+      "f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
       robot_speed.linear.x, robot_speed.angular.z,
       control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
@@ -330,10 +337,12 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       critics_data_.fail_flag = true;
     }
     retry = fallback(critics_data_.fail_flag, warm_start ? &*warm_start : nullptr);
-    recorder::observe("fallback_result", [&] {return recorder::Json{
-      {"retry", retry}, {"fail_flag", critics_data_.fail_flag},
-      {"control", recorder::sequence(control_sequence_)},
-      {"history", recorder::history(control_history_)}};});
+    recorder::observe("fallback_result", [&] {
+        return recorder::Json{
+        {"retry", retry}, {"fail_flag", critics_data_.fail_flag},
+        {"control", recorder::sequence(control_sequence_)},
+        {"history", recorder::history(control_history_)}};
+                                                        });
     if (retry && recorder::active) {++recorder::active->retry;}
     if (retry) {
       critics_data_.fail_flag = false;
@@ -344,7 +353,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   // [E] POST-OPTIMIZE (after softmax + accel constraints)
   if (diag && ts >= 5) {
     RCLCPP_DEBUG(logger_,
-      "[MPPI] E.post-opt  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      "[MPPI] E.post-opt  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz("
+      "%.3f,%.3f,%.3f)",
       control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
       control_sequence_.vx(3), control_sequence_.vx(4),
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
@@ -354,16 +364,23 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   if (preserve_filtered_collision_feasibility_) {
     before_filter = control_sequence_;
   }
-  recorder::observe("before_smoothing", [&] {return recorder::Json{
-    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
+  recorder::observe("before_smoothing", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
   smoothControlSequence();
-  recorder::observe("after_smoothing", [&] {return recorder::Json{
-    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
+  recorder::observe("after_smoothing", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
 
   // [F] POST-SG FILTER
   if (diag && ts >= 5) {
     RCLCPP_DEBUG(logger_,
-      "[MPPI] F.post-SG   ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f) smoothing_enabled=%d",
+      "[MPPI] F.post-SG   ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz("
+      "%.3f,%.3f,%.3f) smoothing_enabled=%d",
       control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
       control_sequence_.vx(3), control_sequence_.vx(4),
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2),
@@ -382,7 +399,9 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   }
 
   if (settings_.shift_control_sequence) {shiftControlSequence();}
-  recorder::observe("after_shift", [&] {return recorder::Json{{"control", recorder::sequence(control_sequence_)}};});
+  recorder::observe("after_shift", [&] {
+      return recorder::Json{{"control", recorder::sequence(control_sequence_)}};
+  });
   return control;
 }
 
@@ -436,39 +455,39 @@ void Optimizer::optimize(bool diag)
   bool capture_cycle = false;
   const char * capture_reason = "stationary_endpoint";
   if (snapshot_path && *snapshot_path && !snapshot_attempted) {
-      const size_t real = std::min(
+    const size_t real = std::min(
         critics_data_.real_path_point_count.value_or(0), path_.x.size());
-      const double distance = real ? std::hypot(
+    const double distance = real ? std::hypot(
         path_.x(real - 1) - state_.pose.pose.position.x,
         path_.y(real - 1) - state_.pose.pose.position.y) : 0.0;
-      const bool stationary = std::abs(state_.speed.linear.x) < 0.002 &&
-        distance > 0.05 && distance < 0.20;
+    const bool stationary = std::abs(state_.speed.linear.x) < 0.002 &&
+      distance > 0.05 && distance < 0.20;
       // Inspect the carried command once per cycle. Internal optimization can
       // produce larger exploratory controls which smoothing later cancels.
-      stationary_cycles = stationary ? stationary_cycles + 1 : 0;
-      capture_cycle = stationary_cycles >= 10;
-      if (gear_capture && std::string(gear_capture) == "1") {
-        capture_cycle = previous_capture_gear != 0 && active_cusp_direction_ != 0 &&
-          previous_capture_gear != active_cusp_direction_;
-        if (active_cusp_direction_ != 0) {previous_capture_gear = active_cusp_direction_;}
-        capture_reason = "first_gear_change";
-      }
+    stationary_cycles = stationary ? stationary_cycles + 1 : 0;
+    capture_cycle = stationary_cycles >= 10;
+    if (gear_capture && std::string(gear_capture) == "1") {
+      capture_cycle = previous_capture_gear != 0 && active_cusp_direction_ != 0 &&
+        previous_capture_gear != active_cusp_direction_;
+      if (active_cusp_direction_ != 0) {previous_capture_gear = active_cusp_direction_;}
+      capture_reason = "first_gear_change";
+    }
       // Optional endpoint diagnostic takes precedence over the gear-change
       // trigger. Capture the actual one-point prefix left after pruning, while
       // its cusp is still active, rather than an earlier transition. Ghost
       // padding is deliberately excluded by the real-point metadata above.
-      if (singleton_capture && std::string(singleton_capture) == "1") {
-        const bool requested_gear = !capture_gear ||
-          (std::string(capture_gear) == "1" && active_cusp_direction_ == 1) ||
-          (std::string(capture_gear) == "-1" && active_cusp_direction_ == -1);
-        capture_cycle = real == 1 && active_cusp_direction_ != 0 && requested_gear;
-        capture_reason = "first_active_cusp_singleton";
-      }
-      if (final_capture && std::string(final_capture) == "1") {
-        capture_cycle = real == 1 && active_cusp_direction_ == 0;
-        capture_reason = "first_final_singleton";
-      }
-      if (capture_failed_batch) {capture_cycle = false;}
+    if (singleton_capture && std::string(singleton_capture) == "1") {
+      const bool requested_gear = !capture_gear ||
+        (std::string(capture_gear) == "1" && active_cusp_direction_ == 1) ||
+        (std::string(capture_gear) == "-1" && active_cusp_direction_ == -1);
+      capture_cycle = real == 1 && active_cusp_direction_ != 0 && requested_gear;
+      capture_reason = "first_active_cusp_singleton";
+    }
+    if (final_capture && std::string(final_capture) == "1") {
+      capture_cycle = real == 1 && active_cusp_direction_ == 0;
+      capture_reason = "first_final_singleton";
+    }
+    if (capture_failed_batch) {capture_cycle = false;}
   }
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
     if (recorder::active) {recorder::active->iteration = i;}
@@ -487,7 +506,8 @@ void Optimizer::optimize(bool diag)
     std::ostringstream snapshot;
     xt::xtensor<float, 2> unbounded_cvx, unbounded_cwz;
     bool unbounded_available = false;
-    if (capture || (capture_failed_batch && failed_capture_eligible && snapshot_path && *snapshot_path &&
+    if (capture ||
+      (capture_failed_batch && failed_capture_eligible && snapshot_path && *snapshot_path &&
       (!snapshot_attempted || recent_eligible)))
     {
       // A second read of a fixed noise batch does not consume RNG draws.
@@ -549,7 +569,9 @@ void Optimizer::optimize(bool diag)
 
     if (capture) {
       try {
-        snapshot << std::setprecision(17) << "{\"scope\":\"One native optimizer iteration before smoothing; optional diagnostic capture may delay this tick\","
+        snapshot << std::setprecision(17) <<
+          "{\"scope\":\"One native optimizer iteration before smoothing"
+          "; optional diagnostic capture may delay this tick\","
                  << "\"capture_reason\":\"" << capture_reason << "\","
                  << "\"failed_batch_stationary_filter\":" <<
           (stationary_failed_only ? "true" : "false") << ","
@@ -562,11 +584,12 @@ void Optimizer::optimize(bool diag)
           snapshot << "null";
         }
         snapshot << ','
-                 << "\"stamp\":" << state_.pose.header.stamp.sec + state_.pose.header.stamp.nanosec * 1e-9
+                 << "\"stamp\":" <<
+          state_.pose.header.stamp.sec + state_.pose.header.stamp.nanosec * 1e-9
                  << ",\"iteration\":" << i << ",\"real_path_point_count\":"
                  << critics_data_.real_path_point_count.value_or(0)
                  << ",\"active_cusp_direction\":" << active_cusp_direction_
-          << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
+                 << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
                  << ",\"path_direction\":" << path_direction_
                  << ",\"furthest\":" << critics_data_.furthest_reached_path_point.value_or(0)
                  << ",\"temperature\":" << settings_.temperature
@@ -579,7 +602,8 @@ void Optimizer::optimize(bool diag)
                  << tf2::getYaw(goal_.orientation) << ']'
                  << ",\"robot\":[" << state_.pose.pose.position.x << ','
                  << state_.pose.pose.position.y << ',' << tf2::getYaw(state_.pose.pose.orientation)
-                 << "],\"speed\":[" << state_.speed.linear.x << ',' << state_.speed.angular.z << ']';
+                 << "],\"speed\":[" << state_.speed.linear.x << ',' << state_.speed.angular.z <<
+          ']';
         const auto ackermann = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
         const auto feedback = [&](const char * name, const std::optional<float> & value) {
             snapshot << ",\"" << name << "\":";
@@ -628,7 +652,9 @@ void Optimizer::optimize(bool diag)
           if (!file) {throw std::runtime_error("Cannot open successful batch pre-update snapshot");}
           file << snapshot.str() << ",\"control_update_completed\":false}\n";
           file.close();
-          if (!file) {throw std::runtime_error("Cannot finish successful batch pre-update snapshot");}
+          if (!file) {
+            throw std::runtime_error("Cannot finish successful batch pre-update snapshot");
+          }
         }
         if (capture_failed_batch && !capture_successful) {
           // Preserve the failed batch before the weighted update can throw or
@@ -691,7 +717,7 @@ bool Optimizer::fallback(bool fail, const models::ControlSequence * warm_start)
 {
   if (fail && long_entry_required_) {
     enforceLongEntryCertificate(false);
-    critics_data_.fail_flag=false;fallback(false);return false;
+    critics_data_.fail_flag = false;fallback(false);return false;
   }
   if (fail && tryExtendedShortCuspContinuation(false)) {
     critics_data_.fail_flag = false;
@@ -718,7 +744,9 @@ bool Optimizer::fallback(bool fail, const models::ControlSequence * warm_start)
       if (shortCuspSequenceFeasible()) {
         critics_data_.fail_flag = false;
         fallback(false);  // A validated continuation resets the retry counter.
-        RCLCPP_INFO(logger_, "[CUSP_WARM_FALLBACK] retained validated continuation after sampled failure");
+        RCLCPP_INFO(logger_,
+            "[CUSP_WARM_FALLBACK] retained validated continuation after s"
+      "ampled failure");
         return false;
       }
     } catch (...) {
@@ -745,11 +773,17 @@ bool Optimizer::fallback(bool fail)
   const bool gentle_required = gentle_short_cusp_required_;
   const auto completion = gentle_required ? cusp_completion_ : std::nullopt;
   const auto completion_shifts = cusp_completion_shifts_;
-  recorder::observe("fallback_reset_before", [&] {return recorder::Json{
-    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
+  recorder::observe("fallback_reset_before", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
   reset(false /*Don't reset zone-based speed limits after fallback*/);
-  recorder::observe("fallback_reset_after", [&] {return recorder::Json{
-    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
+  recorder::observe("fallback_reset_after", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
   effective_cusp_tolerances_ = gates;
   cusp_completion_attempted_ = attempted_completion;
   gentle_short_cusp_required_ = gentle_required;
@@ -778,27 +812,38 @@ void Optimizer::prepare(
   if ((long_entry_required_ || long_entry_seed_requested_) &&
     plan.header.frame_id != robot_pose.header.frame_id)
   {
-    long_entry_.reset();long_entry_required_=true;
-    long_entry_seed_requested_=false;short_cusp_seed_requested_=false;
+    long_entry_.reset();long_entry_required_ = true;
+    long_entry_seed_requested_ = false;short_cusp_seed_requested_ = false;
     throw nav2_core::FailedToMakeProgress("Long-entry path frame changed; stopped replan required");
   }
   path_ = utils::toTensor(plan);
   costs_.fill(0.0f);
   goal_ = goal;
   recorder::observe("prepared", [&] {
-    const auto * model = dynamic_cast<AckermannMotionModel *>(motion_model_.get());
-    return recorder::Json{
-    {"initial_steering",model && model->initialSteering() ? recorder::Json(*model->initialSteering()) : recorder::Json(nullptr)},
-    {"initial_conditioned_steering",model && model->initialConditionedSteering() ? recorder::Json(*model->initialConditionedSteering()) : recorder::Json(nullptr)},
-    {"pose",recorder::pose(state_.pose.pose)},{"frame",state_.pose.header.frame_id},
-    {"speed",{state_.speed.linear.x,state_.speed.linear.y,state_.speed.angular.z}},
-    {"goal",recorder::pose(goal_)},{"path",recorder::path(path_)},
-    {"dt",settings_.model_dt},{"temperature",settings_.temperature},{"gamma",settings_.gamma},
-    {"std",{settings_.sampling_std.vx,settings_.sampling_std.vy,settings_.sampling_std.wz}},
-    {"holonomic",isHolonomic()},{"shift",settings_.shift_control_sequence},{"smooth",smooth_control_sequence_},
-    {"constraints",{{"vx_max",settings_.constraints.vx_max},{"vx_min",settings_.constraints.vx_min},
-      {"wz",settings_.constraints.wz},{"ax_max",settings_.constraints.ax_max},{"ax_min",settings_.constraints.ax_min},
-      {"az_max",settings_.constraints.az_max}}}};});
+      const auto * model = dynamic_cast<AckermannMotionModel *>(motion_model_.get());
+      return recorder::Json{
+      {"initial_steering",
+        model &&
+        model->initialSteering() ? recorder::Json(*model->initialSteering()) :
+        recorder::Json(nullptr)},
+      {"initial_conditioned_steering",
+        model &&
+        model->initialConditionedSteering() ? recorder::Json(*model->initialConditionedSteering()) :
+        recorder::Json(nullptr)},
+      {"pose", recorder::pose(state_.pose.pose)}, {"frame", state_.pose.header.frame_id},
+      {"speed", {state_.speed.linear.x, state_.speed.linear.y, state_.speed.angular.z}},
+      {"goal", recorder::pose(goal_)}, {"path", recorder::path(path_)},
+      {"dt", settings_.model_dt}, {"temperature", settings_.temperature},
+      {"gamma", settings_.gamma},
+      {"std", {settings_.sampling_std.vx, settings_.sampling_std.vy, settings_.sampling_std.wz}},
+      {"holonomic", isHolonomic()}, {"shift", settings_.shift_control_sequence},
+      {"smooth", smooth_control_sequence_},
+      {"constraints",
+        {{"vx_max", settings_.constraints.vx_max}, {"vx_min", settings_.constraints.vx_min},
+          {"wz", settings_.constraints.wz}, {"ax_max", settings_.constraints.ax_max},
+          {"ax_min", settings_.constraints.ax_min},
+          {"az_max", settings_.constraints.az_max}}}};
+                                                 });
 
   critics_data_.fail_flag = false;
   critics_data_.goal_checker = goal_checker;
@@ -807,18 +852,19 @@ void Optimizer::prepare(
   critics_data_.path_pts_valid.reset();
   if (short_cusp_seed_requested_) {
     short_cusp_seed_requested_ = false;
-    const bool actual_handoff=long_entry_seed_requested_;
-    long_entry_seed_requested_=false;
-    const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
+    const bool actual_handoff = long_entry_seed_requested_;
+    long_entry_seed_requested_ = false;
+    const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
     if (actual_handoff && initialize_long_cusp_entry_ && seed_short_cusp_on_handoff_ &&
-      active_cusp_direction_==1 && real>4 && settings_.shift_control_sequence &&
-      std::hypot(path_.x(real-1)-robot_pose.pose.position.x,
-      path_.y(real-1)-robot_pose.pose.position.y)>0.8)
+      active_cusp_direction_ == 1 && real > 4 && settings_.shift_control_sequence &&
+      std::hypot(path_.x(real - 1) - robot_pose.pose.position.x,
+      path_.y(real - 1) - robot_pose.pose.position.y) > 0.8)
     {
       // Preserve an already executable ordinary-horizon mean. The longer
       // certificate is a fallback only for the diagnosed horizon mismatch.
       if (!initializeShortCuspMean() && !initializeLongEntryCertificate()) {
-        throw nav2_core::FailedToMakeProgress("No bounded long-entry certificate; stopped replan required");
+        throw nav2_core::FailedToMakeProgress(
+            "No bounded long-entry certificate; stopped replan required");
       }
     } else {initializeShortCuspMean();}
   }
@@ -829,43 +875,60 @@ void Optimizer::prepare(
       long_entry_.reset();
       throw nav2_core::FailedToMakeProgress("Invalid long-entry state; stopped replan required");
     }
-    if (longEntryMeasuredAligned()) {long_entry_.reset();long_entry_required_=false;}
-    else {enforceLongEntryCertificate(false);}
+    if (longEntryMeasuredAligned()) {long_entry_.reset();long_entry_required_ = false;} else {
+      enforceLongEntryCertificate(false);
+    }
   }
 }
 
 bool Optimizer::pathBindingValid() const
 {
-  if(!path_binding_||!path_binding_->canonical_plan||!costmap_ros_) {return false;}
-  const auto & b=*path_binding_;const auto & t=b.canonical_to_local;
-  const auto finite=diagnostic::isFiniteCaptureValue;
-  if(b.generation==0||b.segment==0||b.canonical_plan->header.frame_id.empty()||
-    t.child_frame_id!=b.canonical_plan->header.frame_id||t.header.frame_id.empty()||
-    t.header.frame_id!=state_.pose.header.frame_id||t.header.frame_id!=costmap_ros_->getGlobalFrameID()||
-    rclcpp::Time(t.header.stamp)!=rclcpp::Time(state_.pose.header.stamp)||
-    b.segment_begin>=b.segment_end||b.segment_end>b.canonical_plan->poses.size()) {return false;}
-  const auto & q=t.transform.rotation;const auto & v=t.transform.translation;
-  for(double value:{q.x,q.y,q.z,q.w,v.x,v.y,v.z}) {if(!finite(value)) {return false;}}
-  if(std::abs(q.x)>1e-6||std::abs(q.y)>1e-6||std::abs(v.z)>1e-6||
-    std::abs(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w-1)>1e-6) {return false;}
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  if(b.real_ids.size()!=real) {return false;}
-  size_t prior=0,local_index=0;bool first=true;
-  for(size_t id:b.real_ids) {
-    if(id<b.segment_begin||id>=b.segment_end||(!first&&id<=prior)) {return false;}
-    const auto & p=b.canonical_plan->poses[id].pose;
-    for(double value:{p.position.x,p.position.y,p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w})
-    {if(!finite(value)) {return false;}}
-    const auto & r=p.orientation;
-    if(std::abs(r.x)>1e-6||std::abs(r.y)>1e-6||
-      std::abs(r.x*r.x+r.y*r.y+r.z*r.z+r.w*r.w-1)>1e-6) {return false;}
-    geometry_msgs::msg::PoseStamped canonical,local;
-    canonical.header=b.canonical_plan->header;canonical.header.stamp=state_.pose.header.stamp;
-    canonical.pose=p;tf2::doTransform(canonical,local,t);
-    if(std::hypot(local.pose.position.x-path_.x(local_index),local.pose.position.y-path_.y(local_index))>1e-6||
-      std::abs(angles::shortest_angular_distance(tf2::getYaw(local.pose.orientation),path_.yaws(local_index)))>1e-6)
+  if(!path_binding_ || !path_binding_->canonical_plan || !costmap_ros_) {return false;}
+  const auto & b = *path_binding_;const auto & t = b.canonical_to_local;
+  const auto finite = diagnostic::isFiniteCaptureValue;
+  if(b.generation == 0 || b.segment == 0 || b.canonical_plan->header.frame_id.empty() ||
+    t.child_frame_id != b.canonical_plan->header.frame_id || t.header.frame_id.empty() ||
+    t.header.frame_id != state_.pose.header.frame_id ||
+    t.header.frame_id != costmap_ros_->getGlobalFrameID() ||
+    rclcpp::Time(t.header.stamp) != rclcpp::Time(state_.pose.header.stamp) ||
+    b.segment_begin >= b.segment_end || b.segment_end > b.canonical_plan->poses.size())
+  {
+    return false;
+  }
+  const auto & q = t.transform.rotation;const auto & v = t.transform.translation;
+  for(double value : {q.x, q.y, q.z, q.w, v.x, v.y, v.z}) {
+    if(!finite(value)) {
+      return false;
+    }
+  }
+  if(std::abs(q.x) > 1e-6 || std::abs(q.y) > 1e-6 || std::abs(v.z) > 1e-6 ||
+    std::abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1) > 1e-6) {return false;}
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  if(b.real_ids.size() != real) {return false;}
+  size_t prior = 0, local_index = 0;bool first = true;
+  for(size_t id : b.real_ids) {
+    if(id < b.segment_begin || id >= b.segment_end || (!first && id <= prior)) {return false;}
+    const auto & p = b.canonical_plan->poses[id].pose;
+    for(double value : {p.position.x, p.position.y, p.orientation.x, p.orientation.y,
+        p.orientation.z,
+        p.orientation.w})
+    {
+      if(!finite(value)) {
+        return false;
+      }
+    }
+    const auto & r = p.orientation;
+    if(std::abs(r.x) > 1e-6 || std::abs(r.y) > 1e-6 ||
+      std::abs(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w - 1) > 1e-6) {return false;}
+    geometry_msgs::msg::PoseStamped canonical, local;
+    canonical.header = b.canonical_plan->header;canonical.header.stamp = state_.pose.header.stamp;
+    canonical.pose = p;tf2::doTransform(canonical, local, t);
+    if(std::hypot(local.pose.position.x - path_.x(local_index),
+        local.pose.position.y - path_.y(local_index)) > 1e-6 ||
+      std::abs(angles::shortest_angular_distance(tf2::getYaw(local.pose.orientation),
+        path_.yaws(local_index))) > 1e-6)
     {return false;}
-    ++local_index;prior=id;first=false;
+    ++local_index;prior = id;first = false;
   }
   return true;
 }
@@ -873,252 +936,280 @@ bool Optimizer::pathBindingValid() const
 bool Optimizer::longEntryIdentityValid() const
 {
   if(!long_entry_) {return false;}
-  const auto & c=*long_entry_;
+  const auto & c = *long_entry_;
   if(c.canonical_plan) {
-    return pathBindingValid()&&path_binding_->canonical_plan==c.canonical_plan&&
-      path_binding_->generation==c.plan_generation&&path_binding_->segment==c.segment_generation&&
-      c.source_id>=path_binding_->segment_begin&&c.source_id<path_binding_->segment_end;
+    return pathBindingValid() && path_binding_->canonical_plan == c.canonical_plan &&
+           path_binding_->generation == c.plan_generation &&
+           path_binding_->segment == c.segment_generation &&
+           c.source_id >= path_binding_->segment_begin && c.source_id < path_binding_->segment_end;
   }
   if(path_binding_required_) {return false;}
-  size_t matches=0;
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  for(size_t k=0;k<real;++k) {
-    if(std::hypot(path_.x(k)-c.target.position.x,path_.y(k)-c.target.position.y)<=1e-6&&
-      std::abs(angles::shortest_angular_distance(path_.yaws(k),tf2::getYaw(c.target.orientation)))<=1e-6)
+  size_t matches = 0;
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  for(size_t k = 0; k < real; ++k) {
+    if(std::hypot(path_.x(k) - c.target.position.x, path_.y(k) - c.target.position.y) <= 1e-6 &&
+      std::abs(angles::shortest_angular_distance(path_.yaws(k),
+        tf2::getYaw(c.target.orientation))) <= 1e-6)
     {++matches;}
   }
-  return matches==1;
+  return matches == 1;
 }
 
 bool Optimizer::refreshLongEntryBinding()
 {
   if(!long_entry_) {return false;}
-  auto & c=*long_entry_;
+  auto & c = *long_entry_;
   if(!c.canonical_plan) {return !path_binding_required_;}
   if(!longEntryIdentityValid()) {return false;}
-  const auto & t=path_binding_->canonical_to_local;
-  geometry_msgs::msg::PoseStamped source,target,anchor;
-  source.header.frame_id=c.canonical_plan->header.frame_id;source.header.stamp=state_.pose.header.stamp;
-  source.pose=c.canonical_plan->poses[c.source_id].pose;
-  tf2::doTransform(source,target,t);
-  source.pose=c.canonical_anchor;tf2::doTransform(source,anchor,t);
-  c.target=target.pose;c.anchor_x=anchor.pose.position.x;c.anchor_y=anchor.pose.position.y;
+  const auto & t = path_binding_->canonical_to_local;
+  geometry_msgs::msg::PoseStamped source, target, anchor;
+  source.header.frame_id = c.canonical_plan->header.frame_id;
+  source.header.stamp = state_.pose.header.stamp;
+  source.pose = c.canonical_plan->poses[c.source_id].pose;
+  tf2::doTransform(source, target, t);
+  source.pose = c.canonical_anchor;tf2::doTransform(source, anchor, t);
+  c.target = target.pose;c.anchor_x = anchor.pose.position.x;c.anchor_y = anchor.pose.position.y;
   return true;
 }
 
 bool Optimizer::longEntryStateValid() const
 {
-  const auto finite=diagnostic::isFiniteCaptureValue;
-  const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-  if(!long_entry_||!effective_cusp_tolerances_||!costmap_||!costmap_ros_||!model||
-    !settings_.shift_control_sequence||active_cusp_direction_!=1||path_direction_!=1||
-    !model->predictsSteeringConditioning()||!model->initialSteering()||
-    !finite(*model->initialSteering())||
-    (model->requiresConditionedSteering()&&(!model->initialConditionedSteering()||
+  const auto finite = diagnostic::isFiniteCaptureValue;
+  const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+  if(!long_entry_ || !effective_cusp_tolerances_ || !costmap_ || !costmap_ros_ || !model ||
+    !settings_.shift_control_sequence || active_cusp_direction_ != 1 || path_direction_ != 1 ||
+    !model->predictsSteeringConditioning() || !model->initialSteering() ||
+    !finite(*model->initialSteering()) ||
+    (model->requiresConditionedSteering() && (!model->initialConditionedSteering() ||
     !finite(*model->initialConditionedSteering())))) {return false;}
-  const auto & c=*long_entry_;
-  const auto gates=cuspTolerances();
-  if(settings_.time_steps<2||settings_.time_steps>81||
-    !finite(settings_.model_dt)||settings_.model_dt<=0||settings_.model_dt>0.15f||
-    c.epoch!=long_entry_epoch_||c.frame.empty()||c.frame!=state_.pose.header.frame_id||
-    c.frame!=costmap_ros_->getGlobalFrameID()||
-    !finite(gates.first)||!finite(gates.second)||gates.first<=0||gates.second<=0||
-    !finite(c.gates.first)||!finite(c.gates.second)||c.gates.first<=0||c.gates.second<=0||
-    !finite(state_.pose.pose.position.x)||!finite(state_.pose.pose.position.y)||
-    !finite(tf2::getYaw(state_.pose.pose.orientation))||!finite(state_.speed.linear.x)||
-    !finite(state_.speed.angular.z)||!finite(c.anchor_x)||!finite(c.anchor_y)||
-    !finite(c.edge)||c.edge<=0||!finite(c.target.position.x)||!finite(c.target.position.y)||
+  const auto & c = *long_entry_;
+  const auto gates = cuspTolerances();
+  if(settings_.time_steps < 2 || settings_.time_steps > 81 ||
+    !finite(settings_.model_dt) || settings_.model_dt <= 0 || settings_.model_dt > 0.15f ||
+    c.epoch != long_entry_epoch_ || c.frame.empty() || c.frame != state_.pose.header.frame_id ||
+    c.frame != costmap_ros_->getGlobalFrameID() ||
+    !finite(gates.first) || !finite(gates.second) || gates.first <= 0 || gates.second <= 0 ||
+    !finite(c.gates.first) || !finite(c.gates.second) || c.gates.first <= 0 ||
+    c.gates.second <= 0 ||
+    !finite(state_.pose.pose.position.x) || !finite(state_.pose.pose.position.y) ||
+    !finite(tf2::getYaw(state_.pose.pose.orientation)) || !finite(state_.speed.linear.x) ||
+    !finite(state_.speed.angular.z) || !finite(c.anchor_x) || !finite(c.anchor_y) ||
+    !finite(c.edge) || c.edge <= 0 || !finite(c.target.position.x) ||
+    !finite(c.target.position.y) ||
     !finite(tf2::getYaw(c.target.orientation))) {return false;}
-  const size_t n=2*settings_.time_steps-1;
-  const int64_t now=rclcpp::Time(state_.pose.header.stamp).nanoseconds();
-  if(c.shifts>=n-1||now<c.stamp_ns||now<c.last_stamp_ns||
-    static_cast<double>(now-c.stamp_ns)*1e-9>n*settings_.model_dt) {return false;}
+  const size_t n = 2 * settings_.time_steps - 1;
+  const int64_t now = rclcpp::Time(state_.pose.header.stamp).nanoseconds();
+  if(c.shifts >= n - 1 || now < c.stamp_ns || now < c.last_stamp_ns ||
+    static_cast<double>(now - c.stamp_ns) * 1e-9 > n * settings_.model_dt) {return false;}
   if(!longEntryIdentityValid()) {return false;}
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  for(size_t k=0;k<real;++k) {
-    if(!finite(path_.x(k))||!finite(path_.y(k))||!finite(path_.yaws(k))) {return false;}
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  for(size_t k = 0; k < real; ++k) {
+    if(!finite(path_.x(k)) || !finite(path_.y(k)) || !finite(path_.yaws(k))) {return false;}
   }
-  const auto footprint=costmap_ros_->getRobotFootprint();
-  if(footprint.size()<3||costmap_ros_->getUseRadius()) {return false;}
-  for(const auto & point:footprint) {if(!finite(point.x)||!finite(point.y)) {return false;}}
+  const auto footprint = costmap_ros_->getRobotFootprint();
+  if(footprint.size() < 3 || costmap_ros_->getUseRadius()) {return false;}
+  for(const auto & point : footprint) {
+    if(!finite(point.x) || !finite(point.y)) {
+      return false;
+    }
+  }
   nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-  const double cost=checker.footprintCostAtPose(state_.pose.pose.position.x,
-    state_.pose.pose.position.y,tf2::getYaw(state_.pose.pose.orientation),footprint);
-  return finite(cost)&&cost>=0&&cost<nav2_costmap_2d::LETHAL_OBSTACLE;
+  const double cost = checker.footprintCostAtPose(state_.pose.pose.position.x,
+    state_.pose.pose.position.y, tf2::getYaw(state_.pose.pose.orientation), footprint);
+  return finite(cost) && cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
 }
 
 bool Optimizer::longEntryMeasuredAligned() const
 {
-  if (!long_entry_ || !effective_cusp_tolerances_ || active_cusp_direction_!=1) {return false;}
-  const auto & c=*long_entry_;
-  const auto finite=diagnostic::isFiniteCaptureValue;
-  const double x=state_.pose.pose.position.x,y=state_.pose.pose.position.y;
-  const double yaw=tf2::getYaw(state_.pose.pose.orientation);
-  const auto gates=cuspTolerances();
-  if (!finite(x)||!finite(y)||!finite(yaw)||!finite(gates.first)||!finite(gates.second)||
-    state_.pose.header.frame_id!=c.frame || c.frame!=costmap_ros_->getGlobalFrameID()) {return false;}
-  return longEntryIdentityValid() && std::hypot(x-c.anchor_x,y-c.anchor_y)+1e-6>=c.edge &&
-    std::hypot(x-c.target.position.x,y-c.target.position.y)<=std::min(c.gates.first,gates.first) &&
-    std::abs(angles::shortest_angular_distance(yaw,tf2::getYaw(c.target.orientation)))<=
-    std::min(c.gates.second,gates.second);
+  if (!long_entry_ || !effective_cusp_tolerances_ || active_cusp_direction_ != 1) {return false;}
+  const auto & c = *long_entry_;
+  const auto finite = diagnostic::isFiniteCaptureValue;
+  const double x = state_.pose.pose.position.x, y = state_.pose.pose.position.y;
+  const double yaw = tf2::getYaw(state_.pose.pose.orientation);
+  const auto gates = cuspTolerances();
+  if (!finite(x) || !finite(y) || !finite(yaw) || !finite(gates.first) || !finite(gates.second) ||
+    state_.pose.header.frame_id != c.frame || c.frame != costmap_ros_->getGlobalFrameID())
+  {
+    return false;
+  }
+  return longEntryIdentityValid() && std::hypot(x - c.anchor_x, y - c.anchor_y) + 1e-6 >= c.edge &&
+         std::hypot(x - c.target.position.x, y - c.target.position.y) <= std::min(c.gates.first,
+      gates.first) &&
+         std::abs(angles::shortest_angular_distance(yaw, tf2::getYaw(c.target.orientation))) <=
+         std::min(c.gates.second, gates.second);
 }
 
 bool Optimizer::validateLongEntrySequence(
-  models::ControlSequence & sequence,size_t & first_hit,bool select_target)
+  models::ControlSequence & sequence, size_t & first_hit, bool select_target)
 {
-  first_hit=sequence.vx.size();
-  const auto finite=diagnostic::isFiniteCaptureValue;
-  const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-  if(!long_entry_||!effective_cusp_tolerances_||!costmap_||!costmap_ros_||!model||
-    !settings_.shift_control_sequence||active_cusp_direction_!=1||path_direction_!=1||
-    !model->predictsSteeringConditioning()||!model->initialSteering()||
-    !finite(*model->initialSteering())||
-    (model->requiresConditionedSteering() && (!model->initialConditionedSteering()||
+  first_hit = sequence.vx.size();
+  const auto finite = diagnostic::isFiniteCaptureValue;
+  const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+  if(!long_entry_ || !effective_cusp_tolerances_ || !costmap_ || !costmap_ros_ || !model ||
+    !settings_.shift_control_sequence || active_cusp_direction_ != 1 || path_direction_ != 1 ||
+    !model->predictsSteeringConditioning() || !model->initialSteering() ||
+    !finite(*model->initialSteering()) ||
+    (model->requiresConditionedSteering() && (!model->initialConditionedSteering() ||
     !finite(*model->initialConditionedSteering())))) {return false;}
-  auto & c=*long_entry_;
-  const size_t n=sequence.vx.size();
-  const auto gates=cuspTolerances();
-  const int64_t now=rclcpp::Time(state_.pose.header.stamp).nanoseconds();
-  if(settings_.time_steps<2||settings_.time_steps>81||n!=2*settings_.time_steps-1||
-    n>161||sequence.wz.size()!=n||sequence.vy.size()!=n||c.shifts>=n-1||
-    c.epoch!=long_entry_epoch_||c.frame.empty()||c.frame!=state_.pose.header.frame_id||
-    c.frame!=costmap_ros_->getGlobalFrameID()||now<c.stamp_ns||now<c.last_stamp_ns||
-    !finite(settings_.model_dt)||settings_.model_dt<=0||settings_.model_dt>0.15f||
-    static_cast<double>(now-c.stamp_ns)*1e-9>n*settings_.model_dt||
-    !finite(gates.first)||!finite(gates.second)||gates.first<=0||gates.second<=0||
-    !finite(state_.pose.pose.position.x)||!finite(state_.pose.pose.position.y)||
-    !finite(tf2::getYaw(state_.pose.pose.orientation))||!finite(state_.speed.linear.x)||
-    !finite(state_.speed.angular.z)||!finite(c.edge)||c.edge<=0||
-    !finite(c.anchor_x)||!finite(c.anchor_y)) {return false;}
-  const auto & limits=settings_.constraints;
-  for(double value : {static_cast<double>(limits.vx_max),static_cast<double>(limits.vx_min),
-    static_cast<double>(limits.wz),static_cast<double>(limits.ax_max),
-    static_cast<double>(limits.ax_min),static_cast<double>(limits.az_max)})
-  {if(!finite(value)) {return false;}}
-  if(limits.vx_max<=0||limits.ax_max<=0||limits.ax_min>=0||limits.az_max<=0||limits.wz<=0) {return false;}
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  if(real<2) {return false;}
-  for(size_t k=0;k<real;++k) {
-    if(!finite(path_.x(k))||!finite(path_.y(k))||!finite(path_.yaws(k))) {return false;}
+  auto & c = *long_entry_;
+  const size_t n = sequence.vx.size();
+  const auto gates = cuspTolerances();
+  const int64_t now = rclcpp::Time(state_.pose.header.stamp).nanoseconds();
+  if(settings_.time_steps < 2 || settings_.time_steps > 81 || n != 2 * settings_.time_steps - 1 ||
+    n > 161 || sequence.wz.size() != n || sequence.vy.size() != n || c.shifts >= n - 1 ||
+    c.epoch != long_entry_epoch_ || c.frame.empty() || c.frame != state_.pose.header.frame_id ||
+    c.frame != costmap_ros_->getGlobalFrameID() || now < c.stamp_ns || now < c.last_stamp_ns ||
+    !finite(settings_.model_dt) || settings_.model_dt <= 0 || settings_.model_dt > 0.15f ||
+    static_cast<double>(now - c.stamp_ns) * 1e-9 > n * settings_.model_dt ||
+    !finite(gates.first) || !finite(gates.second) || gates.first <= 0 || gates.second <= 0 ||
+    !finite(state_.pose.pose.position.x) || !finite(state_.pose.pose.position.y) ||
+    !finite(tf2::getYaw(state_.pose.pose.orientation)) || !finite(state_.speed.linear.x) ||
+    !finite(state_.speed.angular.z) || !finite(c.edge) || c.edge <= 0 ||
+    !finite(c.anchor_x) || !finite(c.anchor_y)) {return false;}
+  const auto & limits = settings_.constraints;
+  for(double value : {static_cast<double>(limits.vx_max), static_cast<double>(limits.vx_min),
+      static_cast<double>(limits.wz), static_cast<double>(limits.ax_max),
+      static_cast<double>(limits.ax_min), static_cast<double>(limits.az_max)})
+  {
+    if(!finite(value)) {
+      return false;
+    }
+  }
+  if(limits.vx_max <= 0 || limits.ax_max <= 0 || limits.ax_min >= 0 || limits.az_max <= 0 ||
+    limits.wz <= 0) {return false;}
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  if(real < 2) {return false;}
+  for(size_t k = 0; k < real; ++k) {
+    if(!finite(path_.x(k)) || !finite(path_.y(k)) || !finite(path_.yaws(k))) {return false;}
   }
   if(!select_target && !longEntryIdentityValid()) {return false;}
-  for(size_t j=0;j<n;++j) {
-    if(!finite(sequence.vx(j))||!finite(sequence.wz(j))||sequence.vx(j)<0) {return false;}
+  for(size_t j = 0; j < n; ++j) {
+    if(!finite(sequence.vx(j)) || !finite(sequence.wz(j)) || sequence.vx(j) < 0) {return false;}
   }
-  const auto saved=control_sequence_;
-  control_sequence_=sequence;
-  try {applyControlSequenceConstraints();sequence=control_sequence_;}
-  catch(...) {control_sequence_=saved;throw;}
-  control_sequence_=saved;
-  models::State predicted;predicted.reset(1,n);
-  predicted.pose=state_.pose;predicted.speed=state_.speed;
+  const auto saved = control_sequence_;
+  control_sequence_ = sequence;
+  try {
+    applyControlSequenceConstraints();sequence = control_sequence_;
+  } catch(...) {
+    control_sequence_ = saved;throw;
+  }
+  control_sequence_ = saved;
+  models::State predicted;predicted.reset(1, n);
+  predicted.pose = state_.pose;predicted.speed = state_.speed;
   // Extraction emits index1. Forecast precisely that stream, not control0.
-  for(size_t j=0;j<n;++j) {
-    predicted.cvx(0,j)=j+1<n ? sequence.vx(j+1) : 0.0f;
-    predicted.cwz(0,j)=j+1<n ? sequence.wz(j+1) : 0.0f;
+  for(size_t j = 0; j < n; ++j) {
+    predicted.cvx(0, j) = j + 1 < n ? sequence.vx(j + 1) : 0.0f;
+    predicted.cwz(0, j) = j + 1 < n ? sequence.wz(j + 1) : 0.0f;
   }
   updateStateVelocities(predicted);
-  for(size_t j=0;j+1<n;++j) {
-    if(std::abs(predicted.cvx(0,j)-sequence.vx(j+1))>1e-6f||
-      std::abs(predicted.cwz(0,j)-sequence.wz(j+1))>1e-6f) {return false;}
+  for(size_t j = 0; j + 1 < n; ++j) {
+    if(std::abs(predicted.cvx(0, j) - sequence.vx(j + 1)) > 1e-6f ||
+      std::abs(predicted.cwz(0, j) - sequence.wz(j + 1)) > 1e-6f) {return false;}
   }
-  models::Trajectories trajectory;trajectory.reset(1,n);
-  integrateStateVelocities(trajectory,predicted);
-  const auto footprint=costmap_ros_->getRobotFootprint();
-  if(footprint.size()<3||costmap_ros_->getUseRadius()) {return false;}
-  for(const auto & point:footprint) {
-    if(!finite(point.x)||!finite(point.y)) {return false;}
+  models::Trajectories trajectory;trajectory.reset(1, n);
+  integrateStateVelocities(trajectory, predicted);
+  const auto footprint = costmap_ros_->getRobotFootprint();
+  if(footprint.size() < 3 || costmap_ros_->getUseRadius()) {return false;}
+  for(const auto & point : footprint) {
+    if(!finite(point.x) || !finite(point.y)) {return false;}
   }
   nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-  const auto clear=[&](double x,double y,double yaw) {
-      if(!finite(x)||!finite(y)||!finite(yaw)) {return false;}
-      const double cost=checker.footprintCostAtPose(x,y,yaw,footprint);
-      return finite(cost)&&cost>=0&&cost<nav2_costmap_2d::LETHAL_OBSTACLE;
+  const auto clear = [&](double x, double y, double yaw) {
+      if(!finite(x) || !finite(y) || !finite(yaw)) {return false;}
+      const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
+      return finite(cost) && cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
     };
-  if(!clear(state_.pose.pose.position.x,state_.pose.pose.position.y,
+  if(!clear(state_.pose.pose.position.x, state_.pose.pose.position.y,
     tf2::getYaw(state_.pose.pose.orientation))) {return false;}
-  for(size_t j=0;j<n;++j) {
-    if(!clear(trajectory.x(0,j),trajectory.y(0,j),trajectory.yaws(0,j))) {return false;}
+  for(size_t j = 0; j < n; ++j) {
+    if(!clear(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j))) {return false;}
   }
-  const double xy=std::min(c.gates.first,gates.first),yaw_gate=std::min(c.gates.second,gates.second);
-  size_t chosen=real;
-  for(size_t j=0;j<n;++j) {
-    const double x=trajectory.x(0,j),y=trajectory.y(0,j),yaw=trajectory.yaws(0,j);
-    if(std::hypot(x-c.anchor_x,y-c.anchor_y)+1e-6<c.edge) {continue;}
-    const size_t begin=select_target ? 1 : 0,end=select_target ? std::min<size_t>(real,9) : 1;
-    for(size_t k=begin;k<end;++k) {
-      const double tx=select_target ? path_.x(k) : c.target.position.x;
-      const double ty=select_target ? path_.y(k) : c.target.position.y;
-      const double ta=select_target ? path_.yaws(k) : tf2::getYaw(c.target.orientation);
-      if(std::hypot(x-tx,y-ty)<=xy &&
-        std::abs(angles::shortest_angular_distance(yaw,ta))<=yaw_gate)
-      {first_hit=j;chosen=k;break;}
+  const double xy = std::min(c.gates.first, gates.first),
+    yaw_gate = std::min(c.gates.second, gates.second);
+  size_t chosen = real;
+  for(size_t j = 0; j < n; ++j) {
+    const double x = trajectory.x(0, j), y = trajectory.y(0, j), yaw = trajectory.yaws(0, j);
+    if(std::hypot(x - c.anchor_x, y - c.anchor_y) + 1e-6 < c.edge) {continue;}
+    const size_t begin = select_target ? 1 : 0, end = select_target ? std::min<size_t>(real, 9) : 1;
+    for(size_t k = begin; k < end; ++k) {
+      const double tx = select_target ? path_.x(k) : c.target.position.x;
+      const double ty = select_target ? path_.y(k) : c.target.position.y;
+      const double ta = select_target ? path_.yaws(k) : tf2::getYaw(c.target.orientation);
+      if(std::hypot(x - tx, y - ty) <= xy &&
+        std::abs(angles::shortest_angular_distance(yaw, ta)) <= yaw_gate)
+      {first_hit = j;chosen = k;break;}
     }
-    if(first_hit<n) {break;}
+    if(first_hit < n) {break;}
   }
-  if(first_hit==n) {return false;}
+  if(first_hit == n) {return false;}
   if(select_target) {
-    c.target.position.x=path_.x(chosen);c.target.position.y=path_.y(chosen);
-    c.target.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),path_.yaws(chosen)));
+    c.target.position.x = path_.x(chosen);c.target.position.y = path_.y(chosen);
+    c.target.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), path_.yaws(chosen)));
     if(c.canonical_plan) {
-      if(!pathBindingValid()||chosen>=path_binding_->real_ids.size()) {return false;}
-      c.source_id=path_binding_->real_ids[chosen];
+      if(!pathBindingValid() || chosen >= path_binding_->real_ids.size()) {return false;}
+      c.source_id = path_binding_->real_ids[chosen];
       if(!refreshLongEntryBinding()) {return false;}
     }
     // Fixed-target validation checks the exact canonical source identity.
-    return validateLongEntrySequence(sequence,first_hit,false);
+    return validateLongEntrySequence(sequence, first_hit, false);
   }
   return true;
 }
 
 bool Optimizer::initializeLongEntryCertificate()
 {
-  long_entry_required_=true;
-  const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-  if(!model||settings_.time_steps<2||settings_.time_steps>81||!effective_cusp_tolerances_) {return false;}
-  const float radius=model->getMinTurningRadius();
-  if(!diagnostic::isFiniteCaptureValue(radius)||radius<=0) {return false;}
+  long_entry_required_ = true;
+  const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+  if(!model || settings_.time_steps < 2 || settings_.time_steps > 81 ||
+    !effective_cusp_tolerances_)
+  {
+    return false;
+  }
+  const float radius = model->getMinTurningRadius();
+  if(!diagnostic::isFiniteCaptureValue(radius) || radius <= 0) {return false;}
   LongEntryCertificate certificate;
-  certificate.frame=state_.pose.header.frame_id;certificate.gates=cuspTolerances();
-  certificate.anchor_x=state_.pose.pose.position.x;certificate.anchor_y=state_.pose.pose.position.y;
-  certificate.stamp_ns=rclcpp::Time(state_.pose.header.stamp).nanoseconds();
-  certificate.last_stamp_ns=certificate.stamp_ns;
-  certificate.epoch=long_entry_epoch_;
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  for(size_t k=1;k<std::min<size_t>(real,9);++k) {
-    certificate.edge=std::hypot(path_.x(k)-path_.x(0),path_.y(k)-path_.y(0));
-    if(certificate.edge>1e-6) {break;}
+  certificate.frame = state_.pose.header.frame_id;certificate.gates = cuspTolerances();
+  certificate.anchor_x = state_.pose.pose.position.x;
+  certificate.anchor_y = state_.pose.pose.position.y;
+  certificate.stamp_ns = rclcpp::Time(state_.pose.header.stamp).nanoseconds();
+  certificate.last_stamp_ns = certificate.stamp_ns;
+  certificate.epoch = long_entry_epoch_;
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  for(size_t k = 1; k < std::min<size_t>(real, 9); ++k) {
+    certificate.edge = std::hypot(path_.x(k) - path_.x(0), path_.y(k) - path_.y(0));
+    if(certificate.edge > 1e-6) {break;}
   }
   if(path_binding_required_) {
     if(!pathBindingValid()) {return false;}
-    certificate.canonical_plan=path_binding_->canonical_plan;
-    certificate.plan_generation=path_binding_->generation;
-    certificate.segment_generation=path_binding_->segment;
-    geometry_msgs::msg::PoseStamped local_anchor,canonical_anchor;
-    local_anchor.header=state_.pose.header;local_anchor.pose=state_.pose.pose;
-    tf2::Transform transform;tf2::fromMsg(path_binding_->canonical_to_local.transform,transform);
+    certificate.canonical_plan = path_binding_->canonical_plan;
+    certificate.plan_generation = path_binding_->generation;
+    certificate.segment_generation = path_binding_->segment;
+    geometry_msgs::msg::PoseStamped local_anchor, canonical_anchor;
+    local_anchor.header = state_.pose.header;local_anchor.pose = state_.pose.pose;
+    tf2::Transform transform;tf2::fromMsg(path_binding_->canonical_to_local.transform, transform);
     geometry_msgs::msg::TransformStamped inverse;
-    inverse.header.frame_id=path_binding_->canonical_plan->header.frame_id;
-    inverse.child_frame_id=state_.pose.header.frame_id;inverse.header.stamp=state_.pose.header.stamp;
-    inverse.transform=tf2::toMsg(transform.inverse());
-    tf2::doTransform(local_anchor,canonical_anchor,inverse);
-    certificate.canonical_anchor=canonical_anchor.pose;
+    inverse.header.frame_id = path_binding_->canonical_plan->header.frame_id;
+    inverse.child_frame_id = state_.pose.header.frame_id;
+    inverse.header.stamp = state_.pose.header.stamp;
+    inverse.transform = tf2::toMsg(transform.inverse());
+    tf2::doTransform(local_anchor, canonical_anchor, inverse);
+    certificate.canonical_anchor = canonical_anchor.pose;
   }
-  long_entry_=certificate;
-  for(float crawl : {0.003f,0.005f,0.01f,0.02f}) {
-    for(float delay : {0.0f,0.5f,1.0f,1.5f}) {
-      for(float cruise : {0.02f,0.04f,0.08f,0.12f,0.16f}) {
-        for(float fraction : {-1.0f,-0.5f,0.0f,0.5f,1.0f}) {
-          models::ControlSequence candidate;candidate.reset(2*settings_.time_steps-1);
-          for(size_t j=0;j<candidate.vx.size();++j) {
-            candidate.vx(j)=std::min(j*settings_.model_dt<delay ? crawl : cruise,
+  long_entry_ = certificate;
+  for(float crawl : {0.003f, 0.005f, 0.01f, 0.02f}) {
+    for(float delay : {0.0f, 0.5f, 1.0f, 1.5f}) {
+      for(float cruise : {0.02f, 0.04f, 0.08f, 0.12f, 0.16f}) {
+        for(float fraction : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+          models::ControlSequence candidate;candidate.reset(2 * settings_.time_steps - 1);
+          for(size_t j = 0; j < candidate.vx.size(); ++j) {
+            candidate.vx(j) = std::min(j * settings_.model_dt < delay ? crawl : cruise,
               settings_.constraints.vx_max);
-            candidate.wz(j)=std::clamp(candidate.vx(j)*fraction/radius,
-              -settings_.constraints.wz,settings_.constraints.wz);
+            candidate.wz(j) = std::clamp(candidate.vx(j) * fraction / radius,
+              -settings_.constraints.wz, settings_.constraints.wz);
           }
-          size_t hit=0;
-          if(validateLongEntrySequence(candidate,hit,true)) {
-            long_entry_->controls=candidate;
+          size_t hit = 0;
+          if(validateLongEntrySequence(candidate, hit, true)) {
+            long_entry_->controls = candidate;
             return true;
           }
         }
@@ -1131,29 +1222,30 @@ bool Optimizer::initializeLongEntryCertificate()
 void Optimizer::enforceLongEntryCertificate(bool allow_optimized)
 {
   if(!long_entry_required_) {return;}
-  const auto reject=[&]() {
+  const auto reject = [&]() {
       long_entry_.reset();
-      throw nav2_core::FailedToMakeProgress("Long-entry certificate invalid or expired; stopped replan required");
+      throw nav2_core::FailedToMakeProgress(
+        "Long-entry certificate invalid or expired; stopped replan required");
     };
   if(!long_entry_) {reject();}
-  auto retained=long_entry_->controls;
-  size_t retained_hit=0;
-  if(!validateLongEntrySequence(retained,retained_hit)) {reject();}
-  auto chosen=retained;
-  if(allow_optimized && control_sequence_.vx.size()==settings_.time_steps &&
-    control_sequence_.wz.size()==settings_.time_steps)
+  auto retained = long_entry_->controls;
+  size_t retained_hit = 0;
+  if(!validateLongEntrySequence(retained, retained_hit)) {reject();}
+  auto chosen = retained;
+  if(allow_optimized && control_sequence_.vx.size() == settings_.time_steps &&
+    control_sequence_.wz.size() == settings_.time_steps)
   {
-    auto composed=retained;
-    for(size_t j=0;j<settings_.time_steps;++j) {
-      composed.vx(j)=control_sequence_.vx(j);composed.wz(j)=control_sequence_.wz(j);
+    auto composed = retained;
+    for(size_t j = 0; j < settings_.time_steps; ++j) {
+      composed.vx(j) = control_sequence_.vx(j);composed.wz(j) = control_sequence_.wz(j);
     }
-    size_t hit=0;
-    if(validateLongEntrySequence(composed,hit)&&hit<=retained_hit) {chosen=composed;}
+    size_t hit = 0;
+    if(validateLongEntrySequence(composed, hit) && hit <= retained_hit) {chosen = composed;}
   }
-  long_entry_->controls=chosen;
-  long_entry_->last_stamp_ns=rclcpp::Time(state_.pose.header.stamp).nanoseconds();
-  for(size_t j=0;j<settings_.time_steps;++j) {
-    control_sequence_.vx(j)=chosen.vx(j);control_sequence_.wz(j)=chosen.wz(j);
+  long_entry_->controls = chosen;
+  long_entry_->last_stamp_ns = rclcpp::Time(state_.pose.header.stamp).nanoseconds();
+  for(size_t j = 0; j < settings_.time_steps; ++j) {
+    control_sequence_.vx(j) = chosen.vx(j);control_sequence_.wz(j) = chosen.wz(j);
   }
 }
 
@@ -1173,7 +1265,8 @@ bool Optimizer::initializeShortCuspMean()
   const float yaw = path_.yaws(real - 1);
   const float yaw_error = angles::shortest_angular_distance(
     tf2::getYaw(state_.pose.pose.orientation), yaw);
-  const float distance = std::hypot(x - state_.pose.pose.position.x, y - state_.pose.pose.position.y);
+  const float distance = std::hypot(x - state_.pose.pose.position.x,
+      y - state_.pose.pose.position.y);
   // A sparsely sampled curved entry must not fall between the short-distance
   // gate and the long-entry point-count gate. Geometry, not interpolation
   // density, determines which bounded initializer family can cover it.
@@ -1241,11 +1334,12 @@ bool Optimizer::initializeShortCuspMean()
             for (unsigned int j = 0; j < settings_.time_steps; ++j) {
               const float requested = j * settings_.model_dt < delay ? crawl : cruise;
               const float travel = std::min({requested, remaining / settings_.model_dt,
-                  gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                  settings_.constraints.wz / curvature});
+                    gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                    settings_.constraints.wz / curvature});
               candidate.vx(j) = gear * std::max(0.0f, travel);
               candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) * curvature;
-              remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
+              remaining = std::max(0.0f,
+                  remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
             }
             proposals.push_back(std::move(candidate));
           }
@@ -1266,8 +1360,8 @@ bool Optimizer::initializeShortCuspMean()
           for (unsigned int j = 0; j < settings_.time_steps; ++j) {
             const float requested = j * settings_.model_dt < delay ? 0.005f : cruise;
             const float travel = std::min({requested, remaining / settings_.model_dt,
-                gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                settings_.constraints.wz * radius});
+                  gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                  settings_.constraints.wz * radius});
             candidate.vx(j) = gear * std::max(0.0f, travel);
             candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) / radius;
             remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
@@ -1284,58 +1378,64 @@ bool Optimizer::initializeShortCuspMean()
   const auto started = std::chrono::steady_clock::now();
   size_t gentle_first = std::numeric_limits<size_t>::max();
   const auto screen = [&](size_t first) {
-    for (size_t start = first; start < proposals.size(); start += settings_.batch_size) {
-      const size_t count = std::min(static_cast<size_t>(settings_.batch_size), proposals.size() - start);
-      for (size_t row = 0; row < settings_.batch_size; ++row) {
-        const auto & candidate = proposals[start + std::min(row, count - 1)];
-        for (size_t j = 0; j < settings_.time_steps; ++j) {
-          state_.cvx(row, j) = candidate.vx(j);
-          state_.cwz(row, j) = candidate.wz(j);
-        }
-      }
-      updateStateVelocities(state_);
-      integrateStateVelocities(generated_trajectories_, state_);
-      costs_.fill(0); critics_data_.furthest_reached_path_point.reset();
-      critics_data_.path_pts_valid.reset(); critics_data_.fail_flag = false;
-      // Finite seed screening is not a Gaussian MPPI update. Keep its summary
-      // in CUSP_SEED diagnostics, not indistinguishable controller critic stats.
-      critic_manager_.evalTrajectoriesScores(critics_data_, false);
-      for (size_t row = 0; row < count; ++row) {
-        const size_t last = settings_.time_steps - 1;
-        const float radial = std::hypot(generated_trajectories_.x(row, last) - x,
-            generated_trajectories_.y(row, last) - y);
-        const float angular = std::abs(angles::shortest_angular_distance(
-            generated_trajectories_.yaws(row, last), yaw));
-        if (!std::isfinite(costs_(row)) || costs_(row) >= best_cost ||
-          radial > xy_gate || angular > yaw_gate)
-        {
-          continue;
-        }
-        bool collision = false;
-        for (size_t j = 0; j < settings_.time_steps; ++j) {
-          const auto cost = checker.footprintCostAtPose(generated_trajectories_.x(row, j),
-              generated_trajectories_.y(row, j), generated_trajectories_.yaws(row, j), footprint);
-          if (cost == nav2_costmap_2d::LETHAL_OBSTACLE || cost == nav2_costmap_2d::NO_INFORMATION) {
-            collision = true; break;
+      for (size_t start = first; start < proposals.size(); start += settings_.batch_size) {
+        const size_t count = std::min(static_cast<size_t>(settings_.batch_size),
+          proposals.size() - start);
+        for (size_t row = 0; row < settings_.batch_size; ++row) {
+          const auto & candidate = proposals[start + std::min(row, count - 1)];
+          for (size_t j = 0; j < settings_.time_steps; ++j) {
+            state_.cvx(row, j) = candidate.vx(j);
+            state_.cwz(row, j) = candidate.wz(j);
           }
         }
-        if (!collision && (gentle_short_cusp_required_ || start + row >= gentle_first)) {
+        updateStateVelocities(state_);
+        integrateStateVelocities(generated_trajectories_, state_);
+        costs_.fill(0); critics_data_.furthest_reached_path_point.reset();
+        critics_data_.path_pts_valid.reset(); critics_data_.fail_flag = false;
+      // Finite seed screening is not a Gaussian MPPI update. Keep its summary
+      // in CUSP_SEED diagnostics, not indistinguishable controller critic stats.
+        critic_manager_.evalTrajectoriesScores(critics_data_, false);
+        for (size_t row = 0; row < count; ++row) {
+          const size_t last = settings_.time_steps - 1;
+          const float radial = std::hypot(generated_trajectories_.x(row, last) - x,
+            generated_trajectories_.y(row, last) - y);
+          const float angular = std::abs(angles::shortest_angular_distance(
+            generated_trajectories_.yaws(row, last), yaw));
+          if (!std::isfinite(costs_(row)) || costs_(row) >= best_cost ||
+            radial > xy_gate || angular > yaw_gate)
+          {
+            continue;
+          }
+          bool collision = false;
+          for (size_t j = 0; j < settings_.time_steps; ++j) {
+            const auto cost = checker.footprintCostAtPose(generated_trajectories_.x(row, j),
+              generated_trajectories_.y(row, j), generated_trajectories_.yaws(row, j), footprint);
+            if (cost == nav2_costmap_2d::LETHAL_OBSTACLE ||
+              cost == nav2_costmap_2d::NO_INFORMATION)
+            {
+              collision = true; break;
+            }
+          }
+          if (!collision && (gentle_short_cusp_required_ || start + row >= gentle_first)) {
           // The supplemental family must survive constraints and the actual
           // index-1 emission stream, not just the conventional mean forecast.
-          const auto previous = control_sequence_;
-          control_sequence_ = proposals[start + row];
-          try {applyControlSequenceConstraints();}
-          catch (...) {control_sequence_ = previous; throw;}
-          const auto constrained = control_sequence_;
-          control_sequence_ = previous;
-          if (!cuspSequenceFeasible(constrained)) {continue;}
-          if (!actualCuspStreamFeasible(constrained)) {continue;}
-          proposals[start + row] = constrained;
+            const auto previous = control_sequence_;
+            control_sequence_ = proposals[start + row];
+            try {
+              applyControlSequenceConstraints();
+            } catch (...) {
+              control_sequence_ = previous; throw;
+            }
+            const auto constrained = control_sequence_;
+            control_sequence_ = previous;
+            if (!cuspSequenceFeasible(constrained)) {continue;}
+            if (!actualCuspStreamFeasible(constrained)) {continue;}
+            proposals[start + row] = constrained;
+          }
+          if (!collision) {best_cost = costs_(row); best = start + row;}
         }
-        if (!collision) {best_cost = costs_(row); best = start + row;}
       }
-    }
-  };
+    };
   screen(0);
   if (!long_entry && best == proposals.size()) {
     // Coarse crawl spacing can miss a steering-settling continuation between
@@ -1355,11 +1455,12 @@ bool Optimizer::initializeShortCuspMean()
               for (unsigned int j = 0; j < settings_.time_steps; ++j) {
                 const float requested = j * settings_.model_dt < delay ? crawl : cruise;
                 const float travel = std::min({requested, remaining / settings_.model_dt,
-                    gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                    settings_.constraints.wz / curvature});
+                      gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                      settings_.constraints.wz / curvature});
                 candidate.vx(j) = gear * std::max(0.0f, travel);
                 candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) * curvature;
-                remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
+                remaining = std::max(0.0f,
+                    remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
               }
               proposals.push_back(std::move(candidate));
             }
@@ -1393,11 +1494,12 @@ bool Optimizer::initializeShortCuspMean()
             for (unsigned int j = 0; j < settings_.time_steps; ++j) {
               const float requested = j * settings_.model_dt < delay ? 0.003f : cruise;
               const float travel = std::min({requested, remaining / settings_.model_dt,
-                  gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                  settings_.constraints.wz / curvature});
+                    gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                    settings_.constraints.wz / curvature});
               candidate.vx(j) = gear * std::max(0.0f, travel);
               candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) * curvature;
-              remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
+              remaining = std::max(0.0f,
+                  remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
             }
             proposals.push_back(std::move(candidate));
           }
@@ -1425,11 +1527,12 @@ bool Optimizer::initializeShortCuspMean()
             for (unsigned int j = 0; j < settings_.time_steps; ++j) {
               const float requested = j * settings_.model_dt < delay ? crawl : cruise;
               const float travel = std::min({requested, remaining / settings_.model_dt,
-                  gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                  settings_.constraints.wz * radius});
+                    gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                    settings_.constraints.wz * radius});
               candidate.vx(j) = gear * std::max(0.0f, travel);
               candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) / radius;
-              remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
+              remaining = std::max(0.0f,
+                  remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
             }
             proposals.push_back(std::move(candidate));
           }
@@ -1458,8 +1561,8 @@ bool Optimizer::initializeShortCuspMean()
           float remaining = budget;
           for (size_t j = 0; j < settings_.time_steps; ++j) {
             const float travel = std::min({cruise, remaining / settings_.model_dt,
-                gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
-                settings_.constraints.wz / curvature});
+                  gear > 0 ? settings_.constraints.vx_max : -settings_.constraints.vx_min,
+                  settings_.constraints.wz / curvature});
             candidate.vx(j) = gear * std::max(0.0f, travel);
             candidate.wz(j) = yaw_sign * std::abs(candidate.vx(j)) * curvature;
             remaining = std::max(0.0f, remaining - std::abs(candidate.vx(j)) * settings_.model_dt);
@@ -1549,44 +1652,48 @@ bool Optimizer::initializeLongCuspPrefixMean()
   size_t best = proposals.size();
   float best_cost = std::numeric_limits<float>::infinity();
   for (size_t start = 0; start < proposals.size(); start += settings_.batch_size) {
-    const size_t count = std::min(static_cast<size_t>(settings_.batch_size), proposals.size() - start);
+    const size_t count = std::min(static_cast<size_t>(settings_.batch_size),
+        proposals.size() - start);
     for (size_t row = 0; row < settings_.batch_size; ++row) {
       const auto & proposal = proposals[start + std::min(row, count - 1)];
       for (size_t j = 0; j < settings_.time_steps; ++j) {
-        state_.cvx(row,j) = proposal.vx(j); state_.cwz(row,j) = proposal.wz(j);
+        state_.cvx(row, j) = proposal.vx(j); state_.cwz(row, j) = proposal.wz(j);
       }
     }
-    updateStateVelocities(state_); integrateStateVelocities(generated_trajectories_,state_);
+    updateStateVelocities(state_); integrateStateVelocities(generated_trajectories_, state_);
     costs_.fill(0); critics_data_.furthest_reached_path_point.reset();
     critics_data_.path_pts_valid.reset(); critics_data_.fail_flag = false;
-    critic_manager_.evalTrajectoriesScores(critics_data_,false);
+    critic_manager_.evalTrajectoriesScores(critics_data_, false);
     for (size_t row = 0; row < count; ++row) {
       if (!std::isfinite(costs_(row)) || costs_(row) >= best_cost) {continue;}
       const size_t last = settings_.time_steps - 1;
-      const float x = generated_trajectories_.x(row,last), y = generated_trajectories_.y(row,last);
-      const float yaw = generated_trajectories_.yaws(row,last);
-      if (std::hypot(x-state_.pose.pose.position.x,y-state_.pose.pose.position.y) < edge) {continue;}
+      const float x = generated_trajectories_.x(row, last),
+        y = generated_trajectories_.y(row, last);
+      const float yaw = generated_trajectories_.yaws(row, last);
+      if (std::hypot(x - state_.pose.pose.position.x, y - state_.pose.pose.position.y) < edge) {
+        continue;
+      }
       bool aligned = false;
-      for (size_t k = 1; k < std::min<size_t>(real,9); ++k) {
-        aligned = aligned || (std::hypot(x-path_.x(k),y-path_.y(k)) <= gates.first &&
-          std::abs(angles::shortest_angular_distance(yaw,path_.yaws(k))) <= gates.second);
+      for (size_t k = 1; k < std::min<size_t>(real, 9); ++k) {
+        aligned = aligned || (std::hypot(x - path_.x(k), y - path_.y(k)) <= gates.first &&
+          std::abs(angles::shortest_angular_distance(yaw, path_.yaws(k))) <= gates.second);
       }
       if (!aligned) {continue;}
       bool clear = true;
       for (size_t j = 0; j < settings_.time_steps; ++j) {
-        const float px=generated_trajectories_.x(row,j), py=generated_trajectories_.y(row,j);
-        const float pa=generated_trajectories_.yaws(row,j);
-        if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pa)) {clear=false;break;}
-        const double cost=checker.footprintCostAtPose(px,py,pa,footprint);
-        if (cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {clear=false;break;}
+        const float px = generated_trajectories_.x(row, j), py = generated_trajectories_.y(row, j);
+        const float pa = generated_trajectories_.yaws(row, j);
+        if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pa)) {clear = false;break;}
+        const double cost = checker.footprintCostAtPose(px, py, pa, footprint);
+        if (cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {clear = false;break;}
       }
-      if (clear) {best=start+row;best_cost=costs_(row);}
+      if (clear) {best = start + row;best_cost = costs_(row);}
     }
   }
   costs_.fill(0); critics_data_.furthest_reached_path_point.reset();
-  critics_data_.path_pts_valid.reset(); critics_data_.fail_flag=false;
+  critics_data_.path_pts_valid.reset(); critics_data_.fail_flag = false;
   if (best == proposals.size()) {return false;}
-  control_sequence_=proposals[best];
+  control_sequence_ = proposals[best];
   return true;
 }
 
@@ -1745,7 +1852,8 @@ void Optimizer::preserveFilteredCollisionFeasibility(
         out << '[' << control_history_[k].vx << ',' << control_history_[k].wz << ']';
       }
       out << "],\"batch_size\":" << costs_.size()
-          << ",\"sample_cost_kind\":\"regularized costs after weighted update\",\"samples\":[";
+          << ",\"sample_cost_kind\":\"regularized costs after weighted upd"
+        "ate\",\"samples\":[";
       for (size_t k = 0; k < order.size(); ++k) {
         const size_t row = order[k];
         if (k) {out << ',';}
@@ -1836,39 +1944,40 @@ bool Optimizer::actualCuspStreamFeasible(const models::ControlSequence & sequenc
 void Optimizer::enforceGentleCuspEmission()
 {
   if (!gentle_short_cusp_required_) {return;}
-  const auto reject=[]() {
-      throw nav2_core::FailedToMakeProgress("Gentle cusp emitted stream invalid; stopped replan required");
+  const auto reject = []() {
+      throw nav2_core::FailedToMakeProgress(
+        "Gentle cusp emitted stream invalid; stopped replan required");
     };
-  const auto finite=diagnostic::isFiniteCaptureValue;
-  const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-  const size_t real=std::min(critics_data_.real_path_point_count.value_or(0),path_.x.size());
-  const auto gates=cuspTolerances();
+  const auto finite = diagnostic::isFiniteCaptureValue;
+  const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+  const size_t real = std::min(critics_data_.real_path_point_count.value_or(0), path_.x.size());
+  const auto gates = cuspTolerances();
   if (!real || !active_cusp_direction_ || !model || !model->initialSteering() ||
     !finite(*model->initialSteering()) ||
     (model->requiresConditionedSteering() && (!model->initialConditionedSteering() ||
     !finite(*model->initialConditionedSteering()))) ||
-    !finite(gates.first) || !finite(gates.second) || gates.first<=0 || gates.second<=0 ||
+    !finite(gates.first) || !finite(gates.second) || gates.first <= 0 || gates.second <= 0 ||
     !finite(state_.pose.pose.position.x) || !finite(state_.pose.pose.position.y) ||
     !finite(tf2::getYaw(state_.pose.pose.orientation)) || !finite(state_.speed.linear.x) ||
-    !finite(state_.speed.angular.z) || !finite(path_.x(real-1)) || !finite(path_.y(real-1)) ||
-    !finite(path_.yaws(real-1))) {reject();}
-  if (std::hypot(state_.pose.pose.position.x-path_.x(real-1),
-      state_.pose.pose.position.y-path_.y(real-1))<=gates.first &&
+    !finite(state_.speed.angular.z) || !finite(path_.x(real - 1)) || !finite(path_.y(real - 1)) ||
+    !finite(path_.yaws(real - 1))) {reject();}
+  if (std::hypot(state_.pose.pose.position.x - path_.x(real - 1),
+      state_.pose.pose.position.y - path_.y(real - 1)) <= gates.first &&
     std::abs(angles::shortest_angular_distance(tf2::getYaw(state_.pose.pose.orientation),
-      path_.yaws(real-1)))<=gates.second)
+      path_.yaws(real - 1))) <= gates.second)
   {
-    gentle_short_cusp_required_=false;return;
+    gentle_short_cusp_required_ = false;return;
   }
-  const auto valid=[&]() {
-      auto sequence=cusp_completion_.value_or(control_sequence_);
-      if (sequence.vx.size()<control_sequence_.vx.size() ||
-        sequence.wz.size()!=sequence.vx.size() ||
-        control_sequence_.wz.size()!=control_sequence_.vx.size()) {return false;}
-      for (size_t j=0;j<control_sequence_.vx.size();++j) {
-        sequence.vx(j)=control_sequence_.vx(j);sequence.wz(j)=control_sequence_.wz(j);
+  const auto valid = [&]() {
+      auto sequence = cusp_completion_.value_or(control_sequence_);
+      if (sequence.vx.size() < control_sequence_.vx.size() ||
+        sequence.wz.size() != sequence.vx.size() ||
+        control_sequence_.wz.size() != control_sequence_.vx.size()) {return false;}
+      for (size_t j = 0; j < control_sequence_.vx.size(); ++j) {
+        sequence.vx(j) = control_sequence_.vx(j);sequence.wz(j) = control_sequence_.wz(j);
       }
       if (!actualCuspStreamFeasible(sequence)) {return false;}
-      if (cusp_completion_) {cusp_completion_=sequence;}
+      if (cusp_completion_) {cusp_completion_ = sequence;}
       return true;
     };
   if (valid()) {return;}
@@ -1892,7 +2001,9 @@ bool Optimizer::cuspSequenceFeasible(const models::ControlSequence & sequence) c
   predicted.speed = state_.speed;
   const size_t command_offset = settings_.shift_control_sequence ? 1 : 0;
   for (size_t j = 0; j < steps; ++j) {
-    if (!diagnostic::isFiniteCaptureValue(sequence.vx(j)) || !diagnostic::isFiniteCaptureValue(sequence.wz(j))) {
+    if (!diagnostic::isFiniteCaptureValue(sequence.vx(j)) ||
+      !diagnostic::isFiniteCaptureValue(sequence.wz(j)))
+    {
       return false;
     }
     // A short-cusp fallback must complete the active gear segment, not invent
@@ -1924,7 +2035,8 @@ bool Optimizer::cuspSequenceFeasible(const models::ControlSequence & sequence) c
   nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
   const auto footprint = costmap_ros_->getRobotFootprint();
   for (size_t j = 0; j < steps; ++j) {
-    if (!diagnostic::isFiniteCaptureValue(trajectory.x(0, j)) || !diagnostic::isFiniteCaptureValue(trajectory.y(0, j)) ||
+    if (!diagnostic::isFiniteCaptureValue(trajectory.x(0,
+        j)) || !diagnostic::isFiniteCaptureValue(trajectory.y(0, j)) ||
       !diagnostic::isFiniteCaptureValue(trajectory.yaws(0, j)))
     {
       return false;
@@ -2017,7 +2129,8 @@ bool Optimizer::tryExtendedShortCuspContinuation(bool initialize)
             remaining = std::max(0.0f, remaining - v * settings_.model_dt);
           }
           if (accept(candidate)) {
-            RCLCPP_INFO(logger_, "[CUSP_COMPLETION] retained %zu-step completion; emitted horizon %u",
+            RCLCPP_INFO(logger_,
+                "[CUSP_COMPLETION] retained %zu-step completion; emitted horizon %u",
               steps, settings_.time_steps);
             return true;
           }
@@ -2180,7 +2293,7 @@ void Optimizer::enforceShortCuspMeanFeasibility(const models::ControlSequence * 
             << ",\"stamp\":" << rclcpp::Time(state_.pose.header.stamp).seconds()
             << ",\"real_path_point_count\":" << real
             << ",\"active_cusp_direction\":" << active_cusp_direction_
-          << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
+            << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
             << ",\"path_direction\":" << path_direction_
             << ",\"model_dt\":" << settings_.model_dt
             << ",\"command_offset\":" << (settings_.shift_control_sequence ? 1 : 0)
@@ -2255,18 +2368,19 @@ void Optimizer::enforceShortCuspMeanFeasibility(const models::ControlSequence * 
     throw nav2_core::FailedToMakeProgress(
             "No validated short-cusp continuation; stopped replan required");
   }
-  RCLCPP_INFO(logger_, "[CUSP_MEAN_GUARD] replaced infeasible filtered mean with validated arc");
+  RCLCPP_INFO(logger_, "[CUSP_MEAN_GUARD] replaced infeasible filtered mean with val"
+      "idated arc");
 }
 
 void Optimizer::shiftControlSequence()
 {
   using namespace xt::placeholders;  // NOLINT
   if (long_entry_) {
-    auto & certificate=*long_entry_;
-    certificate.controls.vx=xt::roll(certificate.controls.vx,-1);
-    certificate.controls.wz=xt::roll(certificate.controls.wz,-1);
-    certificate.controls.vx(certificate.controls.vx.size()-1)=0.0f;
-    certificate.controls.wz(certificate.controls.wz.size()-1)=0.0f;
+    auto & certificate = *long_entry_;
+    certificate.controls.vx = xt::roll(certificate.controls.vx, -1);
+    certificate.controls.wz = xt::roll(certificate.controls.wz, -1);
+    certificate.controls.vx(certificate.controls.vx.size() - 1) = 0.0f;
+    certificate.controls.wz(certificate.controls.wz.size() - 1) = 0.0f;
     ++certificate.shifts;
   }
   if (cusp_completion_) {
@@ -2322,7 +2436,9 @@ bool Optimizer::longCuspDepartureAvailable(
     outgoing.poses.size() < 2 ||
     outgoing.header.frame_id != pose.header.frame_id || xy_gate <= 0 || yaw_gate <= 0)
   {
-    throw nav2_core::NoValidControl("Departure validation requires measured Ackermann state and a local prefix");
+    throw nav2_core::NoValidControl(
+        "Departure validation requires measured Ackermann state and a"
+      " local prefix");
   }
   // This finite forward family is a policy test, not a global reachability proof.
   // It intentionally does not call prepare/reset or alter the carried control mean.
@@ -2362,52 +2478,65 @@ bool Optimizer::longCuspDepartureAvailable(
         const double stamp = rclcpp::Time(pose.header.stamp).seconds();
         if (!captures.eligible(true, stamp)) {return;}
         const unsigned int slot = captures.take(stamp);
-        const size_t cells = static_cast<size_t>(costmap_->getSizeInCellsX()) * costmap_->getSizeInCellsY();
+        const size_t cells = static_cast<size_t>(costmap_->getSizeInCellsX()) *
+          costmap_->getSizeInCellsY();
         if (cells > 250000 || outgoing.poses.size() > 64) {
           throw std::runtime_error("Departure diagnostic exceeds capture bounds");
         }
         std::ostringstream out;
-        out << std::setprecision(17) << "{\"scope\":\"Actual departure rejection inputs under controller costmap lock; no command emitted\""
+        out << std::setprecision(17) <<
+          "{\"scope\":\"Actual departure rejection inputs under control"
+          "ler costmap lock; no command emitted\""
             << ",\"stamp_ns\":" << rclcpp::Time(pose.header.stamp).nanoseconds()
             << ",\"frame\":" << std::quoted(pose.header.frame_id)
             << ",\"reason\":" << std::quoted(reason)
             << ",\"terminal_endpoint\":" << (terminal_endpoint ? "true" : "false")
-            << ",\"robot\":[" << pose.pose.position.x << ',' << pose.pose.position.y << ',' << tf2::getYaw(pose.pose.orientation)
+            << ",\"robot\":[" << pose.pose.position.x << ',' << pose.pose.position.y << ',' <<
+          tf2::getYaw(pose.pose.orientation)
             << "],\"speed\":[" << speed.linear.x << ',' << speed.angular.z
             << "],\"initial_steering\":" << *model->initialSteering()
             << ",\"initial_conditioned_steering\":";
-        if (model->initialConditionedSteering()) {out << *model->initialConditionedSteering();}
-        else {out << "null";}
+        if (model->initialConditionedSteering()) {
+          out << *model->initialConditionedSteering();
+        } else {
+          out << "null";
+        }
         out << ",\"initial_footprint_cost\":" << initial_cost
             << ",\"departure_gates\":[" << xy_gate << ',' << yaw_gate
             << "],\"time_steps\":" << settings_.time_steps << ",\"model_dt\":" << settings_.model_dt
-            << ",\"constraints\":[" << settings_.constraints.vx_max << ',' << settings_.constraints.vx_min
-            << ',' << settings_.constraints.vy << ',' << settings_.constraints.wz << ',' << settings_.constraints.ax_max
-            << ',' << settings_.constraints.ax_min << ',' << settings_.constraints.ay_max << ',' << settings_.constraints.ay_min
+            << ",\"constraints\":[" << settings_.constraints.vx_max << ',' <<
+          settings_.constraints.vx_min
+            << ',' << settings_.constraints.vy << ',' << settings_.constraints.wz << ',' <<
+          settings_.constraints.ax_max
+            << ',' << settings_.constraints.ax_min << ',' << settings_.constraints.ay_max << ',' <<
+          settings_.constraints.ay_min
             << ',' << settings_.constraints.az_max << "],\"departure_prefix\":[";
         for (size_t k = 0; k < outgoing.poses.size(); ++k) {
           if (k) {out << ',';}
           const auto & target = outgoing.poses[k].pose;
-          out << '[' << target.position.x << ',' << target.position.y << ',' << tf2::getYaw(target.orientation) << ']';
+          out << '[' << target.position.x << ',' << target.position.y << ',' <<
+            tf2::getYaw(target.orientation) << ']';
         }
         out << "],\"footprint\":[";
         for (size_t k = 0; k < footprint.size(); ++k) {
           if (k) {out << ',';} out << '[' << footprint[k].x << ',' << footprint[k].y << ']';
         }
         out << "],\"grid\":{\"width\":" << costmap_->getSizeInCellsX()
-            << ",\"height\":" << costmap_->getSizeInCellsY() << ",\"resolution\":" << costmap_->getResolution()
-            << ",\"origin\":[" << costmap_->getOriginX() << ',' << costmap_->getOriginY() << "],\"data\":[";
+            << ",\"height\":" << costmap_->getSizeInCellsY() << ",\"resolution\":" <<
+          costmap_->getResolution()
+            << ",\"origin\":[" << costmap_->getOriginX() << ',' << costmap_->getOriginY() <<
+          "],\"data\":[";
         for (size_t k = 0; k < cells; ++k) {
           if (k) {out << ',';} out << static_cast<unsigned int>(costmap_->getCharMap()[k]);
         }
         out << "]}}\n";
         const std::string destination = explicit_path && *explicit_path ? explicit_path :
           std::string(mean_path) + ".departure_rejection";
-        std::ofstream file(destination + "." + std::to_string(slot) + ".json", std::ios::out | std::ios::trunc);
+        std::ofstream file(destination + "." + std::to_string(slot) + ".json",
+          std::ios::out | std::ios::trunc);
         if (!file) {throw std::runtime_error("Cannot open departure rejection trace");}
         file << out.str(); file.close();
         if (!file) {throw std::runtime_error("Cannot finish departure rejection trace");}
-
       } catch (const std::exception & error) {
         RCLCPP_WARN_THROTTLE(logger_, *parent_.lock()->get_clock(), 5000,
           "Optional departure rejection capture failed: %s", error.what());
@@ -2423,70 +2552,72 @@ bool Optimizer::longCuspDepartureAvailable(
         for (float fraction : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
           if (terminal_endpoint) {
             const double yaw_error = angles::shortest_angular_distance(
-              tf2::getYaw(pose.pose.orientation), tf2::getYaw(outgoing.poses.back().pose.orientation));
+              tf2::getYaw(pose.pose.orientation),
+                tf2::getYaw(outgoing.poses.back().pose.orientation));
             const float turn = yaw_error > 1e-6 ? 1.0f : (yaw_error < -1e-6 ? -1.0f : 0.0f);
             // Same bounded curvature family as short-cusp completion. This is
             // conservative failure, never a proof that other curvatures cannot work.
             if (fraction != turn) {continue;}
           }
           for (float extra : {0.0f, 0.01f, 0.02f}) {
-          if (!terminal_endpoint && extra > 0.0f) {continue;}
-          const auto & endpoint = outgoing.poses.back().pose.position;
-          float remaining = std::hypot(endpoint.x - pose.pose.position.x,
+            if (!terminal_endpoint && extra > 0.0f) {continue;}
+            const auto & endpoint = outgoing.poses.back().pose.position;
+            float remaining = std::hypot(endpoint.x - pose.pose.position.x,
             endpoint.y - pose.pose.position.y) + extra;
-          models::State candidate;
-          candidate.reset(1, steps);
-          candidate.pose = pose;
-          candidate.speed = speed;
-          float last_wz = 0.0f;
-          for (size_t j = 0; j < steps; ++j) {
-            float vx = std::min(j * settings_.model_dt < delay ? crawl : cruise,
+            models::State candidate;
+            candidate.reset(1, steps);
+            candidate.pose = pose;
+            candidate.speed = speed;
+            float last_wz = 0.0f;
+            for (size_t j = 0; j < steps; ++j) {
+              float vx = std::min(j * settings_.model_dt < delay ? crawl : cruise,
               settings_.constraints.vx_max);
-            if (terminal_endpoint) {
-              vx = std::min(vx, remaining / settings_.model_dt);
-              remaining = std::max(0.0f, remaining - vx * settings_.model_dt);
-            }
-            float wz = std::clamp(vx * fraction / radius,
+              if (terminal_endpoint) {
+                vx = std::min(vx, remaining / settings_.model_dt);
+                remaining = std::max(0.0f, remaining - vx * settings_.model_dt);
+              }
+              float wz = std::clamp(vx * fraction / radius,
               -settings_.constraints.wz, settings_.constraints.wz);
-            if (j > 0) {
-              const float delta = settings_.constraints.az_max * settings_.model_dt;
-              wz = std::clamp(wz, last_wz - delta, last_wz + delta);
+              if (j > 0) {
+                const float delta = settings_.constraints.az_max * settings_.model_dt;
+                wz = std::clamp(wz, last_wz - delta, last_wz + delta);
+              }
+              candidate.cvx(0, j) = vx;
+              candidate.cwz(0, j) = wz;
+              last_wz = wz;
             }
-            candidate.cvx(0, j) = vx;
-            candidate.cwz(0, j) = wz;
-            last_wz = wz;
-          }
-          updateStateVelocities(candidate);
-          models::Trajectories trajectory;
-          trajectory.reset(1, steps);
-          integrateStateVelocities(trajectory, candidate);
-          bool aligned = false;
-          bool clear = true;
-          for (size_t j = 0; j < steps; ++j) {
-            const float x = trajectory.x(0, j), y = trajectory.y(0, j);
-            const float yaw = trajectory.yaws(0, j);
-            const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
-            if (cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
-              clear = false;
-              break;
-            }
-            if (std::hypot(x - pose.pose.position.x, y - pose.pose.position.y) + 1e-6 < edge) {
-              continue;
-            }
-            const size_t begin = terminal_endpoint ? outgoing.poses.size() - 1 : 1;
-            if (terminal_endpoint && j + 1 != steps) {continue;}
-            for (size_t k = begin; k < (terminal_endpoint ? outgoing.poses.size() :
-              std::min<size_t>(outgoing.poses.size(), 9)); ++k) {
-              const auto & target = outgoing.poses[k].pose;
-              if (std::hypot(x - target.position.x, y - target.position.y) <= xy_gate &&
-                std::abs(angles::shortest_angular_distance(yaw,
-                tf2::getYaw(target.orientation))) <= yaw_gate)
+            updateStateVelocities(candidate);
+            models::Trajectories trajectory;
+            trajectory.reset(1, steps);
+            integrateStateVelocities(trajectory, candidate);
+            bool aligned = false;
+            bool clear = true;
+            for (size_t j = 0; j < steps; ++j) {
+              const float x = trajectory.x(0, j), y = trajectory.y(0, j);
+              const float yaw = trajectory.yaws(0, j);
+              const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
+              if (cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+                clear = false;
+                break;
+              }
+              if (std::hypot(x - pose.pose.position.x, y - pose.pose.position.y) + 1e-6 < edge) {
+                continue;
+              }
+              const size_t begin = terminal_endpoint ? outgoing.poses.size() - 1 : 1;
+              if (terminal_endpoint && j + 1 != steps) {continue;}
+              for (size_t k = begin; k < (terminal_endpoint ? outgoing.poses.size() :
+                std::min<size_t>(outgoing.poses.size(), 9)); ++k)
               {
-                aligned = true;
+                const auto & target = outgoing.poses[k].pose;
+                if (std::hypot(x - target.position.x, y - target.position.y) <= xy_gate &&
+                  std::abs(angles::shortest_angular_distance(yaw,
+                tf2::getYaw(target.orientation))) <= yaw_gate)
+                {
+                  aligned = true;
+                }
               }
             }
-          }
-          if (clear && aligned) {return true;}
+            if (clear && aligned) {return true;}
           }
         }
       }
@@ -2600,9 +2731,11 @@ void Optimizer::constrainShortCuspSampleDirections()
 void Optimizer::generateNoisedTrajectories()
 {
   noise_generator_.setNoisedControls(state_, control_sequence_);
-  recorder::observe("sample_draw", [&] {return recorder::Json{
-    {"vx", recorder::tensor(state_.cvx)}, {"vy", recorder::tensor(state_.cvy)},
-    {"wz", recorder::tensor(state_.cwz)}};});
+  recorder::observe("sample_draw", [&] {
+      return recorder::Json{
+      {"vx", recorder::tensor(state_.cvx)}, {"vy", recorder::tensor(state_.cvy)},
+      {"wz", recorder::tensor(state_.cwz)}};
+                                          });
   noise_generator_.generateNextNoises();
   // Bound requested controls before predicting physical acceleration and steering.
   // Measured feedback is never projected. With path-direction conditioning,
@@ -2616,13 +2749,14 @@ void Optimizer::generateNoisedTrajectories()
 void Optimizer::applyControlSequenceConstraints()
 {
   recorder::observe("constraint_begin", [&] {
-    const auto ack = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-    return recorder::Json{{"control",recorder::sequence(control_sequence_)},
-      {"dt",settings_.model_dt},{"cusp_gear",shortCuspControlDirection()},
-      {"radius",ack ? recorder::Json(ack->getMinTurningRadius()) : recorder::Json(nullptr)},
-      {"limits",{{"vx_min",settings_.constraints.vx_min},{"vx_max",settings_.constraints.vx_max},
-        {"wz",settings_.constraints.wz},{"ax_max",settings_.constraints.ax_max},
-        {"ax_min",settings_.constraints.ax_min},{"az_max",settings_.constraints.az_max}}}};
+      const auto ack = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+      return recorder::Json{{"control", recorder::sequence(control_sequence_)},
+      {"dt", settings_.model_dt}, {"cusp_gear", shortCuspControlDirection()},
+      {"radius", ack ? recorder::Json(ack->getMinTurningRadius()) : recorder::Json(nullptr)},
+      {"limits",
+        {{"vx_min", settings_.constraints.vx_min}, {"vx_max", settings_.constraints.vx_max},
+          {"wz", settings_.constraints.wz}, {"ax_max", settings_.constraints.ax_max},
+          {"ax_min", settings_.constraints.ax_min}, {"az_max", settings_.constraints.az_max}}}};
   });
   auto & s = settings_;
 
@@ -2669,7 +2803,9 @@ void Optimizer::applyControlSequenceConstraints()
   }
 
   motion_model_->applyConstraints(control_sequence_);
-  recorder::observe("constraint_end", [&] {return recorder::Json{{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("constraint_end", [&] {
+      return recorder::Json{{"control", recorder::sequence(control_sequence_)}};
+  });
 }
 
 void Optimizer::updateStateVelocities(
@@ -2803,7 +2939,10 @@ xt::xtensor<float, 2> Optimizer::getOptimizedTrajectory()
       try {
         std::ostringstream out;
         out << std::setprecision(17)
-            << "{\"scope\":\"Final predicted trajectory and exact locked internal grid; diagnostic write may delay this tick; no command intervention\","
+            <<
+          "{\"scope\":\"Final predicted trajectory and exact locked int"
+          "ernal grid; diagnostic write may delay this tick; no command"
+          " intervention\","
             << "\"stamp_ns\":" << rclcpp::Time(state_.pose.header.stamp).nanoseconds()
             << ",\"collision_index\":" << collision_index
             << ",\"robot\":[" << state_.pose.pose.position.x << ','
@@ -2925,14 +3064,16 @@ bool Optimizer::conditionControlExponents(xt::xtensor<float, 1> & exponents)
       try {
         std::ostringstream out;
         out << std::setprecision(17)
-            << "{\"scope\":\"Rejected native direction-conditioning batch; no control update completed\","
+            <<
+          "{\"scope\":\"Rejected native direction-conditioning batch; n"
+          "o control update completed\","
             << "\"stamp\":" << state_.pose.header.stamp.sec +
           state_.pose.header.stamp.nanosec * 1e-9
             << ",\"gear\":" << gear << ",\"command_index\":" << index
             << ",\"smoothing\":" << (smooth_control_sequence_ ? "true" : "false")
             << ",\"real_path_point_count\":" << real
             << ",\"active_cusp_direction\":" << active_cusp_direction_
-          << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
+            << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
             << ",\"history\":[";
         for (size_t k = 0; k < control_history_.size(); ++k) {
           if (k) {out << ',';}
@@ -2968,9 +3109,11 @@ bool Optimizer::conditionControlExponents(xt::xtensor<float, 1> & exponents)
 
 void Optimizer::updateControlSequence(bool diag)
 {
-  recorder::observe("update_begin", [&] {return recorder::Json{
-    {"costs", recorder::tensor(costs_)}, {"control", recorder::sequence(control_sequence_)},
-    {"sample_bank_id", recorder::active->bank}};});
+  recorder::observe("update_begin", [&] {
+      return recorder::Json{
+      {"costs", recorder::tensor(costs_)}, {"control", recorder::sequence(control_sequence_)},
+      {"sample_bank_id", recorder::active->bank}};
+                                                });
   const bool is_holo = isHolonomic();
   auto & s = settings_;
   auto bounded_noises_vx = state_.cvx - control_sequence_.vx;
@@ -2992,11 +3135,15 @@ void Optimizer::updateControlSequence(bool diag)
 
   auto && costs_normalized = costs_ - xt::amin(costs_, immediate);
   auto && exponents = xt::eval(xt::exp(-1 / settings_.temperature * costs_normalized));
-  recorder::observe("regularized", [&] {return recorder::Json{
-    {"costs", recorder::tensor(costs_)}, {"raw_exponents", recorder::tensor(exponents)}};});
+  recorder::observe("regularized", [&] {
+      return recorder::Json{
+      {"costs", recorder::tensor(costs_)}, {"raw_exponents", recorder::tensor(exponents)}};
+                                                                                         });
   const bool exponents_conditioned = conditionControlExponents(exponents);
-  recorder::observe("conditioned_exponents", [&] {return recorder::Json{
-    {"conditioned", exponents_conditioned}, {"exponents", recorder::tensor(exponents)}};});
+  recorder::observe("conditioned_exponents", [&] {
+      return recorder::Json{
+      {"conditioned", exponents_conditioned}, {"exponents", recorder::tensor(exponents)}};
+                                                                                        });
   auto && softmaxes = xt::eval(exponents / xt::sum(exponents, immediate));
   auto && softmaxes_extened = xt::eval(xt::view(softmaxes, xt::all(), xt::newaxis()));
 
@@ -3009,7 +3156,8 @@ void Optimizer::updateControlSequence(bool diag)
     }
     float ess = 1.0f / static_cast<float>(xt::sum(xt::square(softmaxes))());
     RCLCPP_DEBUG(logger_,
-      "[MPPI] D.softmax  w_max=%.4f ess=%.0f/%d  best[%zu]: cvx(%.3f,%.3f,%.3f) cwz(%.3f,%.3f)",
+      "[MPPI] D.softmax  w_max=%.4f ess=%.0f/%d  best[%zu]: cvx(%.3"
+      "f,%.3f,%.3f) cwz(%.3f,%.3f)",
       w_max, ess, settings_.batch_size, w_max_idx,
       state_.cvx(w_max_idx, 0), state_.cvx(w_max_idx, 1), state_.cvx(w_max_idx, 2),
       state_.cwz(w_max_idx, 0), state_.cwz(w_max_idx, 1));
@@ -3021,19 +3169,24 @@ void Optimizer::updateControlSequence(bool diag)
     xt::noalias(control_sequence_.vy) = xt::sum(state_.cvy * softmaxes_extened, 0, immediate);
   }
 
-  recorder::observe("weighted", [&] {return recorder::Json{
-    {"weights", recorder::tensor(softmaxes)}, {"control", recorder::sequence(control_sequence_)}};});
+  recorder::observe("weighted", [&] {
+      return recorder::Json{
+      {"weights", recorder::tensor(softmaxes)}, {"control", recorder::sequence(control_sequence_)}};
+  });
   // [D2] POST-SOFTMAX (before accel constraints)
   if (diag && settings_.time_steps >= 5) {
     RCLCPP_DEBUG(logger_,
-      "[MPPI] D2.w-avg  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      "[MPPI] D2.w-avg  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%."
+      "3f,%.3f,%.3f)",
       control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
       control_sequence_.vx(3), control_sequence_.vx(4),
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
   applyControlSequenceConstraints();
-  recorder::observe("constrained", [&] {return recorder::Json{{"control", recorder::sequence(control_sequence_)}};});
+  recorder::observe("constrained", [&] {
+      return recorder::Json{{"control", recorder::sequence(control_sequence_)}};
+  });
 }
 
 bool Optimizer::controlSequenceFinite() const
@@ -3214,11 +3367,16 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
     if (controlSequenceFinite() && controlSequenceCollisionFree()) {
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
-      recorder::observe("issued", [&] {return recorder::Json{
-        {"vx",control.twist.linear.x},{"vy",control.twist.linear.y},{"wz",control.twist.angular.z},
-        {"stamp_ns",rclcpp::Time(control.header.stamp).nanoseconds()},{"frame",control.header.frame_id},
-        {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)},
-        {"final_output_collision_guard_passed",true}};});
+      recorder::observe("issued", [&] {
+          return recorder::Json{
+          {"vx", control.twist.linear.x}, {"vy", control.twist.linear.y},
+          {"wz", control.twist.angular.z},
+          {"stamp_ns", rclcpp::Time(control.header.stamp).nanoseconds()},
+          {"frame", control.header.frame_id},
+          {"control", recorder::sequence(control_sequence_)},
+          {"history", recorder::history(control_history_)},
+          {"final_output_collision_guard_passed", true}};
+                                                      });
       return control;
     }
   }
@@ -3243,31 +3401,57 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start,
   const models::ControlSequence * before_filter)
 {
-  recorder::observe("extract_begin", [&] {return recorder::Json{
-    {"control", recorder::sequence(control_sequence_)}, {"history", recorder::history(control_history_)}};});
+  recorder::observe("extract_begin", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
   // Savitzky-Golay filtering follows optimization and can invalidate its
   // bounds. In particular, signed vx can cancel while wz does not, violating
   // the Ackermann cone. Project the final sequence before extracting output.
   applyControlSequenceConstraints();
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",1},{"operation","applyControlSequenceConstraints()"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 1}, {"operation", "applyControlSequenceConstraints()"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   enforceShortCuspMeanFeasibility(warm_start);
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",2},{"operation","enforceShortCuspMeanFeasibility(warm_start)"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 2},
+      {"operation", "enforceShortCuspMeanFeasibility(warm_start)"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   enforceLongEntryCertificate(true);
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",3},{"operation","enforceLongEntryCertificate(true)"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 3}, {"operation", "enforceLongEntryCertificate(true)"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   preserveFilteredCollisionFeasibility(before_filter);
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",4},{"operation","preserveFilteredCollisionFeasibility(before_filter)"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 4},
+      {"operation", "preserveFilteredCollisionFeasibility(before_filter)"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   enforceLongEntryCertificate(true);  // Nothing may invalidate the final emitted prefix.
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",5},{"operation","enforceLongEntryCertificate(true)"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 5}, {"operation", "enforceLongEntryCertificate(true)"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   enforceGentleCuspEmission();  // Recheck after smoothing and collision replacements.
-  recorder::observe("extract_stage", [&] {return recorder::Json{{"stage",6},{"operation","enforceGentleCuspEmission()"},{"control",recorder::sequence(control_sequence_)}};});
+  recorder::observe("extract_stage", [&] {
+      return recorder::Json{{"stage", 6}, {"operation", "enforceGentleCuspEmission()"},
+      {"control", recorder::sequence(control_sequence_)}};
+  });
   unsigned int offset = settings_.shift_control_sequence ? 1 : 0;
 
-  recorder::observe("extract_projected", [&] {return recorder::Json{
-    {"control", recorder::sequence(control_sequence_)}, {"offset", offset},
-    {"deadband_floor", motor_deadband_floor_}, {"deadband_approach_radius", motor_deadband_approach_radius_},
-    {"deadband_terminal_radius", motor_deadband_terminal_radius_},
-    {"deadband_heading_error", motor_deadband_max_heading_error_},
-    {"active_direction", active_cusp_direction_}, {"path_direction", path_direction_}};});
+  recorder::observe("extract_projected", [&] {
+      return recorder::Json{
+      {"control", recorder::sequence(control_sequence_)}, {"offset", offset},
+      {"deadband_floor", motor_deadband_floor_},
+      {"deadband_approach_radius", motor_deadband_approach_radius_},
+      {"deadband_terminal_radius", motor_deadband_terminal_radius_},
+      {"deadband_heading_error", motor_deadband_max_heading_error_},
+      {"active_direction", active_cusp_direction_}, {"path_direction", path_direction_}};
+                                                                                       });
   auto vx = control_sequence_.vx(offset);
   auto wz = control_sequence_.wz(offset);
 
@@ -3294,7 +3478,7 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
         state_.pose.pose.position.x - target_x,
         state_.pose.pose.position.y - target_y);
       if (dist_to_target <= motor_deadband_approach_radius_ &&
-          dist_to_target > motor_deadband_terminal_radius_)
+        dist_to_target > motor_deadband_terminal_radius_)
       {
         bool aligned_to_path = true;
         if (path_.yaws.size() > 0) {
@@ -3313,7 +3497,8 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             active_cusp_direction_ : path_direction_;
 
           // On final segment (active_cusp_direction_ == 0), align effective_direction with
-          // the target's relative longitudinal displacement (d_long) to prevent stale path_direction_
+          // the target's relative longitudinal displacement (d_long) to prevent stale
+          // path_direction_
           // from inverting recovery commands.
           // When the goal is abeam (beside the robot, |d_long| <= d_long_deadband), longitudinal
           // displacement is near zero: follow the optimizer's commanded direction rather than
@@ -3323,7 +3508,7 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
             const float dx = target_x - static_cast<float>(state_.pose.pose.position.x);
             const float dy = target_y - static_cast<float>(state_.pose.pose.position.y);
             const float d_long = dx * static_cast<float>(std::cos(robot_yaw)) +
-                                 dy * static_cast<float>(std::sin(robot_yaw));
+              dy * static_cast<float>(std::sin(robot_yaw));
             constexpr float d_long_deadband = 0.02f;
             if (vx > 0.005f) {
               // Deliberate forward command: apply forward deadband floor only if target is ahead
@@ -3362,9 +3547,11 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
     }
   }
 
-  recorder::observe("extract_final", [&] {return recorder::Json{
-    {"vx", vx}, {"wz", wz}, {"vy", isHolonomic() ? control_sequence_.vy(offset) : 0.0f},
-    {"offset", offset}};});
+  recorder::observe("extract_final", [&] {
+      return recorder::Json{
+      {"vx", vx}, {"wz", wz}, {"vy", isHolonomic() ? control_sequence_.vy(offset) : 0.0f},
+      {"offset", offset}};
+                        });
   control_sequence_.vx(offset) = vx;
 
   // Filter history must contain the command actually sent, not the
@@ -3392,7 +3579,8 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
       out << std::setprecision(17) << "{\"stamp_ns\":" << rclcpp::Time(stamp).nanoseconds()
           << ",\"pose_stamp_ns\":" << rclcpp::Time(state_.pose.header.stamp).nanoseconds()
           << ",\"frame\":" << std::quoted(state_.pose.header.frame_id)
-          << ",\"scope\":\"Final native mean before emission; no physical or collision forecast\""
+          << ",\"scope\":\"Final native mean before emission; no physical "
+        "or collision forecast\""
           << ",\"real_path_point_count\":" << real
           << ",\"active_cusp_direction\":" << active_cusp_direction_
           << ",\"effective_cusp_tolerances\":" << serializedCuspTolerances()
@@ -3478,12 +3666,17 @@ geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
   }
 
   auto issued = isHolonomic() ?
-    utils::toTwistStamped(vx, control_sequence_.vy(offset), wz, stamp, costmap_ros_->getBaseFrameID()) :
+    utils::toTwistStamped(vx, control_sequence_.vy(offset), wz, stamp,
+      costmap_ros_->getBaseFrameID()) :
     utils::toTwistStamped(vx, wz, stamp, costmap_ros_->getBaseFrameID());
-  recorder::observe("extracted_candidate", [&] {return recorder::Json{
-    {"vx",issued.twist.linear.x},{"vy",issued.twist.linear.y},{"wz",issued.twist.angular.z},
-    {"stamp_ns",rclcpp::Time(issued.header.stamp).nanoseconds()},{"frame",issued.header.frame_id},
-    {"control",recorder::sequence(control_sequence_)},{"history",recorder::history(control_history_)}};});
+  recorder::observe("extracted_candidate", [&] {
+      return recorder::Json{
+      {"vx", issued.twist.linear.x}, {"vy", issued.twist.linear.y}, {"wz", issued.twist.angular.z},
+      {"stamp_ns", rclcpp::Time(issued.header.stamp).nanoseconds()},
+      {"frame", issued.header.frame_id},
+      {"control", recorder::sequence(control_sequence_)},
+      {"history", recorder::history(control_history_)}};
+  });
   return issued;
 }
 
@@ -3536,5 +3729,4 @@ models::Trajectories & Optimizer::getGeneratedTrajectories()
 {
   return generated_trajectories_;
 }
-
 }  // namespace mppi

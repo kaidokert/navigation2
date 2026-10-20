@@ -1,6 +1,20 @@
+// Copyright (c) 2026 Kaido Kert
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Test fixture: wait for native executor startup and perform lifecycle cleanup.
-#ifndef OFFICE_TEST_SETTLED_COSTMAP_HPP_
-#define OFFICE_TEST_SETTLED_COSTMAP_HPP_
+#ifndef SETTLED_COSTMAP_HPP_
+#define SETTLED_COSTMAP_HPP_
 #include <chrono>
 #include <stdexcept>
 #include <thread>
@@ -36,7 +50,8 @@ public:
   {
     if (configured_) {on_cleanup(rclcpp_lifecycle::State{});}
   }
+
 private:
   bool configured_{false};
 };
-#endif
+#endif  // SETTLED_COSTMAP_HPP_

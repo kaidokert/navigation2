@@ -710,7 +710,8 @@ TEST(PathHandlerTests, GhostHeadingSinglePointReverseSegmentFlipsDirection)
     reverse_segment.poses[1].pose.position.x - reverse_segment.poses[0].pose.position.x);
 
   EXPECT_NEAR(heading, expected_reverse_heading, 0.2)
-    << "Ghost heading should point in travel (reverse) direction, not pose direction. "
+    << "Ghost heading should point in travel (reverse) direction, no"
+      "t pose direction. "
     << "Got " << heading << " rad, expected ~" << expected_reverse_heading << " rad";
 }
 
@@ -824,7 +825,8 @@ TEST(PathHandlerTests, TestHandoffYawRelaxationUnlocks)
     unlocked = handler.isWithinInversionTolerancesWrapper(robot_pose);
   }
   EXPECT_TRUE(unlocked) <<
-    "handoff gate never relaxed: the M5 deadlock (xy met, yaw blocked forever)";
+    "handoff gate never relaxed: the M5 deadlock (xy met, yaw blo"
+      "cked forever)";
 
   // Unlock must reset the blocked state: a fresh over-cap error blocks again
   auto worse_pose = makePose(9.0, 0.0, 1.2);
@@ -867,7 +869,7 @@ TEST(PathHandlerTests, TestHandoffEscapeHeadingAfterBlockedM5Regression)
   nav_msgs::msg::Path full_plan;
   std::vector<std::pair<double, double>> pts = {
     {0.00, 0.0}, {0.04, 0.0}, {0.08, 0.0}, {0.12, 0.0}, {0.16, 0.0},
-    {0.20, 0.0}, {0.24, 0.0}, {0.28, 0.0},           // cusp at index 7
+    {0.20, 0.0}, {0.24, 0.0}, {0.28, 0.0},  // cusp at index 7
     {0.23, 0.01}, {0.18, 0.02}, {0.13, 0.03}, {0.08, 0.04}};  // reverse leg
   for (const auto & [x, y] : pts) {
     geometry_msgs::msg::PoseStamped pose;
@@ -973,52 +975,55 @@ TEST(PathHandlerTests, TestHandoffRelaxationCapHolds)
 
 TEST(PathHandlerTests, RecordedIncomingHandoffLeavesMicroReverseEndpointAhead)
 {
- for(bool bound : {false,true}) {
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>(bound ? "recorded_bound" : "recorded_default");
-  node->declare_parameter("dummy.enforce_path_inversion",true);
-  node->declare_parameter("dummy.inversion_xy_tolerance",0.0676);
-  node->declare_parameter("dummy.inversion_yaw_tolerance",0.3);
+ for(bool bound : {false, true}) {
+    auto node =
+      std::make_shared<rclcpp_lifecycle::LifecycleNode>(bound ? "recorded_bound" :
+      "recorded_default");
+    node->declare_parameter("dummy.enforce_path_inversion", true);
+    node->declare_parameter("dummy.inversion_xy_tolerance", 0.0676);
+    node->declare_parameter("dummy.inversion_yaw_tolerance", 0.3);
   // Isolate the adjacent-distance policy at the unchanged captured pose.
   // The later default base-yaw cap (0.20) would reject both variants first.
-  node->declare_parameter("dummy.inversion_yaw_base",0.3);
-  node->declare_parameter("dummy.bound_handoff_by_next_segment",bound);
-  auto cm=makeConfiguredCostmapRos();ParametersHandler params(node);PathHandlerWrapper handler;
-  handler.initialize(node,"dummy",cm,cm->getTfBuffer(),&params);
-  nav_msgs::msg::Path plan;plan.header.frame_id="map";plan.poses={makePose(2.855249596359215, -0.68992668028340631, -1.0043557325946255),
-    makePose(2.8698995594106691, -0.71433524907376977, -1.0561206976519986),
-    makePose(2.8832668686821989, -0.7394695258557249, -1.1078856627093716),
-    makePose(2.895315513432422, -0.76526115125579963, -1.1596506277667447),
-    makePose(2.9060137553807976, -0.79164237625207079, -1.2114155928241179),
-    makePose(2.9153326028287552, -0.81854117936177317, -1.2631805578814908),
-    makePose(2.9232473365385658, -0.84588675980523931, -1.3149455229388636),
-    makePose(2.9297362890302452, -0.87360465469350856, -1.3667104879962371),
-    makePose(2.9347826756361997, -0.90162162184071803, -1.4184754530536099),
-    makePose(2.9383724582708055, -0.92986197765480938, -1.4702404181109832),
-    makePose(2.9404961764850555, -0.95825003854372426, -1.5220053831683562),
-    makePose(2.9411483371150098, -0.98671012091540433, -1.573770348225729),
-    makePose(2.9403268039302475, -1.0151659308262424, -1.6255357901202605),
-    makePose(2.9380343235127384, -1.0435411743326313, -1.6773007551776336),
-    makePose(2.9342763890264223, -1.0717595574909637, -1.7290657202350064),
-    makePose(2.9330279149332341, -1.080291051440895, -1.7808306852923794),
-    makePose(2.939681662343105, -1.0526122190517526, -1.8325956503497525),
-    makePose(2.939681662343105, -1.0526122190517526, -1.8325956503497525),
-    makePose(2.9272631445542743, -1.0989586535627041, -1.8325956503497525),
-    makePose(2.9148446267654435, -1.1453050880736555, -1.8325956503497525),
-    makePose(2.9024261089766128, -1.1916515225846069, -1.8325956503497525),
-    makePose(2.8900075911877821, -1.2379979570955584, -1.8325956503497525),
-    makePose(2.8775890733989513, -1.2843443916065098, -1.8325956503497525),
-    makePose(2.8651705556101206, -1.3306908261174613, -1.8325956503497525),
-    makePose(2.8527520378212898, -1.3770372606284127, -1.8325956503497525),
-    makePose(2.8383239375578455, -1.4227977576524609, -1.9198620955096646),
-    makePose(2.8199624267377885, -1.467126980294438, -2.0071285406695769),
-    makePose(2.7996847172300932, -1.510612697095894, -2.0071285406695769)};handler.setPath(plan);
+    node->declare_parameter("dummy.inversion_yaw_base", 0.3);
+    node->declare_parameter("dummy.bound_handoff_by_next_segment", bound);
+    auto cm = makeConfiguredCostmapRos();ParametersHandler params(node);PathHandlerWrapper handler;
+    handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+    nav_msgs::msg::Path plan;plan.header.frame_id = "map";
+    plan.poses = {makePose(2.855249596359215, -0.68992668028340631, -1.0043557325946255),
+      makePose(2.8698995594106691, -0.71433524907376977, -1.0561206976519986),
+      makePose(2.8832668686821989, -0.7394695258557249, -1.1078856627093716),
+      makePose(2.895315513432422, -0.76526115125579963, -1.1596506277667447),
+      makePose(2.9060137553807976, -0.79164237625207079, -1.2114155928241179),
+      makePose(2.9153326028287552, -0.81854117936177317, -1.2631805578814908),
+      makePose(2.9232473365385658, -0.84588675980523931, -1.3149455229388636),
+      makePose(2.9297362890302452, -0.87360465469350856, -1.3667104879962371),
+      makePose(2.9347826756361997, -0.90162162184071803, -1.4184754530536099),
+      makePose(2.9383724582708055, -0.92986197765480938, -1.4702404181109832),
+      makePose(2.9404961764850555, -0.95825003854372426, -1.5220053831683562),
+      makePose(2.9411483371150098, -0.98671012091540433, -1.573770348225729),
+      makePose(2.9403268039302475, -1.0151659308262424, -1.6255357901202605),
+      makePose(2.9380343235127384, -1.0435411743326313, -1.6773007551776336),
+      makePose(2.9342763890264223, -1.0717595574909637, -1.7290657202350064),
+      makePose(2.9330279149332341, -1.080291051440895, -1.7808306852923794),
+      makePose(2.939681662343105, -1.0526122190517526, -1.8325956503497525),
+      makePose(2.939681662343105, -1.0526122190517526, -1.8325956503497525),
+      makePose(2.9272631445542743, -1.0989586535627041, -1.8325956503497525),
+      makePose(2.9148446267654435, -1.1453050880736555, -1.8325956503497525),
+      makePose(2.9024261089766128, -1.1916515225846069, -1.8325956503497525),
+      makePose(2.8900075911877821, -1.2379979570955584, -1.8325956503497525),
+      makePose(2.8775890733989513, -1.2843443916065098, -1.8325956503497525),
+      makePose(2.8651705556101206, -1.3306908261174613, -1.8325956503497525),
+      makePose(2.8527520378212898, -1.3770372606284127, -1.8325956503497525),
+      makePose(2.8383239375578455, -1.4227977576524609, -1.9198620955096646),
+      makePose(2.8199624267377885, -1.467126980294438, -2.0071285406695769),
+      makePose(2.7996847172300932, -1.510612697095894, -2.0071285406695769)};handler.setPath(plan);
   // 032013 map-body sample converted to rear axle at the recorded handoff.
-  const double yaw=-1.5681685397934615;
-  const double x=2.9507091261067964-0.106*cos(yaw);
-  const double y=-1.122164027889751-0.106*sin(yaw);
-  EXPECT_EQ(handler.isWithinInversionTolerancesWrapper(makePose(x,y,yaw)),!bound);
-  const auto &next=plan.poses[16].pose.position;
-  EXPECT_GT((next.x-x)*cos(yaw)+(next.y-y)*sin(yaw),0.03);
+    const double yaw = -1.5681685397934615;
+    const double x = 2.9507091261067964 - 0.106 * cos(yaw);
+    const double y = -1.122164027889751 - 0.106 * sin(yaw);
+    EXPECT_EQ(handler.isWithinInversionTolerancesWrapper(makePose(x, y, yaw)), !bound);
+    const auto & next = plan.poses[16].pose.position;
+    EXPECT_GT((next.x - x) * cos(yaw) + (next.y - y) * sin(yaw), 0.03);
   // Destroy handler/parameter callbacks before the costmap owner. Calling
   // cleanup here while those bindings are live can block fixture teardown.
  }
@@ -1026,26 +1031,32 @@ TEST(PathHandlerTests, RecordedIncomingHandoffLeavesMicroReverseEndpointAhead)
 
 TEST(PathHandlerTests, PreserveCuspRealDirectionEdgeIsOptInAndDoesNotChangeFinalGoal)
 {
- for (bool enabled : {false,true}) for (bool cusp : {false,true}) for (int gear : {1,-1}) {
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("edge_prune_regression");
-  node->declare_parameter("dummy.enforce_path_inversion",true);
-  node->declare_parameter("dummy.preserve_cusp_direction_edge",enabled);
-  auto cm=makeConfiguredCostmapRos();
-  cm->getCostmap()->resizeMap(100,100,0.05,-2.5,-2.5);
-  ParametersHandler params(node);PathHandlerWrapper handler;
-  handler.initialize(node,"dummy",cm,cm->getTfBuffer(),&params);
-  nav_msgs::msg::Path active;active.header.frame_id="odom";
-  active.poses={makePose(0,0,0),makePose(0.1*gear,0,0),makePose(0.2*gear,0,0),makePose(0.2*gear,0,0)};
-  handler.setGlobalPlan(active);handler.setGlobalPlanUpToInversion(active);
-  handler.setInversionLocale(cusp ? 4 : 0);
-  auto robot=makePose(0.25*gear,0,0);robot.header.frame_id="odom";
-  auto [local,bound]=handler.getGlobalPlanConsideringBoundsInCostmapFrameWrapper(robot);
-  ASSERT_GE(local.poses.size(),1u);
-  EXPECT_NEAR(local.poses.front().pose.position.x,(enabled && cusp ? 0.1 : 0.2)*gear,1e-7);
+ for (bool enabled : {false, true}) {
+    for (bool cusp : {false, true}) {
+      for (int gear : {1, -1}) {
+        auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("edge_prune_regression");
+        node->declare_parameter("dummy.enforce_path_inversion", true);
+        node->declare_parameter("dummy.preserve_cusp_direction_edge", enabled);
+        auto cm = makeConfiguredCostmapRos();
+        cm->getCostmap()->resizeMap(100, 100, 0.05, -2.5, -2.5);
+        ParametersHandler params(node);PathHandlerWrapper handler;
+        handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
+        nav_msgs::msg::Path active;active.header.frame_id = "odom";
+        active.poses = {makePose(0, 0, 0), makePose(0.1 * gear, 0, 0), makePose(0.2 * gear, 0, 0),
+          makePose(0.2 * gear, 0, 0)};
+        handler.setGlobalPlan(active);handler.setGlobalPlanUpToInversion(active);
+        handler.setInversionLocale(cusp ? 4 : 0);
+        auto robot = makePose(0.25 * gear, 0, 0);robot.header.frame_id = "odom";
+        auto [local, bound] = handler.getGlobalPlanConsideringBoundsInCostmapFrameWrapper(robot);
+        ASSERT_GE(local.poses.size(), 1u);
+        EXPECT_NEAR(local.poses.front().pose.position.x, (enabled && cusp ? 0.1 : 0.2) * gear,
+          1e-7);
   // The endpoint is never moved, and retained points are real planner geometry.
-  EXPECT_NEAR(local.poses.back().pose.position.x,0.2*gear,1e-7);
+        EXPECT_NEAR(local.poses.back().pose.position.x, 0.2 * gear, 1e-7);
   // Handler and parameter bindings are destroyed before the costmap owner.
- }
+      }
+    }
+}
 }
 
 TEST(PathHandlerTests, ShortDepartureScopesAndExcludesFinalGoalsWithoutValidator)
@@ -1146,78 +1157,89 @@ TEST(PathHandlerTests, RejectedShortDepartureAllowsBoundedIncomingApproach)
   // Structural dispatch reduction: reverse approach, short forward internal cusp.
   // Actual attempt8 outgoing feasibility is established by its separate native replay.
   nav_msgs::msg::Path plan; plan.header.frame_id = "odom";
-  plan.poses = {makePose(0.2,0,0), makePose(0.1,0,0), makePose(0,0,0),
-    makePose(0.1,0,0), makePose(0.2,0,0), makePose(0.1,0,0)};
+  plan.poses = {makePose(0.2, 0, 0), makePose(0.1, 0, 0), makePose(0, 0, 0),
+    makePose(0.1, 0, 0), makePose(0.2, 0, 0), makePose(0.1, 0, 0)};
   handler.setPath(plan);
-  auto robot = makePose(0.048,0,0); robot.header.frame_id = "odom";
+  auto robot = makePose(0.048, 0, 0); robot.header.frame_id = "odom";
   robot.header.stamp = rclcpp::Time(1000000000);
   int decisions = 0;
-  auto reject = [&](const auto & local_robot, const auto & outgoing, double xy, double yaw, bool terminal) {
+  auto reject = [&](const auto & local_robot, const auto & outgoing, double xy, double yaw,
+    bool terminal) {
       ++decisions;
-      EXPECT_EQ(local_robot.header.frame_id,"odom"); EXPECT_EQ(outgoing.header.frame_id,"odom");
-      EXPECT_DOUBLE_EQ(local_robot.pose.position.x,robot.pose.position.x);
-      EXPECT_NEAR(xy,0.05,1e-8); EXPECT_NEAR(yaw,0.1,1e-8); EXPECT_TRUE(terminal);
-      EXPECT_EQ(outgoing.poses.size(),3u);
-      EXPECT_DOUBLE_EQ(outgoing.poses[0].pose.position.x,0.0);
-      EXPECT_DOUBLE_EQ(outgoing.poses[1].pose.position.x,0.1);
-      EXPECT_DOUBLE_EQ(outgoing.poses[2].pose.position.x,0.2);
+      EXPECT_EQ(local_robot.header.frame_id, "odom"); EXPECT_EQ(outgoing.header.frame_id, "odom");
+      EXPECT_DOUBLE_EQ(local_robot.pose.position.x, robot.pose.position.x);
+      EXPECT_NEAR(xy, 0.05, 1e-8); EXPECT_NEAR(yaw, 0.1, 1e-8); EXPECT_TRUE(terminal);
+      EXPECT_EQ(outgoing.poses.size(), 3u);
+      EXPECT_DOUBLE_EQ(outgoing.poses[0].pose.position.x, 0.0);
+      EXPECT_DOUBLE_EQ(outgoing.poses[1].pose.position.x, 0.1);
+      EXPECT_DOUBLE_EQ(outgoing.poses[2].pose.position.x, 0.2);
       return false;
     };
-  EXPECT_NO_THROW(handler.transformPath(robot,reject));
+  EXPECT_NO_THROW(handler.transformPath(robot, reject));
   ASSERT_TRUE(handler.getRetainedDepartureApproach());
-  EXPECT_NEAR(handler.getRetainedDepartureApproach()->stop_margin,0.005,1e-8);
-  EXPECT_EQ(handler.getRetainedDepartureApproach()->cusp.header.frame_id,"odom");
-  EXPECT_DOUBLE_EQ(handler.getRetainedDepartureApproach()->cusp.pose.position.x,0.0);
-  EXPECT_EQ(handler.getPath().poses,plan.poses);
-  EXPECT_FALSE(handler.didHandoff()); EXPECT_EQ(handler.getPathDirection(),-1);
-  EXPECT_EQ(handler.getInversionLocale(),3u);
-  robot.pose.position.x=0.028; robot.header.stamp=rclcpp::Time(2000000000);
-  EXPECT_NO_THROW(handler.transformPath(robot,reject));
+  EXPECT_NEAR(handler.getRetainedDepartureApproach()->stop_margin, 0.005, 1e-8);
+  EXPECT_EQ(handler.getRetainedDepartureApproach()->cusp.header.frame_id, "odom");
+  EXPECT_DOUBLE_EQ(handler.getRetainedDepartureApproach()->cusp.pose.position.x, 0.0);
+  EXPECT_EQ(handler.getPath().poses, plan.poses);
+  EXPECT_FALSE(handler.didHandoff()); EXPECT_EQ(handler.getPathDirection(), -1);
+  EXPECT_EQ(handler.getInversionLocale(), 3u);
+  robot.pose.position.x = 0.028; robot.header.stamp = rclcpp::Time(2000000000);
+  EXPECT_NO_THROW(handler.transformPath(robot, reject));
   EXPECT_FALSE(handler.didHandoff());
-  EXPECT_EQ(handler.getPath().poses,plan.poses);
-  handler.transformPath(robot,[&](const auto & p, const auto & outgoing, double xy, double yaw, bool terminal) {
-    reject(p,outgoing,xy,yaw,terminal);return true;
+  EXPECT_EQ(handler.getPath().poses, plan.poses);
+  handler.transformPath(robot,
+    [&](const auto & p, const auto & outgoing, double xy, double yaw, bool terminal) {
+      reject(p, outgoing, xy, yaw, terminal);return true;
   });
-  EXPECT_TRUE(handler.didHandoff()); EXPECT_EQ(handler.getPathDirection(),1);
+  EXPECT_TRUE(handler.didHandoff()); EXPECT_EQ(handler.getPathDirection(), 1);
   EXPECT_FALSE(handler.getRetainedDepartureApproach());
-  handler.transformPath(robot,reject);
-  EXPECT_FALSE(handler.didHandoff()); EXPECT_EQ(decisions,3);
+  handler.transformPath(robot, reject);
+  EXPECT_FALSE(handler.didHandoff()); EXPECT_EQ(decisions, 3);
   for (int failure = 0; failure < 10; ++failure) {
     handler.setPath(plan);
-    robot.pose = makePose(0.048,0,0).pose;
-    if (failure == 7) {robot.pose.position.x=0.026;}
+    robot.pose = makePose(0.048, 0, 0).pose;
+    if (failure == 7) {robot.pose.position.x = 0.026;}
     robot.header.stamp = rclcpp::Time(1000000000);
-    ASSERT_NO_THROW(handler.transformPath(robot,reject));
+    ASSERT_NO_THROW(handler.transformPath(robot, reject));
     robot.header.stamp = rclcpp::Time(1250000000);
-    if (failure == 0) {robot.pose.position.x=0.0495;}  // Moving away.
-    if (failure == 1) {robot.pose.position.y=0.03;}  // Leaves XY gate.
-    if (failure == 2) {robot.header.stamp=rclcpp::Time(500000000);}  // Clock rollback.
-    if (failure == 3) {robot.header.stamp=rclcpp::Time(3100000000LL);}  // Total timeout.
-    if (failure == 4) {robot.header.stamp=rclcpp::Time(2000000000);}  // No progress.
-    if (failure == 5) {robot.pose.position.x=0.022;}  // Travel budget exhausted.
-    if (failure == 7) {robot.pose.position.x=0.004;}  // Stop margin reached.
-    if (failure == 8) {robot.pose.position.x=0.046;robot.pose.position.y=0.019;}  // Radial worsening.
-    if (failure == 9) {robot.pose.orientation=makePose(0,0,0.2).pose.orientation;}
+    if (failure == 0) {robot.pose.position.x = 0.0495;}  // Moving away.
+    if (failure == 1) {robot.pose.position.y = 0.03;}  // Leaves XY gate.
+    if (failure == 2) {robot.header.stamp = rclcpp::Time(500000000);}  // Clock rollback.
+    if (failure == 3) {robot.header.stamp = rclcpp::Time(3100000000LL);}  // Total timeout.
+    if (failure == 4) {robot.header.stamp = rclcpp::Time(2000000000);}  // No progress.
+    if (failure == 5) {robot.pose.position.x = 0.022;}  // Travel budget exhausted.
+    if (failure == 7) {robot.pose.position.x = 0.004;}  // Stop margin reached.
+    // Radial worsening.
+    if (failure == 8) {robot.pose.position.x = 0.046;robot.pose.position.y = 0.019;}
+    if (failure == 9) {robot.pose.orientation = makePose(0, 0, 0.2).pose.orientation;}
     if (failure == 6) {
-      for (int call=1;call<64;++call) {ASSERT_NO_THROW(handler.transformPath(robot,reject));}
+      for (int call = 1; call < 64; ++call) {
+        ASSERT_NO_THROW(handler.transformPath(robot, reject));
+      }
     }
-    EXPECT_THROW(handler.transformPath(robot,reject),nav2_core::FailedToMakeProgress);
+    EXPECT_THROW(handler.transformPath(robot, reject), nav2_core::FailedToMakeProgress);
     EXPECT_FALSE(handler.didHandoff()); EXPECT_FALSE(handler.getRetainedDepartureApproach());
-    EXPECT_EQ(handler.getPathDirection(),-1);
+    EXPECT_EQ(handler.getPathDirection(), -1);
     if (failure == 1) {
-      robot.pose = makePose(0.043,0,0).pose;
-      EXPECT_THROW(handler.transformPath(robot,[](const auto &,const auto &,double,double,bool) {
-        return true;
-      }),nav2_core::FailedToMakeProgress);  // Gate reentry cannot renew the failed window.
+      robot.pose = makePose(0.043, 0, 0).pose;
+      EXPECT_THROW(handler.transformPath(robot,
+        [](const auto &, const auto &, double, double, bool) {
+          return true;
+      }), nav2_core::FailedToMakeProgress);  // Gate reentry cannot renew the failed window.
     }
   }
-  auto different_plan=plan;
-  for(auto & target:different_plan.poses) {target.pose.position.x+=0.3;}
-  handler.setPath(different_plan);robot.pose=makePose(0.348,0,0).pose;
-  robot.header.stamp=rclcpp::Time(1000000000);
-  EXPECT_NO_THROW(handler.transformPath(robot,[](const auto &,const auto &,double,double,bool) {return false;}));
+  auto different_plan = plan;
+  for(auto & target : different_plan.poses) {
+    target.pose.position.x += 0.3;
+                                                                       }
+  handler.setPath(different_plan);robot.pose = makePose(0.348, 0, 0).pose;
+  robot.header.stamp = rclcpp::Time(1000000000);
+  EXPECT_NO_THROW(handler.transformPath(robot,
+    [](const auto &, const auto &, double, double, bool) {
+      return false;
+  }));
   EXPECT_TRUE(handler.getRetainedDepartureApproach());
-  EXPECT_FALSE(handler.didHandoff());EXPECT_EQ(handler.getPathDirection(),-1);
+  EXPECT_FALSE(handler.didHandoff());EXPECT_EQ(handler.getPathDirection(), -1);
 }
 
 TEST(PathHandlerTests, DepartureGuardRetainsIncomingCuspAndScopesToLongForwardExit)
@@ -1248,7 +1270,8 @@ TEST(PathHandlerTests, DepartureGuardRetainsIncomingCuspAndScopesToLongForwardEx
           auto robot = makePose(-incoming * 0.02, 0, 0);
           robot.header.frame_id = "odom";
           int calls = 0;
-          auto validator = [&](const auto & local_robot, const auto & prefix, double xy, double yaw, bool terminal) {
+          auto validator = [&](const auto & local_robot, const auto & prefix, double xy, double yaw,
+            bool terminal) {
               ++calls;
               EXPECT_EQ(local_robot.header.frame_id, "odom");
               EXPECT_EQ(prefix.header.frame_id, "odom");
@@ -1270,7 +1293,7 @@ TEST(PathHandlerTests, DepartureGuardRetainsIncomingCuspAndScopesToLongForwardEx
               plan.poses.front().pose.position.x);
             // A fresh positive decision can advance the same unconsumed cusp.
             handler.transformPath(robot, [](const auto &, const auto &, double, double, bool) {
-              return true;
+                return true;
             });
             EXPECT_TRUE(handler.didHandoff());
           }
@@ -1278,8 +1301,8 @@ TEST(PathHandlerTests, DepartureGuardRetainsIncomingCuspAndScopesToLongForwardEx
           plan.poses.resize(3);
           handler.setPath(plan);
           handler.transformPath(robot, [](const auto &, const auto &, double, double, bool) {
-            ADD_FAILURE() << "Final segment unexpectedly invoked departure guard";
-            return false;
+              ADD_FAILURE() << "Final segment unexpectedly invoked departure guard";
+              return false;
           });
           EXPECT_FALSE(handler.didHandoff());
           EXPECT_EQ(handler.getActiveCuspDirection(), 0);
@@ -1293,34 +1316,34 @@ TEST(PathHandlerTests, CuspGearMetadataSurvivesPruningAndClearsForFinalPlan)
 {
   PathHandlerWrapper handler;
   handler.setEnforcePathInversion(true);
-  for (int gear : {-1,1}) {
-    nav_msgs::msg::Path plan;plan.header.frame_id="odom";
-    plan.poses={makePose(0,0,0),makePose(0.1*gear,0,0),
-      makePose(0.2*gear,0,0),makePose(0.1*gear,0,0)};
+  for (int gear : {-1, 1}) {
+    nav_msgs::msg::Path plan;plan.header.frame_id = "odom";
+    plan.poses = {makePose(0, 0, 0), makePose(0.1 * gear, 0, 0),
+      makePose(0.2 * gear, 0, 0), makePose(0.1 * gear, 0, 0)};
     handler.setPath(plan);
-    ASSERT_NE(handler.getInversionLocale(),0u);
-    EXPECT_EQ(handler.getActiveCuspDirection(),gear);
+    ASSERT_NE(handler.getInversionLocale(), 0u);
+    EXPECT_EQ(handler.getActiveCuspDirection(), gear);
     // Exercise the production prune function, leaving just the active cusp.
-    auto & active=handler.getInvertedPath();
-    handler.pruneGlobalPlanWrapper(active,active.poses.end()-1);
-    ASSERT_EQ(active.poses.size(),1u);
-    EXPECT_EQ(handler.getActiveCuspDirection(),gear);
+    auto & active = handler.getInvertedPath();
+    handler.pruneGlobalPlanWrapper(active, active.poses.end() - 1);
+    ASSERT_EQ(active.poses.size(), 1u);
+    EXPECT_EQ(handler.getActiveCuspDirection(), gear);
     plan.poses.resize(3);
     handler.setPath(plan);
-    EXPECT_EQ(handler.getActiveCuspDirection(),0);
-    EXPECT_EQ(handler.getPathDirection(),gear);
-    auto & final_path=handler.getInvertedPath();
-    handler.pruneGlobalPlanWrapper(final_path,final_path.poses.end()-1);
-    EXPECT_EQ(handler.getPathDirection(),gear);
-    EXPECT_EQ(handler.getActiveCuspDirection(),0);
+    EXPECT_EQ(handler.getActiveCuspDirection(), 0);
+    EXPECT_EQ(handler.getPathDirection(), gear);
+    auto & final_path = handler.getInvertedPath();
+    handler.pruneGlobalPlanWrapper(final_path, final_path.poses.end() - 1);
+    EXPECT_EQ(handler.getPathDirection(), gear);
+    EXPECT_EQ(handler.getActiveCuspDirection(), 0);
   }
   handler.setEnforcePathInversion(false);
-  EXPECT_EQ(handler.getActiveCuspDirection(),0);
-  EXPECT_EQ(handler.getPathDirection(),0);
+  EXPECT_EQ(handler.getActiveCuspDirection(), 0);
+  EXPECT_EQ(handler.getPathDirection(), 0);
   handler.setEnforcePathInversion(true);
-  nav_msgs::msg::Path singleton;singleton.poses={makePose(0,0,0)};
+  nav_msgs::msg::Path singleton;singleton.poses = {makePose(0, 0, 0)};
   handler.setPath(singleton);
-  EXPECT_EQ(handler.getPathDirection(),0);
+  EXPECT_EQ(handler.getPathDirection(), 0);
 }
 
 TEST(PathHandlerTests, Recorded045042OverrunDispatchesStoppedReplanWithoutHandoff)
@@ -1752,20 +1775,21 @@ TEST(PathHandlerTests, Recorded161154OverrunKeepsCuspAndRejectsOutsideGate)
   handler.initialize(node, "dummy", cm, cm->getTfBuffer(), &params);
   nav_msgs::msg::Path plan; plan.header.frame_id = "odom";
   plan.poses = {makePose(4.9203621600636325, 0.7614874718452711, -2.007128540669577),
-      makePose(4.898207009191651, 0.7189276583434321, -2.0943949858294886),
-      makePose(4.872426980471005, 0.6784607403026257, -2.1816614309894007),
-      makePose(4.843217996748876, 0.6403943349034762, -2.2689278761493132),
-      makePose(4.81080222598905, 0.6050189694832397, -2.356194321309225),
-      makePose(4.775426860568814, 0.5726031987234137, -2.4434607664691375),
-      makePose(4.737360455169664, 0.5433942150012854, -2.5307272116290496),
-      makePose(4.777827373210471, 0.5691748540734807, -2.6179936567889612),
-      makePose(4.82038718671231, 0.591330004945462, -2.705260101948874),
-      makePose(4.864716409354287, 0.6096918209412934, -2.792526547108786)};
+    makePose(4.898207009191651, 0.7189276583434321, -2.0943949858294886),
+    makePose(4.872426980471005, 0.6784607403026257, -2.1816614309894007),
+    makePose(4.843217996748876, 0.6403943349034762, -2.2689278761493132),
+    makePose(4.81080222598905, 0.6050189694832397, -2.356194321309225),
+    makePose(4.775426860568814, 0.5726031987234137, -2.4434607664691375),
+    makePose(4.737360455169664, 0.5433942150012854, -2.5307272116290496),
+    makePose(4.777827373210471, 0.5691748540734807, -2.6179936567889612),
+    makePose(4.82038718671231, 0.591330004945462, -2.705260101948874),
+    makePose(4.864716409354287, 0.6096918209412934, -2.792526547108786)};
   handler.setPath(plan);
   auto estimate = makePose(4.725858736393789, 0.5175850481155505, -2.4871507468098675);
   estimate.header.frame_id = "odom";
   EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(estimate));
-  const auto truth_at_overrun = makePose(4.7335934842526814, 0.5221860523226725, -2.4960956911245367);
+  const auto truth_at_overrun = makePose(4.7335934842526814, 0.5221860523226725,
+    -2.4960956911245367);
   EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(truth_at_overrun));
   // Earlier physical sample entered the gate, but no inference is made about
   // a controller evaluation at its timestamp. Test the native predicate only.
@@ -1835,7 +1859,8 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   // Floor is 0.05m. So effective xy tol = 0.06m.
   nav_msgs::msg::Path plan1;
   plan1.header.frame_id = "odom";
-  plan1.poses = {makePose(0, 0, 0), makePose(0.12, 0, 0), makePose(0.24, 0, 0), makePose(0.10, 0, 0)};
+  plan1.poses = {makePose(0, 0, 0), makePose(0.12, 0, 0), makePose(0.24, 0, 0),
+    makePose(0.10, 0, 0)};
   handler.setPath(plan1);
 
   auto cusp_tol = handler.getCuspTolerances();
@@ -1857,7 +1882,8 @@ TEST(PathHandlerTest, adaptiveGateClampAndFloor)
   // scaled gate = 0.25 * 0.12 = 0.03m < 0.05m floor -> effective xy tol = 0.05m
   nav_msgs::msg::Path plan2;
   plan2.header.frame_id = "odom";
-  plan2.poses = {makePose(0, 0, 0), makePose(0.06, 0, 0), makePose(0.12, 0, 0), makePose(0.05, 0, 0)};
+  plan2.poses = {makePose(0, 0, 0), makePose(0.06, 0, 0), makePose(0.12, 0, 0),
+    makePose(0.05, 0, 0)};
   handler.setPath(plan2);
 
   cusp_tol = handler.getCuspTolerances();
@@ -2048,7 +2074,7 @@ TEST(PathHandlerTests, BoundedGhostExtensionPastClosestApproach)
 
   nav_msgs::msg::Path transformed;
   transformed.header.frame_id = "odom";
-  transformed.poses = {makePose(1.0, 0, 0)}; // real TGP pruned to single cusp point
+  transformed.poses = {makePose(1.0, 0, 0)};  // real TGP pruned to single cusp point
 
   // Approach to 0.155m: updates min_cusp_distance_
   EXPECT_FALSE(handler.isWithinInversionTolerancesWrapper(makePose(0.845, 0, 0)));
@@ -2080,7 +2106,9 @@ TEST(PathHandlerTests, TerminalGoalSteadyApproachDoesNotAbort)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
-  for (auto & pose : plan.poses) {pose.header = plan.header;}
+  for (auto & pose : plan.poses) {
+    pose.header = plan.header;
+                                                            }
   handler.setPath(plan);
 
   // Robot at (-0.02, 0.24) -> dist = 0.16m > 0.10m goal tolerance
@@ -2107,7 +2135,9 @@ TEST(PathHandlerTests, TerminalGoalWithinToleranceDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
-  for (auto & pose : plan.poses) {pose.header = plan.header;}
+  for (auto & pose : plan.poses) {
+    pose.header = plan.header;
+                                                            }
   handler.setPath(plan);
 
   // Robot at (0.0, 0.32) -> dist = 0.08m <= 0.098m goal tolerance bound
@@ -2138,10 +2168,13 @@ TEST(PathHandlerTests, TerminalGoalWithDynamicToleranceDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
-  for (auto & pose : plan.poses) {pose.header = plan.header;}
+  for (auto & pose : plan.poses) {
+    pose.header = plan.header;
+                                                            }
   handler.setPath(plan);
 
-  // Robot at (0.0, 0.27) -> dist = 0.13m (within 0.21m goal tolerance, but would have failed with 0.085m bound)
+  // Robot at (0.0, 0.27) -> dist = 0.13m (within 0.21m goal tolerance, but would have failed with
+  // 0.085m bound)
   auto robot_pose = makePose(0, 0.27, 0);
     robot_pose.header = plan.header;
 
@@ -2168,7 +2201,9 @@ TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
   nav_msgs::msg::Path plan;
   plan.header.frame_id = "odom";
   plan.poses = {makePose(0, 0.40, 0)};
-  for (auto & pose : plan.poses) {pose.header = plan.header;}
+  for (auto & pose : plan.poses) {
+    pose.header = plan.header;
+                                                            }
   handler.setPath(plan);
 
   // Robot starts at y = 0.22 (dist = 0.18m > 0.07m goal tolerance).
@@ -2181,6 +2216,3 @@ TEST(PathHandlerTests, TerminalGoalCreepingProgressDoesNotStall)
     EXPECT_NO_THROW(handler.transformPath(robot_pose));
   }
 }
-
-
-

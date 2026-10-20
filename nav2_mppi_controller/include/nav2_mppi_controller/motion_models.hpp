@@ -15,6 +15,7 @@
 #ifndef NAV2_MPPI_CONTROLLER__MOTION_MODELS_HPP_
 #define NAV2_MPPI_CONTROLLER__MOTION_MODELS_HPP_
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -275,7 +276,8 @@ public:
 
     if (predict_steering_conditioning_) {
       const float dt = std::clamp(model_dt_, 0.005f, 0.15f);
-      const float command_limit = std::min(steering_max_angle_, std::atan(wheelbase_ / min_turning_r_));
+      const float command_limit = std::min(steering_max_angle_,
+          std::atan(wheelbase_ / min_turning_r_));
       for (unsigned int b = 0; b < state.vx.shape(0); ++b) {
         float angle;
         if (initial_steering_) {
@@ -288,7 +290,8 @@ public:
         float physical_angle = angle;
         if (requiresConditionedSteering()) {
           if (!initial_conditioned_steering_) {
-            throw nav2_core::NoValidControl("Actuator prediction requires conditioned target feedback");
+            throw nav2_core::NoValidControl(
+                "Actuator prediction requires conditioned target feedback");
           }
           angle = *initial_conditioned_steering_;
         }
@@ -304,7 +307,8 @@ public:
           const float blend = 1.0f - std::pow(1.0f - alpha, model_dt_ / steering_update_period_);
           const float target = std::clamp(blend * raw + (1.0f - blend) * angle,
               -steering_max_angle_, steering_max_angle_);
-          const float rate = std::min(steering_rate_max_, steering_rate_base_ + steering_rate_gain_ * speed);
+          const float rate = std::min(steering_rate_max_,
+              steering_rate_base_ + steering_rate_gain_ * speed);
           angle += std::clamp(target - angle, -rate * dt, rate * dt);
           if (steering_actuator_rate_ > 0) {
             const float servo_delta = steering_actuator_rate_ * model_dt_;
@@ -409,7 +413,6 @@ public:
     return true;
   }
 };
-
 }  // namespace mppi
 
 #endif  // NAV2_MPPI_CONTROLLER__MOTION_MODELS_HPP_

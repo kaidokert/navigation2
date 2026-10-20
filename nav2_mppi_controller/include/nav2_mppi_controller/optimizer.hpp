@@ -123,7 +123,7 @@ public:
 
   /** Real path prefix, excluding virtual preview points, for position scoring. */
   void setPathBinding(const std::optional<PathBinding> & binding)
-  {path_binding_required_=true;path_binding_=binding;}
+  {path_binding_required_ = true;path_binding_ = binding;}
   void setRealPathPointCount(size_t count) {critics_data_.real_path_point_count = count;}
   /** Effective internal gates supplied by the path handler, not final-goal tolerances. */
   void setCuspTolerances(std::optional<std::pair<double, double>> gates)
@@ -136,12 +136,14 @@ public:
     effective_cusp_tolerances_ = gates;
   }
   /** Request one optional mean initialization after an actual path handoff. */
-  void requestShortCuspSeed() {
+  void requestShortCuspSeed()
+  {
     clearCuspCompletion();
     short_cusp_seed_requested_ = true;
     long_entry_seed_requested_ = true;
   }
-  void requestPlanEntrySeed() {
+  void requestPlanEntrySeed()
+  {
     clearCuspCompletion();
     if (initialize_long_cusp_entry_) {short_cusp_seed_requested_ = true;}
   }
@@ -335,8 +337,8 @@ protected:
    */
   geometry_msgs::msg::TwistStamped
   getControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
-    geometry_msgs::msg::TwistStamped getControlFromSequenceAsTwist(
-      const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start);
+  geometry_msgs::msg::TwistStamped getControlFromSequenceAsTwist(
+    const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start);
   geometry_msgs::msg::TwistStamped getControlFromSequenceAsTwist(
     const builtin_interfaces::msg::Time & stamp, const models::ControlSequence * warm_start,
     const models::ControlSequence * before_filter);
@@ -388,13 +390,14 @@ protected:
 
   /// Opt-in check of the actual constrained mean, after optimization/filtering.
   void enforceShortCuspMeanFeasibility();
-    void enforceShortCuspMeanFeasibility(const models::ControlSequence * warm_start);
+  void enforceShortCuspMeanFeasibility(const models::ControlSequence * warm_start);
   bool shortCuspSequenceFeasible() const;
   bool cuspSequenceFeasible(const models::ControlSequence & sequence) const;
   bool actualCuspStreamFeasible(const models::ControlSequence & sequence) const;
   void enforceGentleCuspEmission();
   bool gentle_short_cusp_required_{false};
-  void clearCuspCompletion() {
+  void clearCuspCompletion()
+  {
     gentle_short_cusp_required_ = false;
     clearLongEntryCertificate();
     cusp_completion_.reset();
@@ -402,11 +405,12 @@ protected:
     cusp_completion_shifts_ = 0;
   }
   // Separate local-entry proof: never uses the distant path endpoint.
-  struct LongEntryCertificate {
+  struct LongEntryCertificate
+  {
     models::ControlSequence controls;
     geometry_msgs::msg::Pose target;
     double anchor_x{0}, anchor_y{0}, edge{0};
-    std::pair<double,double> gates;
+    std::pair<double, double> gates;
     std::string frame;
     int64_t stamp_ns{0}, last_stamp_ns{0};
     uint64_t epoch{0};
@@ -415,14 +419,15 @@ protected:
     uint64_t plan_generation{0}, segment_generation{0};
     size_t source_id{0};
     geometry_msgs::msg::Pose canonical_anchor;
-
   };
-  void clearLongEntryCertificate() {
-    long_entry_.reset();long_entry_required_=false;long_entry_seed_requested_=false;
+  void clearLongEntryCertificate()
+  {
+    long_entry_.reset();long_entry_required_ = false;long_entry_seed_requested_ = false;
     ++long_entry_epoch_;
   }
   bool initializeLongEntryCertificate();
-  bool validateLongEntrySequence(models::ControlSequence & sequence,
+  bool validateLongEntrySequence(
+    models::ControlSequence & sequence,
     size_t & first_hit, bool select_target = false);
   void enforceLongEntryCertificate(bool allow_optimized);
   bool longEntryStateValid() const;
@@ -490,7 +495,6 @@ protected:
   float motor_deadband_terminal_radius_{0.04f};
   float motor_deadband_max_heading_error_{0.5236f};
 };
-
 }  // namespace mppi
 
 #endif  // NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_

@@ -350,7 +350,9 @@ TEST(UtilsTests, SmootherTest)
   // Make the sequence noisy
   // Fixed alternating disturbance: repeatable across RNG state and gtest repeats.
   xt::xtensor<float, 1> noises = xt::zeros<float>({30});
-  for (size_t i = 0; i < 30; ++i) {noises(i) = i % 2 == 0 ? 0.2f : -0.2f;}
+  for (size_t i = 0; i < 30; ++i) {
+    noises(i) = i % 2 == 0 ? 0.2f : -0.2f;
+                                                                         }
   noisey_sequence.vx += noises;
   noisey_sequence.vy += noises;
   noisey_sequence.wz += noises;

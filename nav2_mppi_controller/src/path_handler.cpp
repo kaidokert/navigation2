@@ -1,4 +1,3 @@
-#include "nav2_mppi_controller/tools/decision_recorder.hpp"
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 // Copyright (c) 2023 Dexory
 // Copyright (c) 2023 Open Navigation LLC
@@ -17,17 +16,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <cstring>
-#include <cstdint>
-
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_mppi_controller/tools/decision_recorder.hpp"
+#include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
 #include "nav2_mppi_controller/tools/path_handler.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
-#include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
-#include "nav2_costmap_2d/costmap_2d_ros.hpp"
 
 namespace mppi
 {
@@ -154,10 +153,12 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
   if (preserve_cusp_direction_edge_ && enforce_path_inversion_ &&
     inversion_locale_ != 0u && closest_point != begin &&
     std::all_of(closest_point, global_plan_up_to_inversion_.poses.end(),
-      [&](const auto & p) {return euclidean_distance(*closest_point, p) < 1e-6;}))
+    [&](const auto & p) {return euclidean_distance(*closest_point, p) < 1e-6;}))
   {
     auto edge_start = closest_point;
-    do {--edge_start;} while (edge_start != begin &&
+    do {
+      --edge_start;
+    } while (edge_start != begin &&
       euclidean_distance(*edge_start, *closest_point) < 1e-6);
     const double edge_length = euclidean_distance(*edge_start, *closest_point);
     auto candidate = *edge_start;
@@ -175,35 +176,35 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
   }
 
   PathBinding binding;
-  binding.canonical_plan=canonical_plan_;binding.generation=plan_generation_;
-  binding.segment=segment_generation_;binding.segment_begin=segment_source_begin_;
-  binding.segment_end=segment_source_end_;
-  const auto local_frame=costmap_->getGlobalFrameID();
+  binding.canonical_plan = canonical_plan_;binding.generation = plan_generation_;
+  binding.segment = segment_generation_;binding.segment_begin = segment_source_begin_;
+  binding.segment_end = segment_source_end_;
+  const auto local_frame = costmap_->getGlobalFrameID();
   try {
-    if(local_frame==global_plan_.header.frame_id) {
-      binding.canonical_to_local.header.frame_id=local_frame;
-      binding.canonical_to_local.child_frame_id=global_plan_.header.frame_id;
-      binding.canonical_to_local.header.stamp=global_pose.header.stamp;
-      binding.canonical_to_local.transform.rotation.w=1.0;
+    if(local_frame == global_plan_.header.frame_id) {
+      binding.canonical_to_local.header.frame_id = local_frame;
+      binding.canonical_to_local.child_frame_id = global_plan_.header.frame_id;
+      binding.canonical_to_local.header.stamp = global_pose.header.stamp;
+      binding.canonical_to_local.transform.rotation.w = 1.0;
     } else {
-      binding.canonical_to_local=tf_buffer_->lookupTransform(local_frame,
-        global_plan_.header.frame_id,global_pose.header.stamp,
+      binding.canonical_to_local = tf_buffer_->lookupTransform(local_frame,
+        global_plan_.header.frame_id, global_pose.header.stamp,
         tf2::durationFromSec(transform_tolerance_));
     }
   } catch(const tf2::TransformException & ex) {
     path_binding_.reset();throw nav2_core::ControllerTFError(ex.what());
   }
-  binding.canonical_to_local.header.stamp=global_pose.header.stamp;
+  binding.canonical_to_local.header.stamp = global_pose.header.stamp;
   // Reject malformed canonical transforms before doTransform/worldToMap casts.
-  const auto & tf=binding.canonical_to_local;
-  const auto & t=tf.transform.translation;const auto & q=tf.transform.rotation;
-  const auto finite=diagnostic::isFiniteCaptureValue;
+  const auto & tf = binding.canonical_to_local;
+  const auto & t = tf.transform.translation;const auto & q = tf.transform.rotation;
+  const auto finite = diagnostic::isFiniteCaptureValue;
   if(tf.header.frame_id.empty() || tf.child_frame_id.empty() ||
-    tf.header.frame_id!=local_frame || tf.child_frame_id!=global_plan_.header.frame_id ||
+    tf.header.frame_id != local_frame || tf.child_frame_id != global_plan_.header.frame_id ||
     !finite(t.x) || !finite(t.y) || !finite(t.z) || !finite(q.x) ||
     !finite(q.y) || !finite(q.z) || !finite(q.w) ||
-    std::abs(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w-1.0)>1e-6 ||
-    std::abs(q.x)>1e-6 || std::abs(q.y)>1e-6 || std::abs(t.z)>1e-6)
+    std::abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1.0) > 1e-6 ||
+    std::abs(q.x) > 1e-6 || std::abs(q.y) > 1e-6 || std::abs(t.z) > 1e-6)
   {
     path_binding_.reset();
     throw nav2_core::ControllerTFError("Invalid canonical path transform");
@@ -227,23 +228,23 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
     geometry_msgs::msg::PoseStamped costmap_plan_pose;
     global_plan_pose->header.stamp = global_pose.header.stamp;
     global_plan_pose->header.frame_id = global_plan_.header.frame_id;
-    tf2::doTransform(*global_plan_pose,costmap_plan_pose,binding.canonical_to_local);
+    tf2::doTransform(*global_plan_pose, costmap_plan_pose, binding.canonical_to_local);
 
     // Check if pose is inside the costmap
     if (!costmap_->getCostmap()->worldToMap(
         costmap_plan_pose.pose.position.x, costmap_plan_pose.pose.position.y, mx, my))
     {
-      path_binding_=std::move(binding);
+      path_binding_ = std::move(binding);
       return {transformed_plan, closest_point};
     }
 
     // Filling the transformed plan to return with the transformed pose
-    binding.real_ids.push_back(inversion_source_offset_+
-      static_cast<size_t>(std::distance(begin,global_plan_pose)));
+    binding.real_ids.push_back(inversion_source_offset_ +
+      static_cast<size_t>(std::distance(begin, global_plan_pose)));
     transformed_plan.poses.push_back(costmap_plan_pose);
   }
 
-  path_binding_=std::move(binding);
+  path_binding_ = std::move(binding);
   return {transformed_plan, closest_point};
 }
 
@@ -267,11 +268,14 @@ nav_msgs::msg::Path PathHandler::transformPath(
   const geometry_msgs::msg::PoseStamped & robot_pose,
   const DepartureValidator & departure_validator)
 {
-  recorder::observe("path_before", [&] {return recorder::Json{
-    {"global",recorder::rosPath(global_plan_)},{"incoming",recorder::rosPath(global_plan_up_to_inversion_)},
-    {"robot",recorder::pose(robot_pose.pose)}, {"robot_frame",robot_pose.header.frame_id},
-    {"plan_generation",plan_generation_},{"segment_generation",segment_generation_},
-    {"source_offset",global_source_offset_},{"inversion",inversion_locale_}};});
+  recorder::observe("path_before", [&] {
+      return recorder::Json{
+      {"global", recorder::rosPath(global_plan_)},
+      {"incoming", recorder::rosPath(global_plan_up_to_inversion_)},
+      {"robot", recorder::pose(robot_pose.pose)}, {"robot_frame", robot_pose.header.frame_id},
+      {"plan_generation", plan_generation_}, {"segment_generation", segment_generation_},
+      {"source_offset", global_source_offset_}, {"inversion", inversion_locale_}};
+                                                                             });
   did_handoff_ = false;
   retained_departure_approach_.reset();
   // Find relevent bounds of path to use
@@ -286,7 +290,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
     const int64_t approach_stamp = static_cast<int64_t>(global_pose.header.stamp.sec) *
       1000000000LL + global_pose.header.stamp.nanosec;
     if (departure_approach_budget_ && (!accept_handoff ||
-      departure_approach_budget_->exhausted || approach_stamp < departure_approach_budget_->last_ns ||
+      departure_approach_budget_->exhausted ||
+      approach_stamp < departure_approach_budget_->last_ns ||
       approach_stamp - departure_approach_budget_->started_ns > 2000000000LL))
     {
       departure_approach_budget_->exhausted = true;
@@ -306,9 +311,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
       const auto outgoing_inversion = utils::removePosesAfterFirstInversion(outgoing);
       // Short endpoint validation is only for another internal cusp, never the final goal.
       if (segmentDirection(outgoing) == 1 && (!short_departure || outgoing_inversion != 0u)) {
-      if (!departure_validator) {
-        throw nav2_core::NoValidControl("Enabled departure guard has no validator");
-      }
+        if (!departure_validator) {
+          throw nav2_core::NoValidControl("Enabled departure guard has no validator");
+        }
         nav_msgs::msg::Path local;
         local.header.frame_id = costmap_->getGlobalFrameID();
         local.header.stamp = global_pose.header.stamp;
@@ -332,18 +337,22 @@ nav_msgs::msg::Path PathHandler::transformPath(
           throw nav2_core::ControllerTFError("Cannot transform departure robot pose");
         }
         const auto gates = effectiveInversionTolerances();
-        accept_handoff = departure_validator(local_robot, local, gates.first, gates.second, short_departure);
+        accept_handoff = departure_validator(local_robot, local, gates.first, gates.second,
+            short_departure);
         if (!accept_handoff && short_departure &&
           !retainRejectedShortDeparture(global_pose, local.poses.front(), gates.first))
         {
           // Do not enter a segment with no validated continuation, or wait forever
           // inside the incoming tolerance zone. Preserve the cusp for stopped replanning.
-          RCLCPP_WARN(logger_, "[SHORT_DEPARTURE_GUARD] rejected; cusp retained for stopped replan");
-          throw nav2_core::FailedToMakeProgress("No validated short forward departure; stopped replan required");
+          RCLCPP_WARN(logger_,
+              "[SHORT_DEPARTURE_GUARD] rejected; cusp retained for stopped replan");
+          throw nav2_core::FailedToMakeProgress(
+              "No validated short forward departure; stopped replan required");
         }
         if (!accept_handoff) {
           RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
-            "[DEPARTURE_GUARD] bounded forward search rejected; retaining reverse cusp");
+            "[DEPARTURE_GUARD] bounded forward search rejected; retaining"
+      " reverse cusp");
         }
       }
     }
@@ -374,10 +383,10 @@ nav_msgs::msg::Path PathHandler::transformPath(
       // segment's first edge, and erases a one-edge reversal entirely.
       prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_ - 1);
       global_plan_up_to_inversion_ = global_plan_;
-      inversion_source_offset_=global_source_offset_;
-      ++segment_generation_;segment_source_begin_=global_source_offset_;
+      inversion_source_offset_ = global_source_offset_;
+      ++segment_generation_;segment_source_begin_ = global_source_offset_;
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
-      segment_source_end_=inversion_source_offset_+global_plan_up_to_inversion_.poses.size();
+      segment_source_end_ = inversion_source_offset_ + global_plan_up_to_inversion_.poses.size();
       current_segment_direction_ = segmentDirection(global_plan_up_to_inversion_);
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
@@ -508,13 +517,14 @@ nav_msgs::msg::Path PathHandler::transformPath(
     cusp_dist = getCuspDistance(global_pose);
     if (cusp_dist > min_cusp_distance_ + 0.05) {
       RCLCPP_WARN(logger_,
-        "[CUSP_MISSED] consumed segment past closest approach (min=%.4fm, curr=%.4fm); "
+        "[CUSP_MISSED] consumed segment past closest approach (min=%."
+      "4fm, curr=%.4fm); "
         "requesting stopped replan",
         min_cusp_distance_, cusp_dist);
-      throw nav2_core::FailedToMakeProgress("Cusp missed past closest approach; stopped replan required");
+      throw nav2_core::FailedToMakeProgress(
+          "Cusp missed past closest approach; stopped replan required");
     }
   }
-
 
 
   // Layer 2 escape (notes/cusp_handoff_fix_plan.md): the handoff has been
@@ -615,11 +625,13 @@ nav_msgs::msg::Path PathHandler::transformPath(
     transformed_plan.poses.size(), real_tgp_length, tgp_length,
     inversion_locale_, cusp_dist);
 
-  recorder::observe("path_after", [&] {return recorder::Json{
-    {"transformed",recorder::rosPath(transformed_plan)}, {"real_length",real_tgp_length},
-    {"total_length",tgp_length},{"inversion",inversion_locale_},{"handoff",did_handoff_},
-    {"real_points",real_path_point_count_},{"plan_generation",plan_generation_},
-    {"segment_generation",segment_generation_}};});
+  recorder::observe("path_after", [&] {
+      return recorder::Json{
+      {"transformed", recorder::rosPath(transformed_plan)}, {"real_length", real_tgp_length},
+      {"total_length", tgp_length}, {"inversion", inversion_locale_}, {"handoff", did_handoff_},
+      {"real_points", real_path_point_count_}, {"plan_generation", plan_generation_},
+      {"segment_generation", segment_generation_}};
+                                                });
   return transformed_plan;
 }
 
@@ -645,7 +657,8 @@ bool PathHandler::shouldUseGhostPath(
   if (std::isfinite(min_cusp_distance_) && cusp_dist > min_cusp_distance_ + 0.05) {
     if (clock_) {
       RCLCPP_WARN_THROTTLE(logger_, *clock_, 500,
-        "[GHOST_BOUND] cusp_dist=%.4fm > min_cusp_dist=%.4fm + 0.05m; suppressing ghost extension",
+        "[GHOST_BOUND] cusp_dist=%.4fm > min_cusp_dist=%.4fm + 0.05m;"
+      " suppressing ghost extension",
         cusp_dist, min_cusp_distance_);
     }
     return false;
@@ -655,7 +668,8 @@ bool PathHandler::shouldUseGhostPath(
   double seed_arc_length = 0.0;
   if (!estimateGhostHeading(transformed_plan, heading, heading_variance, seed_arc_length)) {
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 200,
-      "[GHOST_DIAG] heading estimation failed (tgp=%.4fm pts=%zu seed_arc=%.4f)",
+      "[GHOST_DIAG] heading estimation failed (tgp=%.4fm pts=%zu se"
+      "ed_arc=%.4f)",
       tgp_length, transformed_plan.poses.size(), seed_arc_length);
     return false;
   }
@@ -684,10 +698,10 @@ bool PathHandler::estimateGhostHeading(
     // (advanced at every handoff). Compare displacement with the heading AT
     // THAT EDGE, not an earlier heading on a long curve. Skip duplicate points
     // and exclude future segments, whose gear may be opposite.
-    const auto & segment = global_plan_up_to_inversion_.poses.size() >= 2
-      ? global_plan_up_to_inversion_ : global_plan_;
-    const size_t end = (&segment == &global_plan_ && inversion_locale_ > 0u)
-      ? std::min<size_t>(inversion_locale_, segment.poses.size()) : segment.poses.size();
+    const auto & segment = global_plan_up_to_inversion_.poses.size() >= 2 ?
+      global_plan_up_to_inversion_ : global_plan_;
+    const size_t end = (&segment == &global_plan_ && inversion_locale_ > 0u) ?
+      std::min<size_t>(inversion_locale_, segment.poses.size()) : segment.poses.size();
     for (size_t i = end; i > 1; --i) {
       const auto & p0 = segment.poses[i - 2].pose;
       const auto & p1 = segment.poses[i - 1].pose;
@@ -700,7 +714,8 @@ bool PathHandler::estimateGhostHeading(
       if (dx * std::cos(edge_yaw) + dy * std::sin(edge_yaw) < 0.0) {
         pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
         RCLCPP_INFO(logger_,
-          "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
+          "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> "
+      "travel=%.0fdeg",
           tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
           pose_yaw * 180.0 / M_PI);
       }
@@ -883,9 +898,9 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
   departure_approach_budget_.reset();
   retained_departure_approach_.reset();
   min_cusp_distance_ = std::numeric_limits<double>::infinity();
-  canonical_plan_=std::make_shared<const nav_msgs::msg::Path>(plan);
+  canonical_plan_ = std::make_shared<const nav_msgs::msg::Path>(plan);
   ++plan_generation_;++segment_generation_;path_binding_.reset();
-  global_source_offset_=0;inversion_source_offset_=0;segment_source_begin_=0;
+  global_source_offset_ = 0;inversion_source_offset_ = 0;segment_source_begin_ = 0;
   global_plan_ = plan;
   cusp_overrun_snapshot_written_ = false;
   global_plan_up_to_inversion_ = global_plan_;
@@ -897,16 +912,16 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
       utils::pathLength(global_plan_up_to_inversion_));
     next_segment_length_ = nextSegmentLength(global_plan_, inversion_locale_);
   }
-  segment_source_end_=global_plan_up_to_inversion_.poses.size();
+  segment_source_end_ = global_plan_up_to_inversion_.poses.size();
 }
 
 nav_msgs::msg::Path & PathHandler::getPath() {return global_plan_;}
 
 void PathHandler::prunePlan(nav_msgs::msg::Path & plan, const PathIterator end)
 {
-  const auto removed=static_cast<size_t>(std::distance(plan.poses.begin(),end));
-  if(&plan==&global_plan_) {global_source_offset_+=removed;}
-  if(&plan==&global_plan_up_to_inversion_) {inversion_source_offset_+=removed;}
+  const auto removed = static_cast<size_t>(std::distance(plan.poses.begin(), end));
+  if(&plan == &global_plan_) {global_source_offset_ += removed;}
+  if(&plan == &global_plan_up_to_inversion_) {inversion_source_offset_ += removed;}
   plan.poses.erase(plan.poses.begin(), end);
 }
 
@@ -933,23 +948,23 @@ std::pair<double, double> PathHandler::effectiveInversionTolerances() const
   // alignment on a 4cm segment overconstrains the Ackermann controller.
   const bool is_micro_cusp =
     current_segment_length_ < micro_cusp_length_threshold_;
-  const double effective_yaw_tol = is_micro_cusp
-    ? static_cast<double>(inversion_yaw_tolerance_) * micro_cusp_yaw_scale_
-    : std::min<double>(inversion_yaw_tolerance_, inversion_yaw_base_);
+  const double effective_yaw_tol = is_micro_cusp ?
+    static_cast<double>(inversion_yaw_tolerance_) * micro_cusp_yaw_scale_ :
+    std::min<double>(inversion_yaw_tolerance_, inversion_yaw_base_);
 
   // A fixed handoff radius can encompass an entire short segment, consuming
   // its cusp before any of the required motion takes place. Restrict that
   // radius to a fraction (inversion_segment_ratio_) of the segment length,
   // floored at inversion_xy_floor_ to avoid deadband stalls on micro-segments.
   // Longer segments retain the configured gate.
-  const double gate_segment_length = bound_handoff_by_next_segment_
-    ? std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
+  const double gate_segment_length = bound_handoff_by_next_segment_ ?
+    std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
   const double max_allowed = static_cast<double>(inversion_xy_tolerance_);
   const double scaled_gate = inversion_segment_ratio_ * gate_segment_length;
   const double floor_val = std::min<double>(inversion_xy_floor_, max_allowed);
-  const double policy_xy_tol = is_micro_cusp
-    ? max_allowed
-    : std::max<double>(floor_val, std::min<double>(max_allowed, scaled_gate));
+  const double policy_xy_tol = is_micro_cusp ?
+    max_allowed :
+    std::max<double>(floor_val, std::min<double>(max_allowed, scaled_gate));
   // A deadband floor or micro-cusp allowance must not cover the entire
   // required maneuver. The structural bound also applies to the outgoing
   // segment when adjacent-segment protection is explicitly enabled.
@@ -988,7 +1003,7 @@ bool PathHandler::retainRejectedShortDeparture(
   const double dy = pose.pose.position.y - cusp.position.y;
   const double yaw = tf2::getYaw(cusp.orientation);
   const double remaining = dx * std::cos(yaw) + dy * std::sin(yaw);
-  const double distance = std::hypot(dx,dy);
+  const double distance = std::hypot(dx, dy);
   const double stop_margin = 0.1 * xy_gate;
   const int64_t stamp = static_cast<int64_t>(pose.header.stamp.sec) * 1000000000LL +
     pose.header.stamp.nanosec;
@@ -1016,12 +1031,12 @@ bool PathHandler::retainRejectedShortDeparture(
     budget.progress_ns = stamp; budget.progress_remaining = remaining;
   }
   budget.last_ns = stamp;
-  budget.best_remaining = std::min(budget.best_remaining,remaining);
-  budget.best_distance = std::min(budget.best_distance,distance);
+  budget.best_remaining = std::min(budget.best_remaining, remaining);
+  budget.best_distance = std::min(budget.best_distance, distance);
   auto stamped_cusp = local_cusp;
   stamped_cusp.header.frame_id = costmap_->getGlobalFrameID();
   stamped_cusp.header.stamp = pose.header.stamp;
-  retained_departure_approach_ = RetainedDepartureApproach{stamped_cusp,stop_margin};
+  retained_departure_approach_ = RetainedDepartureApproach{stamped_cusp, stop_margin};
   return true;
 }
 
@@ -1049,8 +1064,8 @@ bool PathHandler::isWithinInversionTolerances(
   // accept handoff so non-holonomic near misses do not stall or reverse into obstacles.
   constexpr float closest_approach_margin = 0.02f;
   constexpr float closest_approach_delta = 0.005f;
-  const double gate_segment_length = bound_handoff_by_next_segment_
-    ? std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
+  const double gate_segment_length = bound_handoff_by_next_segment_ ?
+    std::min(current_segment_length_, next_segment_length_) : current_segment_length_;
   const double near_miss_limit = std::min(
     effective_xy_tol + closest_approach_margin, 0.5 * gate_segment_length);
   // Only an outside-gate near miss is eligible. A previous visit inside the
@@ -1063,15 +1078,18 @@ bool PathHandler::isWithinInversionTolerances(
     (distance > min_cusp_distance_ + closest_approach_delta);
 
   bool result = (within_xy && within_yaw) || closest_approach_handoff;
-  recorder::observe("cusp_gate", [&] {return recorder::Json{
-    {"robot",recorder::pose(robot_pose.pose)}, {"cusp",recorder::pose(last_pose.pose)},
-    {"frame",robot_pose.header.frame_id}, {"distance",distance},{"yaw_error",angle_distance},
-    {"xy_limit",effective_xy_tol},{"yaw_limit",relaxed_yaw_tol},{"accepted",result},
-    {"closest_approach",closest_approach_handoff},{"blocked_before",handoff_blocked_cycles_}};});
+  recorder::observe("cusp_gate", [&] {
+      return recorder::Json{
+      {"robot", recorder::pose(robot_pose.pose)}, {"cusp", recorder::pose(last_pose.pose)},
+      {"frame", robot_pose.header.frame_id}, {"distance", distance}, {"yaw_error", angle_distance},
+      {"xy_limit", effective_xy_tol}, {"yaw_limit", relaxed_yaw_tol}, {"accepted", result},
+      {"closest_approach", closest_approach_handoff}, {"blocked_before", handoff_blocked_cycles_}};
+                                                                                              });
 
   if (closest_approach_handoff && !within_xy && clock_) {
     RCLCPP_INFO(logger_,
-      "[CUSP_HANDOFF_CLOSEST_APPROACH] min_dist=%.4fm dist=%.4fm xy_gate=%.4fm "
+      "[CUSP_HANDOFF_CLOSEST_APPROACH] min_dist=%.4fm dist=%.4fm xy"
+      "_gate=%.4fm "
       "yaw_err=%.2fdeg(gate=%.2fdeg)",
       min_cusp_distance_, distance, effective_xy_tol,
       angle_distance * 180.0 / M_PI, relaxed_yaw_tol * 180.0 / M_PI);
@@ -1157,5 +1175,4 @@ bool PathHandler::computeEscapeHeading(double & heading) const
   heading = std::atan2(dy, dx);
   return true;
 }
-
 }  // namespace mppi

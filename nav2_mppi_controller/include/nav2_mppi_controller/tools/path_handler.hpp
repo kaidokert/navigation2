@@ -94,7 +94,8 @@ public:
    * @return global plan in local frame
    */
   using DepartureValidator = std::function<bool(
-      const geometry_msgs::msg::PoseStamped &, const nav_msgs::msg::Path &, double, double, bool)>;
+        const geometry_msgs::msg::PoseStamped &, const nav_msgs::msg::Path &, double, double,
+        bool)>;
   nav_msgs::msg::Path transformPath(
     const geometry_msgs::msg::PoseStamped & robot_pose,
     const DepartureValidator & departure_validator = {});
@@ -117,15 +118,18 @@ public:
   std::optional<PathBinding> getPathBinding() const {return path_binding_;}
   /** Gear cached before pruning, only while a direction cusp remains active. */
   /** Cached real segment gear, including the final segment after pruning. */
-  int getPathDirection() const {
+  int getPathDirection() const
+  {
     return enforce_path_inversion_ ? current_segment_direction_ : 0;
   }
 
-  int getActiveCuspDirection() const {
+  int getActiveCuspDirection() const
+  {
     return enforce_path_inversion_ && inversion_locale_ != 0u ? current_segment_direction_ : 0;
   }
 
-  std::optional<std::pair<double, double>> getCuspTolerances() const {
+  std::optional<std::pair<double, double>> getCuspTolerances() const
+  {
     if (getActiveCuspDirection() == 0) {return std::nullopt;}
     return effectiveInversionTolerances();
   }
@@ -300,9 +304,9 @@ protected:
   // Cusp handoff deadlock escape (Layers 1+2, notes/cusp_handoff_fix_plan.md).
   // Cycle-based (one isWithinInversionTolerances call per control cycle) so the
   // policy is deterministic and unit-testable without a clock.
-  double handoff_yaw_relax_per_cycle_{0.005};   // rad of extra yaw tol per blocked cycle
-  double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
-  int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
+  double handoff_yaw_relax_per_cycle_{0.005};  // rad of extra yaw tol per blocked cycle
+  double handoff_yaw_relax_cap_{0.8};  // ceiling for the relaxed yaw tolerance
+  int handoff_escape_after_cycles_{0};  // blocked cycles before escape ghost engages;
   // <=0 DISABLES escape (default: off until the oscillation latch is implemented;
   // review 2026-09-25).
   // mutable: the check is const to callers, but consecutive-blocked tracking is

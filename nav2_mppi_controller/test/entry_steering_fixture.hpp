@@ -2,7 +2,8 @@
 #pragma once
 #include <array>
 // Captured entry 001848/index2071, reduced into the body frame.
-namespace entry_steering_fixture {
+namespace entry_steering_fixture
+{
 inline constexpr std::array<float, 2> speed = {{
   -7.9999999518e-02f, -1.4884312636e-01f
 }};

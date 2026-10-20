@@ -101,26 +101,41 @@ void CriticManager::evalTrajectoriesScores(
   const bool collect_stats = publish_critics_stats_ && publish_stats;
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> recording_map_lock;
   if (recorder::active && recorder::active->open()) {
-    recording_map_lock = std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t>(*costmap_ros_->getCostmap()->getMutex());
+    recording_map_lock =
+      std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t>(
+        *costmap_ros_->getCostmap()->getMutex());
     ++recorder::active->bank;
   }
   recorder::observe("score_begin", [&] {
-    auto * map = costmap_ros_->getCostmap();
-    recorder::Json footprint = recorder::Json::array();
-    for (const auto & p : costmap_ros_->getRobotFootprint()) {footprint.push_back({p.x,p.y});}
-    std::vector<unsigned char> cells(map->getCharMap(), map->getCharMap()+map->getSizeInCellsX()*map->getSizeInCellsY());
-    return recorder::Json{{"initial_costs", recorder::tensor(data.costs)},
-      {"sampled_vx", recorder::tensor(data.state.cvx)}, {"sampled_vy", recorder::tensor(data.state.cvy)},
-      {"sampled_wz", recorder::tensor(data.state.cwz)}, {"predicted_vx", recorder::tensor(data.state.vx)},
-      {"predicted_vy", recorder::tensor(data.state.vy)}, {"predicted_wz", recorder::tensor(data.state.wz)},
-      {"trajectory_x", recorder::tensor(data.trajectories.x)}, {"trajectory_y", recorder::tensor(data.trajectories.y)},
-      {"trajectory_yaw", recorder::tensor(data.trajectories.yaws)}, {"path", recorder::path(data.path)},
-      {"real_points", data.real_path_point_count ? recorder::Json(*data.real_path_point_count) : recorder::Json(nullptr)},
+      auto * map = costmap_ros_->getCostmap();
+      recorder::Json footprint = recorder::Json::array();
+      for (const auto & p : costmap_ros_->getRobotFootprint()) {
+        footprint.push_back({p.x, p.y});
+      }
+      std::vector<unsigned char> cells(map->getCharMap(),
+        map->getCharMap() + map->getSizeInCellsX() * map->getSizeInCellsY());
+      return recorder::Json{{"initial_costs", recorder::tensor(data.costs)},
+      {"sampled_vx", recorder::tensor(data.state.cvx)},
+      {"sampled_vy", recorder::tensor(data.state.cvy)},
+      {"sampled_wz", recorder::tensor(data.state.cwz)},
+      {"predicted_vx", recorder::tensor(data.state.vx)},
+      {"predicted_vy", recorder::tensor(data.state.vy)},
+      {"predicted_wz", recorder::tensor(data.state.wz)},
+      {"trajectory_x", recorder::tensor(data.trajectories.x)},
+      {"trajectory_y", recorder::tensor(data.trajectories.y)},
+      {"trajectory_yaw", recorder::tensor(data.trajectories.yaws)},
+      {"path", recorder::path(data.path)},
+      {"real_points",
+        data.real_path_point_count ? recorder::Json(*data.real_path_point_count) :
+        recorder::Json(nullptr)},
       {"active_direction", data.active_cusp_direction}, {"configured_critics", critic_names_},
-      {"grid", {{"frame",costmap_ros_->getGlobalFrameID()},{"base_frame",costmap_ros_->getBaseFrameID()},
-        {"width",map->getSizeInCellsX()},{"height",map->getSizeInCellsY()},
-        {"resolution",map->getResolution()},{"origin",{map->getOriginX(),map->getOriginY()}},
-        {"cells",cells},{"footprint",footprint},{"tracking_unknown",costmap_ros_->getLayeredCostmap()->isTrackingUnknown()}}}};
+      {"grid",
+        {{"frame", costmap_ros_->getGlobalFrameID()},
+          {"base_frame", costmap_ros_->getBaseFrameID()},
+          {"width", map->getSizeInCellsX()}, {"height", map->getSizeInCellsY()},
+          {"resolution", map->getResolution()}, {"origin", {map->getOriginX(), map->getOriginY()}},
+          {"cells", cells}, {"footprint", footprint},
+          {"tracking_unknown", costmap_ros_->getLayeredCostmap()->isTrackingUnknown()}}}};
   });
   std::unique_ptr<nav2_critics_msgs::msg::CriticsStats> stats_msg;
   // Per-critic cost deltas for each trajectory (to extract best trajectory costs)
@@ -145,9 +160,12 @@ void CriticManager::evalTrajectoriesScores(
     }
 
     critics_[i]->score(data);
-    recorder::observe("critic", [&] {return recorder::Json{
-      {"name",critic_names_[i]}, {"delta",recorder::tensor(xt::eval(data.costs-costs_before))},
-      {"fail_flag",data.fail_flag}};});
+    recorder::observe("critic", [&] {
+        return recorder::Json{
+        {"name", critic_names_[i]},
+        {"delta", recorder::tensor(xt::eval(data.costs - costs_before))},
+        {"fail_flag", data.fail_flag}};
+                                    });
 
     if (collect_stats) {
       auto delta = data.costs - costs_before;
@@ -159,10 +177,15 @@ void CriticManager::evalTrajectoriesScores(
     }
   }
 
-  recorder::observe("score_end", [&] {return recorder::Json{
-    {"path_valid_cache",data.path_pts_valid ? recorder::Json(*data.path_pts_valid) : recorder::Json(nullptr)},
-    {"costs",recorder::tensor(data.costs)}, {"fail_flag",data.fail_flag},
-    {"furthest",data.furthest_reached_path_point ? recorder::Json(*data.furthest_reached_path_point) : recorder::Json(nullptr)}};});
+  recorder::observe("score_end", [&] {
+      return recorder::Json{
+      {"path_valid_cache",
+        data.path_pts_valid ? recorder::Json(*data.path_pts_valid) : recorder::Json(nullptr)},
+      {"costs", recorder::tensor(data.costs)}, {"fail_flag", data.fail_flag},
+      {"furthest",
+        data.furthest_reached_path_point ? recorder::Json(*data.furthest_reached_path_point) :
+        recorder::Json(nullptr)}};
+  });
   if (collect_stats && critics_effect_pub_ && stats_msg) {
     // Find the best (lowest total cost) trajectory
     if (data.costs.size() > 0) {
@@ -185,5 +208,4 @@ void CriticManager::evalTrajectoriesScores(
     }
   }
 }
-
 }  // namespace mppi

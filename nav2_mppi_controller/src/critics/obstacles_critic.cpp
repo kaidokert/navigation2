@@ -1,4 +1,11 @@
+#include <cmath>
+#include "nav2_core/controller_exceptions.hpp"
+#include "nav2_costmap_2d/inflation_layer.hpp"
+#include "nav2_mppi_controller/critics/obstacles_critic.hpp"
 #include "nav2_mppi_controller/tools/decision_recorder.hpp"
+#include <pluginlib/class_list_macros.hpp>
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 // Copyright (c) 2023 Open Navigation LLC
 //
@@ -14,11 +21,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cmath>
-#include "rcl_interfaces/msg/parameter_descriptor.hpp"
-#include "nav2_mppi_controller/critics/obstacles_critic.hpp"
-#include "nav2_costmap_2d/inflation_layer.hpp"
-#include "nav2_core/controller_exceptions.hpp"
 
 namespace mppi::critics
 {
@@ -62,7 +64,8 @@ void ObstaclesCritic::initialize()
 
   if (goal_truncation_distance_ > 0.0f) {
     RCLCPP_WARN(
-      logger_, "goal_truncation_distance is ignored: collision checking covers the full rollout");
+      logger_, "goal_truncation_distance is ignored: collision checking cove"
+      "rs the full rollout");
   }
 
   collision_checker_.setCostmap(costmap_);
@@ -70,17 +73,23 @@ void ObstaclesCritic::initialize()
 
   if (collision_check_footprint_only_ && costmap_ros_->getUseRadius()) {
     throw nav2_core::ControllerException(
-      "Hard footprint collision checking requires a configured robot footprint.");
+      "Hard footprint collision checking requires a configured robo"
+      "t footprint.");
   }
 
   if (possible_collision_cost_ < 1.0f) {
     RCLCPP_ERROR(
       logger_,
-      "Inflation layer either not found or inflation is not set sufficiently for "
-      "optimized non-circular collision checking capabilities. It is HIGHLY recommended to set"
-      " the inflation radius to be at MINIMUM half of the robot's largest cross-section. See "
-      "github.com/ros-planning/navigation2/tree/main/nav2_smac_planner#potential-fields"
-      " for full instructions. This will substantially impact run-time performance.");
+      "Inflation layer either not found or inflation is not set suf"
+      "ficiently for "
+      "optimized non-circular collision checking capabilities. It i"
+      "s HIGHLY recommended to set"
+      " the inflation radius to be at MINIMUM half of the robot's l"
+      "argest cross-section. See "
+      "github.com/ros-planning/navigation2/tree/main/nav2_smac_plan"
+      "ner#potential-fields"
+      " for full instructions. This will substantially impact run-t"
+      "ime performance.");
   }
 
   if (costmap_ros_->getUseRadius() ==
@@ -88,11 +97,13 @@ void ObstaclesCritic::initialize()
   {
     RCLCPP_WARN(
     logger_,
-    "Inconsistent configuration in collision checking. Please verify the robot's shape settings "
+    "Inconsistent configuration in collision checking. Please ver"
+      "ify the robot's shape settings "
     "in both the costmap and the obstacle critic.");
     if (costmap_ros_->getUseRadius()) {
       throw nav2_core::ControllerException(
-      "Considering footprint in collision checking but no robot footprint provided in the "
+      "Considering footprint in collision checking but no robot foo"
+      "tprint provided in the "
       "costmap.");
     }
   }
@@ -129,10 +140,14 @@ float ObstaclesCritic::findCircumscribedCost(
     RCLCPP_WARN(
       logger_,
       "No inflation layer found in costmap configuration. "
-      "If this is an SE2-collision checking plugin, it cannot use costmap potential "
-      "field to speed up collision checking by only checking the full footprint "
-      "when robot is within possibly-inscribed radius of an obstacle. This may "
-      "significantly slow down planning times and not avoid anything but absolute collisions!");
+      "If this is an SE2-collision checking plugin, it cannot use c"
+      "ostmap potential "
+      "field to speed up collision checking by only checking the fu"
+      "ll footprint "
+      "when robot is within possibly-inscribed radius of an obstacl"
+      "e. This may "
+      "significantly slow down planning times and not avoid anythin"
+      "g but absolute collisions!");
   }
 
   circumscribed_radius_ = static_cast<float>(circum_radius);
@@ -193,9 +208,12 @@ void ObstaclesCritic::score(CriticData & data)
       pose_cost = costAtPose(traj.x(i, j), traj.y(i, j), traj.yaws(i, j));
       if (inCollision(pose_cost.cost)) {
         trajectory_collide = true;
-        recorder::observe("hard_hit", [&] {return recorder::Json{
-          {"candidate",i},{"step",j},{"x",traj.x(i,j)},{"y",traj.y(i,j)},
-          {"yaw",traj.yaws(i,j)},{"cost",pose_cost.cost},{"footprint",pose_cost.using_footprint}};});
+        recorder::observe("hard_hit", [&] {
+            return recorder::Json{
+            {"candidate", i}, {"step", j}, {"x", traj.x(i, j)}, {"y", traj.y(i, j)},
+            {"yaw", traj.yaws(i, j)}, {"cost", pose_cost.cost},
+            {"footprint", pose_cost.using_footprint}};
+  });
         break;
       }
 
@@ -251,7 +269,7 @@ bool ObstaclesCritic::inCollision(float cost) const
   bool is_tracking_unknown =
     costmap_ros_->getLayeredCostmap()->isTrackingUnknown();
 
-  using namespace nav2_costmap_2d; // NOLINT
+  using namespace nav2_costmap_2d;  // NOLINT
   switch (static_cast<unsigned char>(cost)) {
     case (LETHAL_OBSTACLE):
       return true;
@@ -301,10 +319,8 @@ CollisionCost ObstaclesCritic::costAtPose(float x, float y, float theta)
 
   return collision_cost;
 }
-
 }  // namespace mppi::critics
 
-#include <pluginlib/class_list_macros.hpp>
 
 PLUGINLIB_EXPORT_CLASS(
   mppi::critics::ObstaclesCritic,

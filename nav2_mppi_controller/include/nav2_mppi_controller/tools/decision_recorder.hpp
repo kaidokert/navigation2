@@ -2,20 +2,22 @@
 #ifndef NAV2_MPPI_CONTROLLER__TOOLS__DECISION_RECORDER_HPP_
 #define NAV2_MPPI_CONTROLLER__TOOLS__DECISION_RECORDER_HPP_
 
-#include <chrono>
+#include <fcntl.h>
+#include <unistd.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <exception>
-#include <fcntl.h>
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
-#include <unistd.h>
 #include <nlohmann/json.hpp>
+
 
 namespace mppi::recorder
 {
@@ -36,35 +38,42 @@ template<typename Tensor> Json tensor(const Tensor & t)
     "Trace tensor encoding must not narrow a non-float32 tensor");
   Json shape = Json::array();
   if (t.size() > 2048 * 128) {throw std::runtime_error("tensor capture bound");}
-  for (auto n : t.shape()) {shape.push_back(n);}
+  for (auto n : t.shape()) {
+    shape.push_back(n);
+  }
   std::vector<unsigned char> bytes(t.size() * 4);
   size_t offset = 0;
   for (float x : t) {
     uint32_t bits; std::memcpy(&bits, &x, sizeof(bits));
     if ((bits & 0x7f800000u) == 0x7f800000u) {throw std::runtime_error("nonfinite tensor");}
-    for (unsigned shift : {0u,8u,16u,24u}) {bytes[offset++] = (bits >> shift) & 255u;}
+    for (unsigned shift : {0u, 8u, 16u, 24u}) {
+      bytes[offset++] = (bits >> shift) & 255u;
+    }
   }
-  return Json{{"shape", std::move(shape)}, {"encoding","f32le-base64"},
-    {"order","C"}, {"data", Json::binary(std::move(bytes))}};
+  return Json{{"shape", std::move(shape)}, {"encoding", "f32le-base64"},
+    {"order", "C"}, {"data", Json::binary(std::move(bytes))}};
 }
 // Encoding is deliberately deferred until explicit flush, outside control.
 inline void encodeBinary(Json & value)
 {
   if (value.is_binary()) {
     const auto & bytes = value.get_binary();
-    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static constexpr char alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string data; data.reserve(4 * ((bytes.size() + 2) / 3));
-    for (size_t i=0; i<bytes.size(); i+=3) {
+    for (size_t i = 0; i < bytes.size(); i += 3) {
       const uint32_t bits = (uint32_t(bytes[i]) << 16) |
-        (i+1<bytes.size() ? uint32_t(bytes[i+1]) << 8 : 0) |
-        (i+2<bytes.size() ? uint32_t(bytes[i+2]) : 0);
+        (i + 1 < bytes.size() ? uint32_t(bytes[i + 1]) << 8 : 0) |
+        (i + 2 < bytes.size() ? uint32_t(bytes[i + 2]) : 0);
       data.push_back(alphabet[(bits >> 18) & 63]); data.push_back(alphabet[(bits >> 12) & 63]);
-      data.push_back(i+1<bytes.size() ? alphabet[(bits >> 6) & 63] : '=');
-      data.push_back(i+2<bytes.size() ? alphabet[bits & 63] : '=');
+      data.push_back(i + 1 < bytes.size() ? alphabet[(bits >> 6) & 63] : '=');
+      data.push_back(i + 2 < bytes.size() ? alphabet[bits & 63] : '=');
     }
     value = std::move(data);
   } else if (value.is_structured()) {
-    for (auto & item : value) {encodeBinary(item);}
+    for (auto & item : value) {
+      encodeBinary(item);
+    }
   }
 }
 
@@ -73,7 +82,9 @@ template<typename Sequence> Json sequence(const Sequence & s)
 template<typename History> Json history(const History & h)
 {
   Json j = Json::array();
-  for (const auto & c : h) {j.push_back({c.vx, c.vy, c.wz});}
+  for (const auto & c : h) {
+    j.push_back({c.vx, c.vy, c.wz});
+  }
   return j;
 }
 template<typename Pose> Json pose(const Pose & p)
@@ -85,7 +96,9 @@ template<typename Path> Json rosPath(const Path & p)
 {
   Json points = Json::array();
   if (p.poses.size() > 8192) {throw std::runtime_error("path capture bound");}
-  for (const auto & x : p.poses) {points.push_back(pose(x.pose));}
+  for (const auto & x : p.poses) {
+    points.push_back(pose(x.pose));
+  }
   return Json{{"frame", p.header.frame_id}, {"poses", points}};
 }
 template<typename Path> Json path(const Path & p)
@@ -121,7 +134,9 @@ inline size_t serializedUpperBound(const Json & value)
     const auto & items = value.get_ref<const Json::array_t &>();
     if (std::all_of(items.begin(), items.end(), [](const Json & j) {return j.is_number();}))
     {return 2 + 33 * items.size();}
-    for (const auto & item : items) {bound += 1 + serializedUpperBound(item);}
+    for (const auto & item : items) {
+      bound += 1 + serializedUpperBound(item);
+    }
   } else {
     for (auto i = value.begin(); i != value.end(); ++i) {
       bound += 2 + escapedStringUpperBound(i.key()) + serializedUpperBound(i.value());
@@ -142,14 +157,16 @@ public:
   bool open() const {return current_.has_value();}
   bool frozen() const {return frozen_;}
   Json currentIdentity() const
-  {return Json{{"clock_epoch",epoch_},{"invocation_id",next_id_}};}
+  {return Json{{"clock_epoch", epoch_}, {"invocation_id", next_id_}};}
   void setMode(const std::string & value)
-  {mode=value;if(current_) {(*current_)["mode"]=value;}}
+  {mode = value;if(current_) {(*current_)["mode"] = value;}}
 
   void begin(int64_t stamp_ns) noexcept
   {
     try {
-      if (last_stamp_ && stamp_ns < *last_stamp_) {++epoch_; ++clock_resets_; low_=0; reversals_=0; previous_sign_=0;}
+      if (last_stamp_ && stamp_ns < *last_stamp_) {
+        ++epoch_; ++clock_resets_; low_ = 0; reversals_ = 0; previous_sign_ = 0;
+      }
       last_stamp_ = stamp_ns;
       retry = iteration = bank = 0;
       current_ = Json{{"invocation_id", ++next_id_}, {"clock_epoch", epoch_},
@@ -163,8 +180,8 @@ public:
     try {
       if ((*current_)["events"].size() >= 10000) {throw std::runtime_error("event bound");}
       (*current_)["events"].push_back(Json{{"sequence", ++event_id_},
-        {"kind", kind}, {"retry_id", retry}, {"iteration_id", iteration},
-        {"bank_id", bank}, {"host_ns", monotonicNs()}, {"payload", build()}});
+          {"kind", kind}, {"retry_id", retry}, {"iteration_id", iteration},
+          {"bank_id", bank}, {"host_ns", monotonicNs()}, {"payload", build()}});
     } catch (...) {++errors_; (*current_)["complete"] = false;}
   }
   void end() noexcept
@@ -190,13 +207,14 @@ public:
         std::abs(*independent_progress) < config_.progress_floor)
       {trigger("delivered_command_without_progress");}
       if (frame.contains("exception")) {trigger("abort");}
-      frame["trigger_inputs"] = Json{{"eligible",eligible},{"has_command",has_command},
-        {"command_vx",vx},{"low_cycles",low_},{"reversal_count",reversals_},
-        {"independent_progress",independent_progress ? Json(*independent_progress) : Json(nullptr)},
-        {"delivered_speed",delivered_speed ? Json(*delivered_speed) : Json(nullptr)},
-        {"collapse_speed",config_.collapse_speed},{"collapse_cycles",config_.collapse_cycles},
-        {"progress_floor",config_.progress_floor},{"moving_command",config_.moving_command},
-        {"reversal_threshold",config_.reversal_count}};
+      frame["trigger_inputs"] = Json{{"eligible", eligible}, {"has_command", has_command},
+        {"command_vx", vx}, {"low_cycles", low_}, {"reversal_count", reversals_},
+        {"independent_progress",
+          independent_progress ? Json(*independent_progress) : Json(nullptr)},
+        {"delivered_speed", delivered_speed ? Json(*delivered_speed) : Json(nullptr)},
+        {"collapse_speed", config_.collapse_speed}, {"collapse_cycles", config_.collapse_cycles},
+        {"progress_floor", config_.progress_floor}, {"moving_command", config_.moving_command},
+        {"reversal_threshold", config_.reversal_count}};
       const auto bytes = serializedUpperBound(frame);
       if (bytes > config_.maximum_bytes) {++overflow_; return;}
       if (!triggered_) {
@@ -230,9 +248,10 @@ public:
     return Json{{"schema", "jetacker-decision-trace/1.1.0"}, {"manifest", manifest_},
       {"termination", reason_}, {"triggered", triggered_}, {"frozen", frozen_},
       {"health", {{"errors", errors_}, {"overflow", overflow_}, {"pre_evictions", evictions_},
-        {"after_window", after_window_}, {"clock_resets", clock_resets_},
-        {"retained_serialized_bytes", actual_bytes}, {"retained_charge_upper_bound_bytes", bytes_},
-        {"maximum_bytes", config_.maximum_bytes}}},
+          {"after_window", after_window_}, {"clock_resets", clock_resets_},
+          {"retained_serialized_bytes", actual_bytes},
+          {"retained_charge_upper_bound_bytes", bytes_},
+          {"maximum_bytes", config_.maximum_bytes}}},
       {"invocations", std::move(exported)}};
   }
   void writeExclusive(const std::string & filename) const
@@ -259,13 +278,15 @@ public:
         {"after_window", after_window_}, {"clock_resets", clock_resets_},
         {"retained_serialized_bytes", actual_bytes}, {"retained_charge_upper_bound_bytes", bytes_},
         {"maximum_bytes", config_.maximum_bytes}};
-      write("{\"frozen\":" + Json(frozen_).dump() + ",\"health\":" + health.dump() + ",\"invocations\":[");
+      write("{\"frozen\":" + Json(frozen_).dump() + ",\"health\":" + health.dump() +
+          ",\"invocations\":[");
       bool first = true;
       for (const auto & frame : frames_) {
         if (!first) {write(",");} first = false;
         Json copy = frame; encodeBinary(copy); write(copy.dump());
       }
-      write("],\"manifest\":" + manifest_.dump() + ",\"schema\":\"jetacker-decision-trace/1.1.0\",\"termination\":" +
+      write("],\"manifest\":" + manifest_.dump() +
+          ",\"schema\":\"jetacker-decision-trace/1.1.0\",\"termination\":" +
         Json(reason_).dump() + ",\"triggered\":" + Json(triggered_).dump() + "}\n");
     } catch (...) {
       ::close(fd); throw;
@@ -275,6 +296,7 @@ public:
   size_t retry{0}, iteration{0}, bank{0};
   std::string mode{"active"};
   std::optional<double> independent_progress, delivered_speed;
+
 private:
   void evict() {bytes_ -= sizes_.front(); sizes_.pop_front(); frames_.pop_front(); ++evictions_;}
   Json manifest_; Config config_; std::optional<Json> current_;
@@ -290,7 +312,8 @@ inline thread_local Recorder * active = nullptr;
 struct Session
 {
   Recorder * previous;
-  explicit Session(Recorder & recorder) : previous(active) {active = &recorder;}
+  explicit Session(Recorder & recorder)
+  : previous(active) {active = &recorder;}
   ~Session() {active = previous;}
   Session(const Session &) = delete;
   Session & operator=(const Session &) = delete;
@@ -298,12 +321,20 @@ struct Session
 struct Invocation
 {
   Recorder * r{active}; bool owns{false}; int exceptions;
-  explicit Invocation(int64_t stamp_ns) : exceptions(std::uncaught_exceptions())
+  explicit Invocation(int64_t stamp_ns)
+  : exceptions(std::uncaught_exceptions())
   {if (r && !r->open()) {owns = true; r->begin(stamp_ns);}}
   ~Invocation()
-  {if (r && owns) {if (std::uncaught_exceptions() > exceptions) {r->exception("native_exception");} r->end();}}
+  {
+    if (r && owns) {
+      if (std::uncaught_exceptions() > exceptions) {
+        r->exception("native_exception");
+      }
+      r->end();
+    }
+  }
 };
 template<typename Builder> void observe(const char * kind, Builder build) noexcept
 {if (active) {active->event(kind, build);}}
 }  // namespace mppi::recorder
-#endif
+#endif  // NAV2_MPPI_CONTROLLER__TOOLS__DECISION_RECORDER_HPP_

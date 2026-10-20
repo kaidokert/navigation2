@@ -1,4 +1,10 @@
+#include <stdint.h>
+#include <chrono>
+#include "nav2_mppi_controller/controller.hpp"
 #include "nav2_mppi_controller/tools/decision_recorder.hpp"
+#include "nav2_mppi_controller/tools/utils.hpp"
+#include "pluginlib/class_list_macros.hpp"
+
 // Copyright (c) 2022 Samsung Research America, @artofnothingness Alexey Budyakov
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,10 +19,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <stdint.h>
-#include <chrono>
-#include "nav2_mppi_controller/controller.hpp"
-#include "nav2_mppi_controller/tools/utils.hpp"
 
 // #define BENCHMARK_TESTING
 
@@ -223,8 +225,8 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*(costmap->getMutex()));
   nav_msgs::msg::Path transformed_plan = path_handler_.transformPath(robot_pose,
-    [&](const auto & pose, const auto & outgoing, double xy, double yaw, bool terminal_endpoint) {
-      return optimizer_.longCuspDepartureAvailable(
+      [&](const auto & pose, const auto & outgoing, double xy, double yaw, bool terminal_endpoint) {
+        return optimizer_.longCuspDepartureAvailable(
         pose, robot_speed, outgoing, xy, yaw, terminal_endpoint);
     });
 
@@ -277,8 +279,11 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
             if (steering_feedback_) {
               const auto & names = steering_feedback_->name;
               const auto found = std::find(names.begin(), names.end(), "front_steering_joint");
-              if (found != names.end() && static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size()) {
-                current_steer = static_cast<float>(steering_feedback_->position[found - names.begin()]);
+              if (found != names.end() &&
+                static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size())
+              {
+                current_steer = static_cast<float>(steering_feedback_->position[found -
+                  names.begin()]);
               }
             }
           }
@@ -287,7 +292,8 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
             presteer_start_time_ = node->now();
             presteer_target_angle_ = static_cast<float>(target_steer);
             RCLCPP_INFO(logger_,
-              "[PRESTEER] Initiated: current=%.2f deg, target=%.2f deg, gear=%d, lookahead=%.3fm",
+              "[PRESTEER] Initiated: current=%.2f deg, target=%.2f deg, gea"
+      "r=%d, lookahead=%.3fm",
               current_steer * 180.0f / M_PI, target_steer * 180.0f / M_PI, presteer_gear_,
               std::sqrt(dist_sq));
           }
@@ -302,18 +308,21 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
         if (steering_feedback_) {
           const auto & names = steering_feedback_->name;
           const auto found = std::find(names.begin(), names.end(), "front_steering_joint");
-          if (found != names.end() && static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size()) {
+          if (found != names.end() &&
+            static_cast<size_t>(found - names.begin()) < steering_feedback_->position.size())
+          {
             current_steer = static_cast<float>(steering_feedback_->position[found - names.begin()]);
           }
         }
       }
       double elapsed = (node->now() - presteer_start_time_).seconds();
       if (elapsed < 0.0 ||
-          std::abs(current_steer - presteer_target_angle_) <= presteer_angle_tolerance_ ||
-          elapsed >= presteer_timeout_)
+        std::abs(current_steer - presteer_target_angle_) <= presteer_angle_tolerance_ ||
+        elapsed >= presteer_timeout_)
       {
         RCLCPP_INFO(logger_,
-          "[PRESTEER] Finished in %.3fs: current=%.2f deg, target=%.2f deg (timeout=%.1fs)",
+          "[PRESTEER] Finished in %.3fs: current=%.2f deg, target=%.2f "
+      "deg (timeout=%.1fs)",
           elapsed, current_steer * 180.0f / M_PI, presteer_target_angle_ * 180.0f / M_PI,
           presteer_timeout_);
         presteering_ = false;
@@ -331,8 +340,11 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
         if (visualize_) {
           visualize(std::move(transformed_plan), cmd.header.stamp);
         }
-        mppi::recorder::observe("controller_return", [&] {return mppi::recorder::Json{
-          {"mode","presteer"},{"vx",cmd.twist.linear.x},{"vy",cmd.twist.linear.y},{"wz",cmd.twist.angular.z}};});
+        mppi::recorder::observe("controller_return", [&] {
+            return mppi::recorder::Json{
+            {"mode", "presteer"}, {"vx", cmd.twist.linear.x}, {"vy", cmd.twist.linear.y},
+            {"wz", cmd.twist.angular.z}};
+  });
         return cmd;
       }
     }
@@ -353,7 +365,8 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
         robot_pose, robot_speed, cmd.twist, approach->cusp, approach->stop_margin))
     {
       throw nav2_core::FailedToMakeProgress(
-              "Rejected departure approach command exceeds bounded incoming envelope");
+              "Rejected departure approach command exceeds bounded incoming"
+      " envelope");
     }
   }
 
@@ -367,8 +380,11 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
     visualize(std::move(transformed_plan), cmd.header.stamp);
   }
 
-  mppi::recorder::observe("controller_return", [&] {return mppi::recorder::Json{
-    {"mode","optimizer"},{"vx",cmd.twist.linear.x},{"vy",cmd.twist.linear.y},{"wz",cmd.twist.angular.z}};});
+  mppi::recorder::observe("controller_return", [&] {
+      return mppi::recorder::Json{
+      {"mode", "optimizer"}, {"vx", cmd.twist.linear.x}, {"vy", cmd.twist.linear.y},
+      {"wz", cmd.twist.angular.z}};
+  });
   return cmd;
 }
 
@@ -392,8 +408,6 @@ void MPPIController::setSpeedLimit(const double & speed_limit, const bool & perc
 {
   optimizer_.setSpeedLimit(speed_limit, percentage);
 }
-
 }  // namespace nav2_mppi_controller
 
-#include "pluginlib/class_list_macros.hpp"
 PLUGINLIB_EXPORT_CLASS(nav2_mppi_controller::MPPIController, nav2_core::Controller)

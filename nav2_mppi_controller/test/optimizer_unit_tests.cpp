@@ -13,36 +13,36 @@
 // limitations under the License.
 
 #include <chrono>
-#include <cstring>
 #include <cstdint>
-#include <thread>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
-#include <nlohmann/json.hpp>
 #include <set>
-#include "settled_costmap.hpp"
-
-#include "gtest/gtest.h"
-#include "rclcpp/rclcpp.hpp"
-#include "nav2_mppi_controller/optimizer.hpp"
-#include "opposite_feedback_gear_fixture.hpp"
-#include "cusp_mean_feasibility_fixture.hpp"
-#include "mixed_gear_mean_fixture.hpp"
-#include "warm_start_delay_fixture.hpp"
-#include "hidden_future_gear_fixture.hpp"
-#include "long_prefix_gear_fixture.hpp"
-#include "long_entry_fixture.hpp"
-#include "handoff_prefix_fixture.hpp"
-#include "retained_departure_fixture.hpp"
+#include <thread>
 #include "blocked_forward_entry_fixture.hpp"
-#include "handoff_horizon_fixture.hpp"
+#include "cusp_mean_feasibility_fixture.hpp"
+#include "effective_gate_fixture.hpp"
 #include "entry_shift_fixture.hpp"
 #include "entry_steering_fixture.hpp"
-#include "sampled_failure_warm_fixture.hpp"
-#include "effective_gate_fixture.hpp"
 #include "exit_completion_fixture.hpp"
+#include "gtest/gtest.h"
+#include "handoff_horizon_fixture.hpp"
+#include "handoff_prefix_fixture.hpp"
+#include "hidden_future_gear_fixture.hpp"
+#include "long_entry_fixture.hpp"
+#include "long_prefix_gear_fixture.hpp"
+#include "mixed_gear_mean_fixture.hpp"
+#include "nav2_mppi_controller/optimizer.hpp"
 #include "nav2_mppi_controller/tools/diagnostic_capture.hpp"
+#include <nlohmann/json.hpp>
+#include "opposite_feedback_gear_fixture.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "retained_departure_fixture.hpp"
+#include "sampled_failure_warm_fixture.hpp"
+#include "settled_costmap.hpp"
+#include "warm_start_delay_fixture.hpp"
+
 
 TEST(OptimizerDiagnostics, TargetedFailedBatchCaptureSurvivesEarlierFailure)
 {
@@ -126,48 +126,51 @@ public:
   void testRecordedBlockedForwardEntry()
   {
     namespace f = blocked_forward_entry_fixture;
-    ASSERT_EQ(f::robot.size(),3u);ASSERT_EQ(f::speed.size(),2u);
-    ASSERT_EQ(f::steering.size(),2u);
-    ASSERT_EQ(f::cvx.size(),41u);ASSERT_EQ(f::cwz.size(),41u);
-    ASSERT_EQ(f::tx.size(),41u);ASSERT_EQ(f::ty.size(),41u);ASSERT_EQ(f::yaw.size(),41u);
-    ASSERT_EQ(settings_.time_steps,41u);ASSERT_FLOAT_EQ(settings_.model_dt,0.05f);
-    const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-    ASSERT_TRUE(model);ASSERT_FLOAT_EQ(model->getMinTurningRadius(),0.401f);
+    ASSERT_EQ(f::robot.size(), 3u);ASSERT_EQ(f::speed.size(), 2u);
+    ASSERT_EQ(f::steering.size(), 2u);
+    ASSERT_EQ(f::cvx.size(), 41u);ASSERT_EQ(f::cwz.size(), 41u);
+    ASSERT_EQ(f::tx.size(), 41u);ASSERT_EQ(f::ty.size(), 41u);ASSERT_EQ(f::yaw.size(), 41u);
+    ASSERT_EQ(settings_.time_steps, 41u);ASSERT_FLOAT_EQ(settings_.model_dt, 0.05f);
+    const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    ASSERT_TRUE(model);ASSERT_FLOAT_EQ(model->getMinTurningRadius(), 0.401f);
     ASSERT_TRUE(model->predictsSteeringConditioning());
     state_.pose.header.frame_id = "odom";
-    state_.pose.pose.position.x=f::robot[0];state_.pose.pose.position.y=f::robot[1];
-    state_.pose.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::robot[2]));
-    state_.speed.linear.x=f::speed[0];state_.speed.angular.z=f::speed[1];
+    state_.pose.pose.position.x = f::robot[0];state_.pose.pose.position.y = f::robot[1];
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::robot[2]));
+    state_.speed.linear.x = f::speed[0];state_.speed.angular.z = f::speed[1];
     setInitialSteering(f::steering[0]);setInitialConditionedSteering(f::steering[1]);
     control_sequence_.vx.fill(0);control_sequence_.wz.fill(0);
-    const auto hold=control_sequence_;
+    const auto hold = control_sequence_;
     ASSERT_TRUE(controlSequenceCollisionFree());  // Hold on the unchanged real raster.
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,hold.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,hold.wz)));
-    std::copy(f::cvx.begin(),f::cvx.end(),control_sequence_.vx.begin());
-    std::copy(f::cwz.begin(),f::cwz.end(),control_sequence_.wz.begin());
-    models::State predicted;predicted.reset(1,41);predicted.pose=state_.pose;predicted.speed=state_.speed;
-    for(size_t j=0;j<41;++j) {predicted.cvx(0,j)=f::cvx[j];predicted.cwz(0,j)=f::cwz[j];}
-    updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1,41);
-    integrateStateVelocities(trajectory,predicted);
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, hold.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, hold.wz)));
+    std::copy(f::cvx.begin(), f::cvx.end(), control_sequence_.vx.begin());
+    std::copy(f::cwz.begin(), f::cwz.end(), control_sequence_.wz.begin());
+    models::State predicted;predicted.reset(1, 41);predicted.pose = state_.pose;
+    predicted.speed = state_.speed;
+    for(size_t j = 0; j < 41; ++j) {
+      predicted.cvx(0, j) = f::cvx[j];predicted.cwz(0, j) = f::cwz[j];
+    }
+    updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1, 41);
+    integrateStateVelocities(trajectory, predicted);
     nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-    bool footprint_hit=false;
-    for(size_t j=0;j<41;++j) {
-      EXPECT_NEAR(trajectory.x(0,j),f::tx[j],1e-6);
-      EXPECT_NEAR(trajectory.y(0,j),f::ty[j],1e-6);
-      EXPECT_NEAR(trajectory.yaws(0,j),f::yaw[j],1e-6);
-      unsigned int mx,my;
-      ASSERT_TRUE(costmap_->worldToMap(trajectory.x(0,j),trajectory.y(0,j),mx,my));
-      EXPECT_LT(costmap_->getCost(mx,my),nav2_costmap_2d::LETHAL_OBSTACLE);
-      const double cost=checker.footprintCostAtPose(trajectory.x(0,j),trajectory.y(0,j),
-        trajectory.yaws(0,j),costmap_ros_->getRobotFootprint());
-      EXPECT_GE(cost,0);
-      if(cost>=nav2_costmap_2d::LETHAL_OBSTACLE) {footprint_hit=true;}
+    bool footprint_hit = false;
+    for(size_t j = 0; j < 41; ++j) {
+      EXPECT_NEAR(trajectory.x(0, j), f::tx[j], 1e-6);
+      EXPECT_NEAR(trajectory.y(0, j), f::ty[j], 1e-6);
+      EXPECT_NEAR(trajectory.yaws(0, j), f::yaw[j], 1e-6);
+      unsigned int mx, my;
+      ASSERT_TRUE(costmap_->worldToMap(trajectory.x(0, j), trajectory.y(0, j), mx, my));
+      EXPECT_LT(costmap_->getCost(mx, my), nav2_costmap_2d::LETHAL_OBSTACLE);
+      const double cost = checker.footprintCostAtPose(trajectory.x(0, j), trajectory.y(0, j),
+        trajectory.yaws(0, j), costmap_ros_->getRobotFootprint());
+      EXPECT_GE(cost, 0);
+      if(cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {footprint_hit = true;}
     }
     ASSERT_TRUE(footprint_hit);  // A center-only collision check misses this actual corner.
-    const auto before=control_sequence_;
+    const auto before = control_sequence_;
     EXPECT_FALSE(controlSequenceCollisionFree());
-    EXPECT_EQ(control_sequence_.vx,before.vx);EXPECT_EQ(control_sequence_.wz,before.wz);
+    EXPECT_EQ(control_sequence_.vx, before.vx);EXPECT_EQ(control_sequence_.wz, before.wz);
   }
 
 
@@ -175,455 +178,488 @@ public:
   {
     namespace f = handoff_horizon_fixture;
     // This is the captured POST-handoff mean state, not the preceding guard call.
-    ASSERT_EQ(f::robot.size(),3u);ASSERT_EQ(f::speed.size(),2u);
-    ASSERT_EQ(f::steering.size(),2u);ASSERT_EQ(f::goal.size(),3u);ASSERT_EQ(f::gates.size(),2u);
-    ASSERT_EQ(f::history_vx.size(),4u);ASSERT_EQ(f::history_wz.size(),4u);
-    ASSERT_EQ(f::path_x.size(),34u);ASSERT_EQ(f::path_y.size(),34u);ASSERT_EQ(f::path_yaw.size(),34u);
-    ASSERT_EQ(f::control_vx.size(),41u);ASSERT_EQ(f::control_wz.size(),41u);
-    ASSERT_DOUBLE_EQ(f::gates[0],0.023990586400032043);
-    ASSERT_DOUBLE_EQ(f::gates[1],0.10000000149011612);
-    ASSERT_EQ(settings_.time_steps,41u);ASSERT_FLOAT_EQ(settings_.model_dt,0.05f);
-    ASSERT_EQ(settings_.batch_size,1000u);
-    ASSERT_FLOAT_EQ(settings_.constraints.vx_max,0.5f);
-    ASSERT_FLOAT_EQ(settings_.constraints.vx_min,-0.3f);
-    ASSERT_FLOAT_EQ(settings_.constraints.wz,1.9f);
-    ASSERT_FLOAT_EQ(settings_.constraints.ax_max,5.0f);
-    ASSERT_FLOAT_EQ(settings_.constraints.ax_min,-5.0f);
-    ASSERT_FLOAT_EQ(settings_.constraints.az_max,3.5f);
-    const auto model=std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
-    ASSERT_TRUE(model);ASSERT_FLOAT_EQ(model->getMinTurningRadius(),0.401f);
-    ASSERT_TRUE(model->predictsSteeringConditioning());ASSERT_TRUE(model->requiresConditionedSteering());
-    state_.pose.header.frame_id="odom";
-    state_.pose.pose.position.x=f::robot[0];state_.pose.pose.position.y=f::robot[1];
-    state_.pose.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::robot[2]));
-    state_.speed.linear.x=f::speed[0];state_.speed.angular.z=f::speed[1];
+    ASSERT_EQ(f::robot.size(), 3u);ASSERT_EQ(f::speed.size(), 2u);
+    ASSERT_EQ(f::steering.size(), 2u);ASSERT_EQ(f::goal.size(), 3u);ASSERT_EQ(f::gates.size(), 2u);
+    ASSERT_EQ(f::history_vx.size(), 4u);ASSERT_EQ(f::history_wz.size(), 4u);
+    ASSERT_EQ(f::path_x.size(), 34u);ASSERT_EQ(f::path_y.size(), 34u);
+    ASSERT_EQ(f::path_yaw.size(), 34u);
+    ASSERT_EQ(f::control_vx.size(), 41u);ASSERT_EQ(f::control_wz.size(), 41u);
+    ASSERT_DOUBLE_EQ(f::gates[0], 0.023990586400032043);
+    ASSERT_DOUBLE_EQ(f::gates[1], 0.10000000149011612);
+    ASSERT_EQ(settings_.time_steps, 41u);ASSERT_FLOAT_EQ(settings_.model_dt, 0.05f);
+    ASSERT_EQ(settings_.batch_size, 1000u);
+    ASSERT_FLOAT_EQ(settings_.constraints.vx_max, 0.5f);
+    ASSERT_FLOAT_EQ(settings_.constraints.vx_min, -0.3f);
+    ASSERT_FLOAT_EQ(settings_.constraints.wz, 1.9f);
+    ASSERT_FLOAT_EQ(settings_.constraints.ax_max, 5.0f);
+    ASSERT_FLOAT_EQ(settings_.constraints.ax_min, -5.0f);
+    ASSERT_FLOAT_EQ(settings_.constraints.az_max, 3.5f);
+    const auto model = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+    ASSERT_TRUE(model);ASSERT_FLOAT_EQ(model->getMinTurningRadius(), 0.401f);
+    ASSERT_TRUE(model->predictsSteeringConditioning());
+    ASSERT_TRUE(model->requiresConditionedSteering());
+    state_.pose.header.frame_id = "odom";
+    state_.pose.pose.position.x = f::robot[0];state_.pose.pose.position.y = f::robot[1];
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::robot[2]));
+    state_.speed.linear.x = f::speed[0];state_.speed.angular.z = f::speed[1];
     setInitialSteering(f::steering[0]);setInitialConditionedSteering(f::steering[1]);
-    goal_.position.x=f::goal[0];goal_.position.y=f::goal[1];
-    goal_.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::goal[2]));
+    goal_.position.x = f::goal[0];goal_.position.y = f::goal[1];
+    goal_.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::goal[2]));
     path_.reset(f::path_x.size());
-    std::copy(f::path_x.begin(),f::path_x.end(),path_.x.begin());
-    std::copy(f::path_y.begin(),f::path_y.end(),path_.y.begin());
-    std::copy(f::path_yaw.begin(),f::path_yaw.end(),path_.yaws.begin());
+    std::copy(f::path_x.begin(), f::path_x.end(), path_.x.begin());
+    std::copy(f::path_y.begin(), f::path_y.end(), path_.y.begin());
+    std::copy(f::path_yaw.begin(), f::path_yaw.end(), path_.yaws.begin());
     setRealPathPointCount(34);setActiveCuspDirection(1);setPathDirection(1);
-    setCuspTolerances(std::make_pair(f::gates[0],f::gates[1]));
-    for(size_t k=0;k<control_history_.size();++k) {
-      control_history_[k].vx=f::history_vx[k];control_history_[k].wz=f::history_wz[k];
-      control_history_[k].vy=0;
+    setCuspTolerances(std::make_pair(f::gates[0], f::gates[1]));
+    for(size_t k = 0; k < control_history_.size(); ++k) {
+      control_history_[k].vx = f::history_vx[k];control_history_[k].wz = f::history_wz[k];
+      control_history_[k].vy = 0;
     }
-    nav_msgs::msg::Path outgoing;outgoing.header.frame_id="odom";
-    for(size_t k=0;k<9;++k) {
-      geometry_msgs::msg::PoseStamped target;target.header.frame_id="odom";
-      target.pose.position.x=f::path_x[k];target.pose.position.y=f::path_y[k];
-      target.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::path_yaw[k]));
+    nav_msgs::msg::Path outgoing;outgoing.header.frame_id = "odom";
+    for(size_t k = 0; k < 9; ++k) {
+      geometry_msgs::msg::PoseStamped target;target.header.frame_id = "odom";
+      target.pose.position.x = f::path_x[k];target.pose.position.y = f::path_y[k];
+      target.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::path_yaw[k]));
       outgoing.poses.push_back(target);
     }
-    const auto original_path=path_;
-    std::copy(f::control_vx.begin(),f::control_vx.end(),control_sequence_.vx.begin());
-    std::copy(f::control_wz.begin(),f::control_wz.end(),control_sequence_.wz.begin());
-    const auto untouched=control_sequence_;
-    ASSERT_TRUE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,
-      f::gates[0],f::gates[1],false));
-    EXPECT_EQ(control_sequence_.vx,untouched.vx);EXPECT_EQ(control_sequence_.wz,untouched.wz);
+    const auto original_path = path_;
+    std::copy(f::control_vx.begin(), f::control_vx.end(), control_sequence_.vx.begin());
+    std::copy(f::control_wz.begin(), f::control_wz.end(), control_sequence_.wz.begin());
+    const auto untouched = control_sequence_;
+    ASSERT_TRUE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing,
+      f::gates[0], f::gates[1], false));
+    EXPECT_EQ(control_sequence_.vx, untouched.vx);EXPECT_EQ(control_sequence_.wz, untouched.wz);
     if (delivery) {
-      ASSERT_FALSE(initializeShortCuspMean()); // Exact41 failure authorizes81 fallback.
+      ASSERT_FALSE(initializeShortCuspMean());  // Exact41 failure authorizes81 fallback.
       EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
-      const auto robot=state_.pose;const auto speed=state_.speed;const auto goal=goal_;
-      nav_msgs::msg::Path plan;plan.header.frame_id="odom";
-      for(size_t k=0;k<f::path_x.size();++k) {
-        geometry_msgs::msg::PoseStamped point;point.header=plan.header;
-        point.pose.position.x=f::path_x[k];point.pose.position.y=f::path_y[k];
-        point.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::path_yaw[k]));
+      const auto robot = state_.pose;const auto speed = state_.speed;const auto goal = goal_;
+      nav_msgs::msg::Path plan;plan.header.frame_id = "odom";
+      for(size_t k = 0; k < f::path_x.size(); ++k) {
+        geometry_msgs::msg::PoseStamped point;point.header = plan.header;
+        point.pose.position.x = f::path_x[k];point.pose.position.y = f::path_y[k];
+        point.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::path_yaw[k]));
         plan.poses.push_back(point);
       }
       reset();setRealPathPointCount(34);setActiveCuspDirection(1);setPathDirection(1);
-      setCuspTolerances(std::make_pair(f::gates[0],f::gates[1]));
-      requestShortCuspSeed();prepare(robot,speed,plan,goal,nullptr);
-      ASSERT_GT(control_sequence_.vx(1),0.0f);
-      ASSERT_TRUE(long_entry_);EXPECT_EQ(control_sequence_.vx.size(),41u);
-      ASSERT_EQ(long_entry_->controls.vx.size(),81u);
-      const auto target=long_entry_->target;
+      setCuspTolerances(std::make_pair(f::gates[0], f::gates[1]));
+      requestShortCuspSeed();prepare(robot, speed, plan, goal, nullptr);
+      ASSERT_GT(control_sequence_.vx(1), 0.0f);
+      ASSERT_TRUE(long_entry_);EXPECT_EQ(control_sequence_.vx.size(), 41u);
+      ASSERT_EQ(long_entry_->controls.vx.size(), 81u);
+      const auto target = long_entry_->target;
       // Modeled execution, not a claim of measured robot parity. Each command
       // is extracted at index1, then advanced with the concrete fixture's native
       // model and equivalent separate conditioner/servo feedback update.
-      size_t ticks=0;bool cruised=false;
-      for(;ticks<81;++ticks) {
-        if(ticks) {prepare(state_.pose,state_.speed,plan,goal,nullptr);}
+      size_t ticks = 0;bool cruised = false;
+      for(; ticks < 81; ++ticks) {
+        if(ticks) {prepare(state_.pose, state_.speed, plan, goal, nullptr);}
         if(!long_entry_required_) {break;}
         ASSERT_TRUE(long_entry_);
-        EXPECT_EQ(long_entry_->shifts,ticks);
-        ASSERT_FALSE(fallback(true,nullptr)); // No reset, family regeneration or delay restart.
-        ASSERT_TRUE(long_entry_);EXPECT_EQ(long_entry_->shifts,ticks);
+        EXPECT_EQ(long_entry_->shifts, ticks);
+        ASSERT_FALSE(fallback(true, nullptr));  // No reset, family regeneration or delay restart.
+        ASSERT_TRUE(long_entry_);EXPECT_EQ(long_entry_->shifts, ticks);
         control_sequence_.vx.fill(0);control_sequence_.wz.fill(0);
-        const auto bad_filter=control_sequence_;
-        const auto command=getControlFromSequenceAsTwist(state_.pose.header.stamp,nullptr,&bad_filter);
+        const auto bad_filter = control_sequence_;
+        const auto command = getControlFromSequenceAsTwist(state_.pose.header.stamp, nullptr,
+          &bad_filter);
         ASSERT_TRUE(long_entry_);
-        EXPECT_FLOAT_EQ(command.twist.linear.x,long_entry_->controls.vx(1));
-        EXPECT_FLOAT_EQ(command.twist.angular.z,long_entry_->controls.wz(1));
-        size_t emitted_hit=0;auto emitted_tail=long_entry_->controls;
-        EXPECT_TRUE(validateLongEntrySequence(emitted_tail,emitted_hit));
-        if(command.twist.linear.x>=0.019f) {cruised=true;}
-        models::State next;next.reset(1,2);next.pose=state_.pose;next.speed=state_.speed;
-        next.cvx(0,0)=command.twist.linear.x;next.cwz(0,0)=command.twist.angular.z;
+        EXPECT_FLOAT_EQ(command.twist.linear.x, long_entry_->controls.vx(1));
+        EXPECT_FLOAT_EQ(command.twist.angular.z, long_entry_->controls.wz(1));
+        size_t emitted_hit = 0;auto emitted_tail = long_entry_->controls;
+        EXPECT_TRUE(validateLongEntrySequence(emitted_tail, emitted_hit));
+        if(command.twist.linear.x >= 0.019f) {cruised = true;}
+        models::State next;next.reset(1, 2);next.pose = state_.pose;next.speed = state_.speed;
+        next.cvx(0, 0) = command.twist.linear.x;next.cwz(0, 0) = command.twist.angular.z;
         updateStateVelocities(next);
-        const float old_conditioned=*model->initialConditionedSteering();
-        const float old_physical=*model->initialSteering();
-        const float speed_abs=std::abs(static_cast<float>(state_.speed.linear.x));
-        const float limit=std::min(0.576f,std::atan(0.213f/0.401f));
-        const float raw=std::clamp(std::atan(0.213f*next.cwz(0,0)/next.cvx(0,0)),-limit,limit);
-        const float alpha=std::min(1.0f,speed_abs/0.05f);
-        const float blend=1.0f-std::pow(1.0f-alpha,settings_.model_dt/0.1f);
-        const float desired=std::clamp(blend*raw+(1.0f-blend)*old_conditioned,-0.576f,0.576f);
-        const float rate=std::min(6.0f,0.5f+10.0f*speed_abs);
-        const float conditioned=old_conditioned+std::clamp(desired-old_conditioned,
-          -rate*settings_.model_dt,rate*settings_.model_dt);
-        const float physical=old_physical+std::clamp(conditioned-old_physical,
-          -settings_.model_dt,settings_.model_dt);
-        const float native_wz=next.vx(0,1)*std::tan(physical)/0.213f;
-        const float response=native_wz*std::abs(next.vx(0,1))/
-          std::max(std::abs(next.vx(0,1))+0.093f*std::abs(native_wz),1e-9f);
-        EXPECT_NEAR(next.wz(0,1),response,1e-6);
-        const double yaw=tf2::getYaw(state_.pose.pose.orientation);
-        state_.pose.pose.position.x+=state_.speed.linear.x*std::cos(yaw)*settings_.model_dt;
-        state_.pose.pose.position.y+=state_.speed.linear.x*std::sin(yaw)*settings_.model_dt;
-        state_.pose.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),
-          yaw+state_.speed.angular.z*settings_.model_dt));
-        state_.pose.header.stamp=rclcpp::Time(rclcpp::Time(state_.pose.header.stamp).nanoseconds()+
-          static_cast<int64_t>(settings_.model_dt*1e9));
-        state_.speed.linear.x=next.vx(0,1);state_.speed.angular.z=next.wz(0,1);
+        const float old_conditioned = *model->initialConditionedSteering();
+        const float old_physical = *model->initialSteering();
+        const float speed_abs = std::abs(static_cast<float>(state_.speed.linear.x));
+        const float limit = std::min(0.576f, std::atan(0.213f / 0.401f));
+        const float raw = std::clamp(std::atan(0.213f * next.cwz(0, 0) / next.cvx(0, 0)), -limit,
+          limit);
+        const float alpha = std::min(1.0f, speed_abs / 0.05f);
+        const float blend = 1.0f - std::pow(1.0f - alpha, settings_.model_dt / 0.1f);
+        const float desired = std::clamp(blend * raw + (1.0f - blend) * old_conditioned, -0.576f,
+          0.576f);
+        const float rate = std::min(6.0f, 0.5f + 10.0f * speed_abs);
+        const float conditioned = old_conditioned + std::clamp(desired - old_conditioned,
+          -rate * settings_.model_dt, rate * settings_.model_dt);
+        const float physical = old_physical + std::clamp(conditioned - old_physical,
+          -settings_.model_dt, settings_.model_dt);
+        const float native_wz = next.vx(0, 1) * std::tan(physical) / 0.213f;
+        const float response = native_wz * std::abs(next.vx(0, 1)) /
+          std::max(std::abs(next.vx(0, 1)) + 0.093f * std::abs(native_wz), 1e-9f);
+        EXPECT_NEAR(next.wz(0, 1), response, 1e-6);
+        const double yaw = tf2::getYaw(state_.pose.pose.orientation);
+        state_.pose.pose.position.x += state_.speed.linear.x * std::cos(yaw) * settings_.model_dt;
+        state_.pose.pose.position.y += state_.speed.linear.x * std::sin(yaw) * settings_.model_dt;
+        state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1),
+          yaw + state_.speed.angular.z * settings_.model_dt));
+        state_.pose.header.stamp =
+          rclcpp::Time(rclcpp::Time(state_.pose.header.stamp).nanoseconds() +
+          static_cast<int64_t>(settings_.model_dt * 1e9));
+        state_.speed.linear.x = next.vx(0, 1);state_.speed.angular.z = next.wz(0, 1);
         setInitialSteering(std::nullopt);setInitialConditionedSteering(std::nullopt);
         setInitialSteering(physical);setInitialConditionedSteering(conditioned);
         shiftControlSequence();
       }
-      ASSERT_LT(ticks,81u);EXPECT_GT(ticks,40u);EXPECT_TRUE(cruised);
+      ASSERT_LT(ticks, 81u);EXPECT_GT(ticks, 40u);EXPECT_TRUE(cruised);
       EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
-      EXPECT_LE(std::hypot(state_.pose.pose.position.x-target.position.x,
-        state_.pose.pose.position.y-target.position.y),f::gates[0]);
-      EXPECT_LE(std::abs(angles::shortest_angular_distance(tf2::getYaw(state_.pose.pose.orientation),
-        tf2::getYaw(target.orientation))),f::gates[1]);
-      const auto modeled_aligned_pose=state_.pose;
-      const auto fresh=[&]() {
+      EXPECT_LE(std::hypot(state_.pose.pose.position.x - target.position.x,
+        state_.pose.pose.position.y - target.position.y), f::gates[0]);
+      EXPECT_LE(std::abs(angles::shortest_angular_distance(tf2::getYaw(
+        state_.pose.pose.orientation),
+        tf2::getYaw(target.orientation))), f::gates[1]);
+      const auto modeled_aligned_pose = state_.pose;
+      const auto fresh = [&]() {
           reset();setInitialSteering(f::steering[0]);setInitialConditionedSteering(f::steering[1]);
           setRealPathPointCount(34);setActiveCuspDirection(1);setPathDirection(1);
-          setCuspTolerances(std::make_pair(f::gates[0],f::gates[1]));requestShortCuspSeed();
-          prepare(robot,speed,plan,goal,nullptr);
+          setCuspTolerances(std::make_pair(f::gates[0], f::gates[1]));requestShortCuspSeed();
+          prepare(robot, speed, plan, goal, nullptr);
         };
       fresh();ASSERT_TRUE(long_entry_);
-      auto shifted_plan=plan;for(auto & point:shifted_plan.poses) {point.pose.position.x+=0.001;}
-      EXPECT_THROW(prepare(robot,speed,shifted_plan,goal,nullptr),nav2_core::FailedToMakeProgress);
-      EXPECT_FALSE(long_entry_); // Same frame/generation cannot conceal changed target coordinates.
-      fresh();auto expired=robot;expired.header.stamp=rclcpp::Time(5000000000LL);
-      EXPECT_THROW(prepare(expired,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      auto shifted_plan = plan;for(auto & point : shifted_plan.poses) {
+        point.pose.position.x += 0.001;
+      }
+      EXPECT_THROW(prepare(robot, speed, shifted_plan, goal, nullptr),
+        nav2_core::FailedToMakeProgress);
+      // Same frame/generation cannot conceal changed target coordinates.
       EXPECT_FALSE(long_entry_);
-      fresh();auto later=robot;later.header.stamp=rclcpp::Time(1000000000LL);
-      ASSERT_NO_THROW(prepare(later,speed,plan,goal,nullptr));
-      auto rewound=robot;rewound.header.stamp=rclcpp::Time(500000000LL);
-      EXPECT_THROW(prepare(rewound,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto expired = robot;expired.header.stamp = rclcpp::Time(5000000000LL);
+      EXPECT_THROW(prepare(expired, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
-      const auto aligned_pose=[&]() {
-          auto value=modeled_aligned_pose;value.header.stamp=robot.header.stamp;return value;
+      fresh();auto later = robot;later.header.stamp = rclcpp::Time(1000000000LL);
+      ASSERT_NO_THROW(prepare(later, speed, plan, goal, nullptr));
+      auto rewound = robot;rewound.header.stamp = rclcpp::Time(500000000LL);
+      EXPECT_THROW(prepare(rewound, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
+      EXPECT_FALSE(long_entry_);
+      const auto aligned_pose = [&]() {
+          auto value = modeled_aligned_pose;value.header.stamp = robot.header.stamp;return value;
         };
-      fresh();auto healthy_aligned=aligned_pose();
+      fresh();auto healthy_aligned = aligned_pose();
       // Physical alignment discards the future-tail obligation. This tail must
       // never be emitted, but its invalidity cannot obstruct valid retirement.
       long_entry_->controls.vx.fill(std::numeric_limits<float>::quiet_NaN());
-      ASSERT_NO_THROW(prepare(healthy_aligned,speed,plan,goal,nullptr));
+      ASSERT_NO_THROW(prepare(healthy_aligned, speed, plan, goal, nullptr));
       EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
-      fresh();auto aligned_bad_speed=aligned_pose();
-      auto nan_aligned_speed=speed;nan_aligned_speed.linear.x=std::numeric_limits<double>::quiet_NaN();
-      EXPECT_THROW(prepare(aligned_bad_speed,nan_aligned_speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto aligned_bad_speed = aligned_pose();
+      auto nan_aligned_speed = speed;
+      nan_aligned_speed.linear.x = std::numeric_limits<double>::quiet_NaN();
+      EXPECT_THROW(prepare(aligned_bad_speed, nan_aligned_speed, plan, goal, nullptr),
+        nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);EXPECT_TRUE(long_entry_required_);
-      fresh();auto accepted_later=robot;accepted_later.header.stamp=rclcpp::Time(1000000000LL);
-      ASSERT_NO_THROW(prepare(accepted_later,speed,plan,goal,nullptr));
-      auto aligned_rewind=aligned_pose();aligned_rewind.header.stamp=rclcpp::Time(500000000LL);
-      EXPECT_THROW(prepare(aligned_rewind,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto accepted_later = robot;accepted_later.header.stamp = rclcpp::Time(1000000000LL);
+      ASSERT_NO_THROW(prepare(accepted_later, speed, plan, goal, nullptr));
+      auto aligned_rewind = aligned_pose();aligned_rewind.header.stamp = rclcpp::Time(500000000LL);
+      EXPECT_THROW(prepare(aligned_rewind, speed, plan, goal, nullptr),
+        nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);EXPECT_TRUE(long_entry_required_);
-      fresh();auto aligned_missing=aligned_pose();setInitialConditionedSteering(std::nullopt);
-      EXPECT_THROW(prepare(aligned_missing,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto aligned_missing = aligned_pose();setInitialConditionedSteering(std::nullopt);
+      EXPECT_THROW(prepare(aligned_missing, speed, plan, goal, nullptr),
+        nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);EXPECT_TRUE(long_entry_required_);
-      fresh();const auto valid_footprint=costmap_ros_->getRobotFootprint();
-      auto malformed=valid_footprint;malformed[0].x=std::numeric_limits<double>::quiet_NaN();
+      fresh();const auto valid_footprint = costmap_ros_->getRobotFootprint();
+      auto malformed = valid_footprint;malformed[0].x = std::numeric_limits<double>::quiet_NaN();
       costmap_ros_->setRobotFootprint(malformed);
-      EXPECT_THROW(prepare(robot,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      EXPECT_THROW(prepare(robot, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);costmap_ros_->setRobotFootprint(valid_footprint);
       fresh();setInitialConditionedSteering(std::nullopt);
-      EXPECT_THROW(prepare(robot,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      EXPECT_THROW(prepare(robot, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
-      fresh();auto bad_speed=speed;bad_speed.linear.x=std::numeric_limits<double>::quiet_NaN();
-      EXPECT_THROW(prepare(robot,bad_speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto bad_speed = speed;bad_speed.linear.x = std::numeric_limits<double>::quiet_NaN();
+      EXPECT_THROW(prepare(robot, bad_speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
-      fresh();auto wrong_frame=robot;wrong_frame.header.frame_id="map";
-      EXPECT_THROW(prepare(wrong_frame,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();auto wrong_frame = robot;wrong_frame.header.frame_id = "map";
+      EXPECT_THROW(prepare(wrong_frame, speed, plan, goal, nullptr),
+        nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
-      fresh();setCuspTolerances(std::make_pair(1e-5,1e-5));
-      EXPECT_THROW(prepare(robot,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      fresh();setCuspTolerances(std::make_pair(1e-5, 1e-5));
+      EXPECT_THROW(prepare(robot, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
       fresh();requestPlanEntrySeed();EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
-      fresh();setActiveCuspDirection(-1);EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
+      fresh();setActiveCuspDirection(-1);EXPECT_FALSE(long_entry_);
+      EXPECT_FALSE(long_entry_required_);
       fresh();reset();EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
       fresh();ASSERT_TRUE(long_entry_);
-      models::State tail;tail.reset(1,81);tail.pose=state_.pose;tail.speed=state_.speed;
-      for(size_t j=0;j<80;++j) {
-        tail.cvx(0,j)=long_entry_->controls.vx(j+1);tail.cwz(0,j)=long_entry_->controls.wz(j+1);
+      models::State tail;tail.reset(1, 81);tail.pose = state_.pose;tail.speed = state_.speed;
+      for(size_t j = 0; j < 80; ++j) {
+        tail.cvx(0, j) = long_entry_->controls.vx(j + 1);
+        tail.cwz(0, j) = long_entry_->controls.wz(j + 1);
       }
-      updateStateVelocities(tail);models::Trajectories forecast;forecast.reset(1,81);
-      integrateStateVelocities(forecast,tail);
+      updateStateVelocities(tail);models::Trajectories forecast;forecast.reset(1, 81);
+      integrateStateVelocities(forecast, tail);
       nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-      const auto footprint=costmap_ros_->getRobotFootprint();
-      size_t blocked_cell=22500;unsigned char blocked_old_cost=0;
-      for(size_t cell=0;cell<22500;++cell) {
-        const auto old_cost=costmap_->getCharMap()[cell];
-        if(old_cost>=254) {continue;}
-        costmap_->getCharMap()[cell]=254;
-        bool early_clear=checker.footprintCostAtPose(robot.pose.position.x,robot.pose.position.y,
-          tf2::getYaw(robot.pose.orientation),footprint)<254;
-        bool late_hit=false;
+      const auto footprint = costmap_ros_->getRobotFootprint();
+      size_t blocked_cell = 22500;unsigned char blocked_old_cost = 0;
+      for(size_t cell = 0; cell < 22500; ++cell) {
+        const auto old_cost = costmap_->getCharMap()[cell];
+        if(old_cost >= 254) {continue;}
+        costmap_->getCharMap()[cell] = 254;
+        bool early_clear = checker.footprintCostAtPose(robot.pose.position.x, robot.pose.position.y,
+          tf2::getYaw(robot.pose.orientation), footprint) < 254;
+        bool late_hit = false;
         if(early_clear) {
-          for(size_t j=41;j<81;++j) {
-            if(checker.footprintCostAtPose(forecast.x(0,j),forecast.y(0,j),forecast.yaws(0,j),footprint)>=254)
-            {late_hit=true;break;}
+          for(size_t j = 41; j < 81; ++j) {
+            if(checker.footprintCostAtPose(forecast.x(0, j), forecast.y(0, j), forecast.yaws(0, j),
+              footprint) >= 254)
+            {late_hit = true;break;}
           }
         }
-        if(early_clear&&late_hit) {
-          for(size_t j=0;j<41;++j) {
-            if(checker.footprintCostAtPose(forecast.x(0,j),forecast.y(0,j),forecast.yaws(0,j),footprint)>=254)
-            {early_clear=false;break;}
+        if(early_clear && late_hit) {
+          for(size_t j = 0; j < 41; ++j) {
+            if(checker.footprintCostAtPose(forecast.x(0, j), forecast.y(0, j), forecast.yaws(0, j),
+              footprint) >= 254)
+            {early_clear = false;break;}
           }
         }
-        costmap_->getCharMap()[cell]=old_cost;
-        if(early_clear&&late_hit) {blocked_cell=cell;blocked_old_cost=old_cost;break;}
+        costmap_->getCharMap()[cell] = old_cost;
+        if(early_clear && late_hit) {blocked_cell = cell;blocked_old_cost = old_cost;break;}
       }
-      ASSERT_LT(blocked_cell,22500u);
-      costmap_->getCharMap()[blocked_cell]=254;
-      EXPECT_THROW(prepare(robot,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
-      EXPECT_FALSE(long_entry_); // The first41 steps are clear; the retained tail is not.
-      costmap_->getCharMap()[blocked_cell]=blocked_old_cost;
-      fresh();std::fill(costmap_->getCharMap(),costmap_->getCharMap()+22500,254);
-      EXPECT_THROW(prepare(robot,speed,plan,goal,nullptr),nav2_core::FailedToMakeProgress);
+      ASSERT_LT(blocked_cell, 22500u);
+      costmap_->getCharMap()[blocked_cell] = 254;
+      EXPECT_THROW(prepare(robot, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
+      EXPECT_FALSE(long_entry_);  // The first41 steps are clear; the retained tail is not.
+      costmap_->getCharMap()[blocked_cell] = blocked_old_cost;
+      fresh();std::fill(costmap_->getCharMap(), costmap_->getCharMap() + 22500, 254);
+      EXPECT_THROW(prepare(robot, speed, plan, goal, nullptr), nav2_core::FailedToMakeProgress);
       EXPECT_FALSE(long_entry_);
       return;
     }
     ASSERT_TRUE(initialize_long_cusp_entry_);ASSERT_TRUE(seed_short_cusp_on_handoff_);
     // Historical checkpoint characterization, not a permanent desired behavior.
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_EQ(control_sequence_.vx,untouched.vx);EXPECT_EQ(control_sequence_.wz,untouched.wz);
-    EXPECT_EQ(path_.x,original_path.x);EXPECT_EQ(path_.y,original_path.y);
-    EXPECT_EQ(path_.yaws,original_path.yaws);
-    EXPECT_EQ(critics_data_.real_path_point_count.value(),34u);
-    EXPECT_EQ(effective_cusp_tolerances_.value(),std::make_pair(f::gates[0],f::gates[1]));
-    EXPECT_EQ(settings_.time_steps,41u);
+    EXPECT_EQ(control_sequence_.vx, untouched.vx);EXPECT_EQ(control_sequence_.wz, untouched.wz);
+    EXPECT_EQ(path_.x, original_path.x);EXPECT_EQ(path_.y, original_path.y);
+    EXPECT_EQ(path_.yaws, original_path.yaws);
+    EXPECT_EQ(critics_data_.real_path_point_count.value(), 34u);
+    EXPECT_EQ(effective_cusp_tolerances_.value(), std::make_pair(f::gates[0], f::gates[1]));
+    EXPECT_EQ(settings_.time_steps, 41u);
     // Counterfactual control only: an always-false/disabled initializer must not
     // satisfy this historical reduction. Nominal gates are never a repair.
-    setCuspTolerances(std::make_pair(0.05,0.1));
+    setCuspTolerances(std::make_pair(0.05, 0.1));
     ASSERT_TRUE(initializeShortCuspMean());
-    setCuspTolerances(std::make_pair(f::gates[0],f::gates[1]));
-    control_sequence_=untouched;
+    setCuspTolerances(std::make_pair(f::gates[0], f::gates[1]));
+    control_sequence_ = untouched;
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_EQ(control_sequence_.vx,untouched.vx);EXPECT_EQ(control_sequence_.wz,untouched.wz);
-    EXPECT_EQ(effective_cusp_tolerances_.value(),std::make_pair(f::gates[0],f::gates[1]));
+    EXPECT_EQ(control_sequence_.vx, untouched.vx);EXPECT_EQ(control_sequence_.wz, untouched.wz);
+    EXPECT_EQ(effective_cusp_tolerances_.value(), std::make_pair(f::gates[0], f::gates[1]));
 
     // Forecast a concrete longer witness with native constraints/model and full
     // padded footprint. Only scratch sequence length changes, never settings.
     models::ControlSequence witness;witness.reset(81);
-    for(size_t j=0;j<81;++j) {
-      witness.vx(j)=j*settings_.model_dt<1.5f ? 0.003f : 0.02f;
-      witness.wz(j)=-witness.vx(j)/0.401f;
+    for(size_t j = 0; j < 81; ++j) {
+      witness.vx(j) = j * settings_.model_dt < 1.5f ? 0.003f : 0.02f;
+      witness.wz(j) = -witness.vx(j) / 0.401f;
     }
-    control_sequence_=witness;applyControlSequenceConstraints();witness=control_sequence_;
-    control_sequence_=untouched;
-    models::State predicted;predicted.reset(1,81);
-    predicted.pose=state_.pose;predicted.speed=state_.speed;
-    for(size_t j=0;j<81;++j) {
-      predicted.cvx(0,j)=witness.vx(j);predicted.cwz(0,j)=witness.wz(j);
+    control_sequence_ = witness;applyControlSequenceConstraints();witness = control_sequence_;
+    control_sequence_ = untouched;
+    models::State predicted;predicted.reset(1, 81);
+    predicted.pose = state_.pose;predicted.speed = state_.speed;
+    for(size_t j = 0; j < 81; ++j) {
+      predicted.cvx(0, j) = witness.vx(j);predicted.cwz(0, j) = witness.wz(j);
     }
-    updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1,81);
-    integrateStateVelocities(trajectory,predicted);
+    updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1, 81);
+    integrateStateVelocities(trajectory, predicted);
     nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-    const double edge=std::hypot(f::path_x[1]-f::path_x[0],f::path_y[1]-f::path_y[0]);
-    bool early_aligned=false,final_aligned=false;
-    for(size_t j=0;j<81;++j) {
-      const double x=trajectory.x(0,j),y=trajectory.y(0,j),yaw=trajectory.yaws(0,j);
-      const double cost=checker.footprintCostAtPose(x,y,yaw,costmap_ros_->getRobotFootprint());
-      ASSERT_GE(cost,0);ASSERT_LT(cost,nav2_costmap_2d::LETHAL_OBSTACLE);
-      if(std::hypot(x-f::robot[0],y-f::robot[1])+1e-6<edge) {continue;}
-      for(size_t k=1;k<9;++k) {
-        const bool aligned=std::hypot(x-f::path_x[k],y-f::path_y[k])<=f::gates[0] &&
-          std::abs(angles::shortest_angular_distance(yaw,f::path_yaw[k]))<=f::gates[1];
-        if(j<41) {early_aligned=early_aligned || aligned;}
-        if(j==80) {final_aligned=final_aligned || aligned;}
+    const double edge = std::hypot(f::path_x[1] - f::path_x[0], f::path_y[1] - f::path_y[0]);
+    bool early_aligned = false, final_aligned = false;
+    for(size_t j = 0; j < 81; ++j) {
+      const double x = trajectory.x(0, j), y = trajectory.y(0, j), yaw = trajectory.yaws(0, j);
+      const double cost = checker.footprintCostAtPose(x, y, yaw, costmap_ros_->getRobotFootprint());
+      ASSERT_GE(cost, 0);ASSERT_LT(cost, nav2_costmap_2d::LETHAL_OBSTACLE);
+      if(std::hypot(x - f::robot[0], y - f::robot[1]) + 1e-6 < edge) {continue;}
+      for(size_t k = 1; k < 9; ++k) {
+        const bool aligned = std::hypot(x - f::path_x[k], y - f::path_y[k]) <= f::gates[0] &&
+          std::abs(angles::shortest_angular_distance(yaw, f::path_yaw[k])) <= f::gates[1];
+        if(j < 41) {early_aligned = early_aligned || aligned;}
+        if(j == 80) {final_aligned = final_aligned || aligned;}
       }
     }
     EXPECT_FALSE(early_aligned);EXPECT_TRUE(final_aligned);
-    EXPECT_NEAR(trajectory.x(0,80),5.08641242980957,1e-6);
-    EXPECT_NEAR(trajectory.y(0,80),0.06440215557813644,1e-6);
-    EXPECT_NEAR(trajectory.yaws(0,80),-2.713496685028076,1e-6);
-    EXPECT_EQ(settings_.time_steps,41u);
-    EXPECT_EQ(control_sequence_.vx,untouched.vx);EXPECT_EQ(control_sequence_.wz,untouched.wz);
+    EXPECT_NEAR(trajectory.x(0, 80), 5.08641242980957, 1e-6);
+    EXPECT_NEAR(trajectory.y(0, 80), 0.06440215557813644, 1e-6);
+    EXPECT_NEAR(trajectory.yaws(0, 80), -2.713496685028076, 1e-6);
+    EXPECT_EQ(settings_.time_steps, 41u);
+    EXPECT_EQ(control_sequence_.vx, untouched.vx);EXPECT_EQ(control_sequence_.wz, untouched.wz);
     // A blocked raster must still reject the unchanged acceptance policy.
-    std::fill(costmap_->getCharMap(),costmap_->getCharMap()+22500,254);
-    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,
-      f::gates[0],f::gates[1],false));
+    std::fill(costmap_->getCharMap(), costmap_->getCharMap() + 22500, 254);
+    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing,
+      f::gates[0], f::gates[1], false));
   }
 
   void testRecordedRetainedDeparture()
   {
     namespace f = retained_departure_fixture;
     const auto pose = [](const std::vector<double> & p) {
-        geometry_msgs::msg::PoseStamped value; value.header.frame_id="odom";
-        value.pose.position.x=p[0]; value.pose.position.y=p[1];
-        value.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),p[2]));
+        geometry_msgs::msg::PoseStamped value; value.header.frame_id = "odom";
+        value.pose.position.x = p[0]; value.pose.position.y = p[1];
+        value.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), p[2]));
         return value;
       };
     const auto speed = [](const std::vector<double> & v) {
-        geometry_msgs::msg::Twist value; value.linear.x=v[0];value.angular.z=v[1];return value;
+        geometry_msgs::msg::Twist value; value.linear.x = v[0];value.angular.z = v[1];return value;
       };
-    nav_msgs::msg::Path outgoing; outgoing.header.frame_id="odom";
-    for(size_t k=0;k<f::path_x.size();++k) {
-      outgoing.poses.push_back(pose({f::path_x[k],f::path_y[k],f::path_yaw[k]}));
+    nav_msgs::msg::Path outgoing; outgoing.header.frame_id = "odom";
+    for(size_t k = 0; k < f::path_x.size(); ++k) {
+      outgoing.poses.push_back(pose({f::path_x[k], f::path_y[k], f::path_yaw[k]}));
     }
-    const auto restore = [&](const std::vector<double> & p,const std::vector<double> & v,
-        const std::vector<double> & steering) {
-        state_.pose=pose(p);state_.speed=speed(v);
+    const auto restore = [&](const std::vector<double> & p, const std::vector<double> & v,
+      const std::vector<double> & steering) {
+        state_.pose = pose(p);state_.speed = speed(v);
         setInitialSteering(steering[0]);setInitialConditionedSteering(steering[1]);
       };
     // Reproduce both first-stage prefixes from the actual rejection, rather
     // than merely asserting reachability from arbitrarily shifted poses.
-    const auto reverse_prefix = [&](bool carried,const std::vector<double> & expected_pose,
-        const std::vector<double> & expected_speed,const std::vector<double> & expected_steering) {
-        restore(f::robot0,f::speed0,f::steering0);
-        models::State predicted;predicted.reset(1,41);predicted.pose=state_.pose;predicted.speed=state_.speed;
-        for(size_t j=0;j<41;++j) {
-          predicted.cvx(0,j)=carried ? f::incoming_control_vx[j] : -0.02f;
-          predicted.cwz(0,j)=carried ? f::incoming_control_wz[j] : -0.02f/0.401f;
+    const auto reverse_prefix = [&](bool carried, const std::vector<double> & expected_pose,
+      const std::vector<double> & expected_speed, const std::vector<double> & expected_steering) {
+        restore(f::robot0, f::speed0, f::steering0);
+        models::State predicted;predicted.reset(1, 41);predicted.pose = state_.pose;
+        predicted.speed = state_.speed;
+        for(size_t j = 0; j < 41; ++j) {
+          predicted.cvx(0, j) = carried ? f::incoming_control_vx[j] : -0.02f;
+          predicted.cwz(0, j) = carried ? f::incoming_control_wz[j] : -0.02f / 0.401f;
         }
-        updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1,41);
-        integrateStateVelocities(trajectory,predicted);
+        updateStateVelocities(predicted);models::Trajectories trajectory;trajectory.reset(1, 41);
+        integrateStateVelocities(trajectory, predicted);
         nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-        for(size_t j=0;j<20;++j) {
-          const double cost=checker.footprintCostAtPose(trajectory.x(0,j),trajectory.y(0,j),
-            trajectory.yaws(0,j),costmap_ros_->getRobotFootprint());
-          EXPECT_GE(cost,0);EXPECT_LT(cost,nav2_costmap_2d::LETHAL_OBSTACLE);
+        for(size_t j = 0; j < 20; ++j) {
+          const double cost = checker.footprintCostAtPose(trajectory.x(0, j), trajectory.y(0, j),
+            trajectory.yaws(0, j), costmap_ros_->getRobotFootprint());
+          EXPECT_GE(cost, 0);EXPECT_LT(cost, nav2_costmap_2d::LETHAL_OBSTACLE);
         }
-        EXPECT_NEAR(trajectory.x(0,19),expected_pose[0],1e-6);
-        EXPECT_NEAR(trajectory.y(0,19),expected_pose[1],1e-6);
-        EXPECT_NEAR(trajectory.yaws(0,19),expected_pose[2],1e-6);
-        EXPECT_NEAR(predicted.vx(0,20),expected_speed[0],1e-7);
-        EXPECT_NEAR(predicted.wz(0,20),expected_speed[1],1e-7);
+        EXPECT_NEAR(trajectory.x(0, 19), expected_pose[0], 1e-6);
+        EXPECT_NEAR(trajectory.y(0, 19), expected_pose[1], 1e-6);
+        EXPECT_NEAR(trajectory.yaws(0, 19), expected_pose[2], 1e-6);
+        EXPECT_NEAR(predicted.vx(0, 20), expected_speed[0], 1e-7);
+        EXPECT_NEAR(predicted.wz(0, 20), expected_speed[1], 1e-7);
         // Invert the calibrated response to cross-check physical steering.
         // Conditioned steering is archived separately by the diagnostic
         // recurrence with zero residual; these two settled states coincide.
-        const float vx=predicted.vx(0,20),wz=predicted.wz(0,20);
-        const float raw_wz=wz*std::abs(vx)/(std::abs(vx)-0.093f*std::abs(wz));
-        EXPECT_NEAR(std::atan(0.213f*raw_wz/vx),expected_steering[0],1e-6);
-        EXPECT_DOUBLE_EQ(expected_steering[0],expected_steering[1]);
+        const float vx = predicted.vx(0, 20), wz = predicted.wz(0, 20);
+        const float raw_wz = wz * std::abs(vx) / (std::abs(vx) - 0.093f * std::abs(wz));
+        EXPECT_NEAR(std::atan(0.213f * raw_wz / vx), expected_steering[0], 1e-6);
+        EXPECT_DOUBLE_EQ(expected_steering[0], expected_steering[1]);
       };
-    reverse_prefix(false,f::robot1,f::speed1,f::steering1);
-    reverse_prefix(true,f::robot2,f::speed2,f::steering2);
-    restore(f::robot0,f::speed0,f::steering0);
-    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
-    restore(f::robot1,f::speed1,f::steering1);
-    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
-    restore(f::robot2,f::speed2,f::steering2);
-    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
+    reverse_prefix(false, f::robot1, f::speed1, f::steering1);
+    reverse_prefix(true, f::robot2, f::speed2, f::steering2);
+    restore(f::robot0, f::speed0, f::steering0);
+    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
+    restore(f::robot1, f::speed1, f::steering1);
+    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
+    restore(f::robot2, f::speed2, f::steering2);
+    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
     // Independent explicit member of the unchanged terminal family. The
     // two post-states came from clear 1s native reverse prefixes, not a drive.
     const auto terminal_geometry = [&](const std::vector<double> & p,
-        const std::vector<double> & v,const std::vector<double> & steering,bool expected) {
-        restore(p,v,steering);
-        models::State candidate;candidate.reset(1,81);candidate.pose=state_.pose;candidate.speed=state_.speed;
-        float remaining=std::hypot(f::path_x.back()-p[0],f::path_y.back()-p[1]);
-        for(size_t j=0;j<81;++j) {
-          const float vx=std::min(j*settings_.model_dt<1.5f ? 0.003f : 0.12f,remaining/settings_.model_dt);
-          candidate.cvx(0,j)=vx;candidate.cwz(0,j)=-vx/0.401f;
-          remaining=std::max(0.0f,remaining-vx*settings_.model_dt);
+      const std::vector<double> & v, const std::vector<double> & steering, bool expected) {
+        restore(p, v, steering);
+        models::State candidate;candidate.reset(1, 81);candidate.pose = state_.pose;
+        candidate.speed = state_.speed;
+        float remaining = std::hypot(f::path_x.back() - p[0], f::path_y.back() - p[1]);
+        for(size_t j = 0; j < 81; ++j) {
+          const float vx = std::min(j * settings_.model_dt < 1.5f ? 0.003f : 0.12f,
+          remaining / settings_.model_dt);
+          candidate.cvx(0, j) = vx;candidate.cwz(0, j) = -vx / 0.401f;
+          remaining = std::max(0.0f, remaining - vx * settings_.model_dt);
         }
-        updateStateVelocities(candidate);models::Trajectories trajectory;trajectory.reset(1,81);
-        integrateStateVelocities(trajectory,candidate);
+        updateStateVelocities(candidate);models::Trajectories trajectory;trajectory.reset(1, 81);
+        integrateStateVelocities(trajectory, candidate);
         nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-        for(size_t j=0;j<81;++j) {
-          const double cost=checker.footprintCostAtPose(trajectory.x(0,j),trajectory.y(0,j),
-            trajectory.yaws(0,j),costmap_ros_->getRobotFootprint());
-          EXPECT_GE(cost,0);EXPECT_LT(cost,nav2_costmap_2d::LETHAL_OBSTACLE);
+        for(size_t j = 0; j < 81; ++j) {
+          const double cost = checker.footprintCostAtPose(trajectory.x(0, j), trajectory.y(0, j),
+            trajectory.yaws(0, j), costmap_ros_->getRobotFootprint());
+          EXPECT_GE(cost, 0);EXPECT_LT(cost, nav2_costmap_2d::LETHAL_OBSTACLE);
         }
-        const float xy=std::hypot(trajectory.x(0,80)-f::path_x.back(),trajectory.y(0,80)-f::path_y.back());
-        const float yaw=std::abs(angles::shortest_angular_distance(trajectory.yaws(0,80),f::path_yaw.back()));
-        EXPECT_EQ(xy<=0.05f && yaw<=0.1f,expected);
+        const float xy = std::hypot(trajectory.x(0, 80) - f::path_x.back(),
+        trajectory.y(0, 80) - f::path_y.back());
+        const float yaw = std::abs(angles::shortest_angular_distance(trajectory.yaws(0, 80),
+        f::path_yaw.back()));
+        EXPECT_EQ(xy <= 0.05f && yaw <= 0.1f, expected);
       };
-    terminal_geometry(f::robot0,f::speed0,f::steering0,false);
-    terminal_geometry(f::robot1,f::speed1,f::steering1,true);
-    terminal_geometry(f::robot2,f::speed2,f::steering2,true);
-    restore(f::robot0,f::speed0,f::steering0);
-    std::fill(costmap_->getCharMap(),costmap_->getCharMap()+22500,0);
-    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
-    restore(f::robot1,f::speed1,f::steering1);
-    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
-    restore(f::robot2,f::speed2,f::steering2);
-    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose,state_.speed,outgoing,0.05,0.1,true));
-    std::copy(f::grid.begin(),f::grid.end(),costmap_->getCharMap());
-    restore(f::robot0,f::speed0,f::steering0);
+    terminal_geometry(f::robot0, f::speed0, f::steering0, false);
+    terminal_geometry(f::robot1, f::speed1, f::steering1, true);
+    terminal_geometry(f::robot2, f::speed2, f::steering2, true);
+    restore(f::robot0, f::speed0, f::steering0);
+    std::fill(costmap_->getCharMap(), costmap_->getCharMap() + 22500, 0);
+    EXPECT_FALSE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
+    restore(f::robot1, f::speed1, f::steering1);
+    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
+    restore(f::robot2, f::speed2, f::steering2);
+    EXPECT_TRUE(longCuspDepartureAvailable(state_.pose, state_.speed, outgoing, 0.05, 0.1, true));
+    std::copy(f::grid.begin(), f::grid.end(), costmap_->getCharMap());
+    restore(f::robot0, f::speed0, f::steering0);
     control_sequence_.vx.fill(-0.017f);control_sequence_.wz.fill(-0.031f);
     costs_.fill(123.0f);state_.cvx.fill(0.019f);state_.cwz.fill(0.023f);
-    critics_data_.furthest_reached_path_point=3;critics_data_.path_pts_valid=std::vector<bool>{true,false,true};
-    critics_data_.fail_flag=true;
-    const auto before=control_sequence_;const auto costs_before=costs_;
-    const auto cvx_before=state_.cvx;const auto cwz_before=state_.cwz;
-    const auto valid_before=critics_data_.path_pts_valid;
-    const auto cusp=outgoing.poses.front();const auto command=speed(f::command);
-    EXPECT_TRUE(retainedDepartureCommandSafe(state_.pose,state_.speed,command,cusp,0.005));
+    critics_data_.furthest_reached_path_point = 3;
+    critics_data_.path_pts_valid = std::vector<bool>{true, false, true};
+    critics_data_.fail_flag = true;
+    const auto before = control_sequence_;const auto costs_before = costs_;
+    const auto cvx_before = state_.cvx;const auto cwz_before = state_.cwz;
+    const auto valid_before = critics_data_.path_pts_valid;
+    const auto cusp = outgoing.poses.front();const auto command = speed(f::command);
+    EXPECT_TRUE(retainedDepartureCommandSafe(state_.pose, state_.speed, command, cusp, 0.005));
     auto wrong_frame = state_.pose;wrong_frame.header.frame_id = "map";
     auto wrong_cusp = cusp;wrong_cusp.header.frame_id = "map";
-    EXPECT_FALSE(retainedDepartureCommandSafe(wrong_frame,state_.speed,command,wrong_cusp,0.005));
-    EXPECT_TRUE(retainedDepartureCommandSafe(state_.pose,state_.speed,command,cusp,0.01));
-    auto aggressive=command;aggressive.linear.x=-0.3;aggressive.angular.z=-0.3/0.401;
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,aggressive,cusp,0.01));
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,aggressive,cusp,0.005));
-    auto forward=command;forward.linear.x=0.02;
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,forward,cusp,0.01));
-    EXPECT_FALSE(retainedDepartureCommandSafe(cusp,state_.speed,command,cusp,0.01));
-    auto near_cusp=cusp;near_cusp.pose.position.y-=0.003;
-    EXPECT_FALSE(retainedDepartureCommandSafe(near_cusp,state_.speed,command,cusp,0.01));
-    auto invalid=command;invalid.linear.x=std::numeric_limits<double>::quiet_NaN();
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,invalid,cusp,0.01));
+    EXPECT_FALSE(retainedDepartureCommandSafe(wrong_frame, state_.speed, command, wrong_cusp,
+      0.005));
+    EXPECT_TRUE(retainedDepartureCommandSafe(state_.pose, state_.speed, command, cusp, 0.01));
+    auto aggressive = command;aggressive.linear.x = -0.3;aggressive.angular.z = -0.3 / 0.401;
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, aggressive, cusp, 0.01));
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, aggressive, cusp, 0.005));
+    auto forward = command;forward.linear.x = 0.02;
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, forward, cusp, 0.01));
+    EXPECT_FALSE(retainedDepartureCommandSafe(cusp, state_.speed, command, cusp, 0.01));
+    auto near_cusp = cusp;near_cusp.pose.position.y -= 0.003;
+    EXPECT_FALSE(retainedDepartureCommandSafe(near_cusp, state_.speed, command, cusp, 0.01));
+    auto invalid = command;invalid.linear.x = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, invalid, cusp, 0.01));
     setInitialConditionedSteering(std::nullopt);
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,command,cusp,0.005));
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, command, cusp, 0.005));
     setInitialConditionedSteering(f::steering0[1]);
     // Deterministic late collision: this recorded-grid cell is absent from
     // the initial and first two forecast perimeters, but enters the third.
     // A guard that checks only the current footprint must fail this control.
-    auto late_command=command;late_command.linear.x=-0.12;late_command.angular.z=-0.12/0.401;
-    ASSERT_TRUE(retainedDepartureCommandSafe(state_.pose,state_.speed,late_command,cusp,0.005));
-    models::State late_prediction;late_prediction.reset(1,3);
-    late_prediction.pose=state_.pose;late_prediction.speed=state_.speed;
-    for(size_t j=0;j<3;++j) {
-      late_prediction.cvx(0,j)=late_command.linear.x;
-      late_prediction.cwz(0,j)=late_command.angular.z;
+    auto late_command = command;late_command.linear.x = -0.12;
+    late_command.angular.z = -0.12 / 0.401;
+    ASSERT_TRUE(retainedDepartureCommandSafe(state_.pose, state_.speed, late_command, cusp, 0.005));
+    models::State late_prediction;late_prediction.reset(1, 3);
+    late_prediction.pose = state_.pose;late_prediction.speed = state_.speed;
+    for(size_t j = 0; j < 3; ++j) {
+      late_prediction.cvx(0, j) = late_command.linear.x;
+      late_prediction.cwz(0, j) = late_command.angular.z;
     }
     updateStateVelocities(late_prediction);
-    const auto old_cell=costmap_->getCost(69,80);
-    costmap_->setCost(69,80,nav2_costmap_2d::LETHAL_OBSTACLE);
+    const auto old_cell = costmap_->getCost(69, 80);
+    costmap_->setCost(69, 80, nav2_costmap_2d::LETHAL_OBSTACLE);
     nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> late_checker(costmap_);
-    double late_x=state_.pose.pose.position.x,late_y=state_.pose.pose.position.y;
-    double late_yaw=tf2::getYaw(state_.pose.pose.orientation);
-    ASSERT_LT(late_checker.footprintCostAtPose(late_x,late_y,late_yaw,costmap_ros_->getRobotFootprint()),
+    double late_x = state_.pose.pose.position.x, late_y = state_.pose.pose.position.y;
+    double late_yaw = tf2::getYaw(state_.pose.pose.orientation);
+    ASSERT_LT(late_checker.footprintCostAtPose(late_x, late_y, late_yaw,
+      costmap_ros_->getRobotFootprint()),
       nav2_costmap_2d::LETHAL_OBSTACLE);
-    for(size_t j=0;j<3;++j) {
-      late_x+=late_prediction.vx(0,j)*std::cos(late_yaw)*settings_.model_dt;
-      late_y+=late_prediction.vx(0,j)*std::sin(late_yaw)*settings_.model_dt;
-      late_yaw+=late_prediction.wz(0,j)*settings_.model_dt;
-      const double cost=late_checker.footprintCostAtPose(late_x,late_y,late_yaw,costmap_ros_->getRobotFootprint());
-      if(j<2) {EXPECT_GE(cost,0);EXPECT_LT(cost,nav2_costmap_2d::LETHAL_OBSTACLE);}
-      else {EXPECT_EQ(cost,nav2_costmap_2d::LETHAL_OBSTACLE);}
+    for(size_t j = 0; j < 3; ++j) {
+      late_x += late_prediction.vx(0, j) * std::cos(late_yaw) * settings_.model_dt;
+      late_y += late_prediction.vx(0, j) * std::sin(late_yaw) * settings_.model_dt;
+      late_yaw += late_prediction.wz(0, j) * settings_.model_dt;
+      const double cost = late_checker.footprintCostAtPose(late_x, late_y, late_yaw,
+        costmap_ros_->getRobotFootprint());
+      if(j < 2) {EXPECT_GE(cost, 0);EXPECT_LT(cost, nav2_costmap_2d::LETHAL_OBSTACLE);} else {
+        EXPECT_EQ(cost, nav2_costmap_2d::LETHAL_OBSTACLE);
+      }
     }
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,late_command,cusp,0.005));
-    costmap_->setCost(69,80,old_cell);
-    std::fill(costmap_->getCharMap(),costmap_->getCharMap()+22500,nav2_costmap_2d::LETHAL_OBSTACLE);
-    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose,state_.speed,command,cusp,0.01));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,before.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,before.wz)));
-    EXPECT_TRUE(xt::all(xt::equal(costs_,costs_before)));
-    EXPECT_TRUE(xt::all(xt::equal(state_.cvx,cvx_before)));
-    EXPECT_TRUE(xt::all(xt::equal(state_.cwz,cwz_before)));
-    EXPECT_EQ(critics_data_.path_pts_valid,valid_before);
-    EXPECT_EQ(critics_data_.furthest_reached_path_point.value(),3u);
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, late_command, cusp,
+      0.005));
+    costmap_->setCost(69, 80, old_cell);
+    std::fill(costmap_->getCharMap(), costmap_->getCharMap() + 22500,
+      nav2_costmap_2d::LETHAL_OBSTACLE);
+    EXPECT_FALSE(retainedDepartureCommandSafe(state_.pose, state_.speed, command, cusp, 0.01));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, before.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, before.wz)));
+    EXPECT_TRUE(xt::all(xt::equal(costs_, costs_before)));
+    EXPECT_TRUE(xt::all(xt::equal(state_.cvx, cvx_before)));
+    EXPECT_TRUE(xt::all(xt::equal(state_.cwz, cwz_before)));
+    EXPECT_EQ(critics_data_.path_pts_valid, valid_before);
+    EXPECT_EQ(critics_data_.furthest_reached_path_point.value(), 3u);
     EXPECT_TRUE(critics_data_.fail_flag);
   }
 
@@ -632,104 +668,111 @@ public:
     namespace f = handoff_prefix_fixture;
     // Recorded coordinates are odom-local; certificate validation requires the
     // same explicit identity as the configured costmap and transformed path.
-    state_.pose.header.frame_id="odom";
-    state_.pose.pose.position.x=f::robot[0]; state_.pose.pose.position.y=f::robot[1];
-    state_.pose.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::robot[2]));
-    state_.speed.linear.x=f::speed[0]; state_.speed.angular.z=f::speed[1];
+    state_.pose.header.frame_id = "odom";
+    state_.pose.pose.position.x = f::robot[0]; state_.pose.pose.position.y = f::robot[1];
+    state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::robot[2]));
+    state_.speed.linear.x = f::speed[0]; state_.speed.angular.z = f::speed[1];
     setInitialSteering(f::steering[0]); setInitialConditionedSteering(f::steering[1]);
-    goal_.position.x=f::goal[0];goal_.position.y=f::goal[1];
-    goal_.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::goal[2]));
+    goal_.position.x = f::goal[0];goal_.position.y = f::goal[1];
+    goal_.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::goal[2]));
     path_.reset(f::path_x.size());
-    std::copy(f::path_x.begin(),f::path_x.end(),path_.x.begin());
-    std::copy(f::path_y.begin(),f::path_y.end(),path_.y.begin());
-    std::copy(f::path_yaw.begin(),f::path_yaw.end(),path_.yaws.begin());
+    std::copy(f::path_x.begin(), f::path_x.end(), path_.x.begin());
+    std::copy(f::path_y.begin(), f::path_y.end(), path_.y.begin());
+    std::copy(f::path_yaw.begin(), f::path_yaw.end(), path_.yaws.begin());
     setRealPathPointCount(36); setActiveCuspDirection(1); setPathDirection(1);
-    setCuspTolerances(std::make_pair(0.05,0.10));
+    setCuspTolerances(std::make_pair(0.05, 0.10));
     // Independent native oracle: retain full path and check the local first edge.
     const auto local_clear = [&](const models::ControlSequence & sequence) {
-      models::State predicted; predicted.reset(1,settings_.time_steps);
-      predicted.pose=state_.pose; predicted.speed=state_.speed;
-      for(size_t j=0;j<settings_.time_steps;++j) {
-        predicted.cvx(0,j)=sequence.vx(j); predicted.cwz(0,j)=sequence.wz(j);
-      }
-      updateStateVelocities(predicted);
-      models::Trajectories trajectory; trajectory.reset(1,settings_.time_steps);
-      integrateStateVelocities(trajectory,predicted);
-      nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
-      for(size_t j=0;j<settings_.time_steps;++j) {
-        const auto cost=checker.footprintCostAtPose(trajectory.x(0,j),trajectory.y(0,j),
-          trajectory.yaws(0,j),costmap_ros_->getRobotFootprint());
-        if(cost<0 || cost>=nav2_costmap_2d::LETHAL_OBSTACLE) {return false;}
-      }
-      for(size_t j=1;j<settings_.time_steps;++j) {if(sequence.vx(j)<-1e-6f) {return false;}}
-      const size_t last=settings_.time_steps-1;
-      if(std::hypot(trajectory.x(0,last)-state_.pose.pose.position.x,
-        trajectory.y(0,last)-state_.pose.pose.position.y)<
-        std::hypot(path_.x(1)-path_.x(0),path_.y(1)-path_.y(0))) {return false;}
-      return std::hypot(trajectory.x(0,last)-path_.x(1),trajectory.y(0,last)-path_.y(1))<=0.05 &&
-        std::abs(angles::shortest_angular_distance(trajectory.yaws(0,last),path_.yaws(1)))<=0.10;
-    };
+        models::State predicted; predicted.reset(1, settings_.time_steps);
+        predicted.pose = state_.pose; predicted.speed = state_.speed;
+        for(size_t j = 0; j < settings_.time_steps; ++j) {
+          predicted.cvx(0, j) = sequence.vx(j); predicted.cwz(0, j) = sequence.wz(j);
+        }
+        updateStateVelocities(predicted);
+        models::Trajectories trajectory; trajectory.reset(1, settings_.time_steps);
+        integrateStateVelocities(trajectory, predicted);
+        nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(costmap_);
+        for(size_t j = 0; j < settings_.time_steps; ++j) {
+          const auto cost = checker.footprintCostAtPose(trajectory.x(0, j), trajectory.y(0, j),
+          trajectory.yaws(0, j), costmap_ros_->getRobotFootprint());
+          if(cost < 0 || cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {return false;}
+        }
+        for(size_t j = 1; j < settings_.time_steps; ++j) {
+          if(sequence.vx(j) < -1e-6f) {
+            return false;
+          }
+        }
+        const size_t last = settings_.time_steps - 1;
+        if(std::hypot(trajectory.x(0, last) - state_.pose.pose.position.x,
+        trajectory.y(0, last) - state_.pose.pose.position.y) <
+          std::hypot(path_.x(1) - path_.x(0), path_.y(1) - path_.y(0))) {return false;}
+        return std::hypot(trajectory.x(0, last) - path_.x(1),
+        trajectory.y(0, last) - path_.y(1)) <= 0.05 &&
+               std::abs(angles::shortest_angular_distance(trajectory.yaws(0, last),
+        path_.yaws(1))) <= 0.10;
+      };
     models::ControlSequence witness; witness.reset(settings_.time_steps);
-    for(size_t j=0;j<settings_.time_steps;++j) {
-      witness.vx(j)=j<30 ? 0.01f : 0.12f; witness.wz(j)=-witness.vx(j)/0.401f;
-      control_sequence_.vx(j)=f::control_vx[j]; control_sequence_.wz(j)=f::control_wz[j];
+    for(size_t j = 0; j < settings_.time_steps; ++j) {
+      witness.vx(j) = j < 30 ? 0.01f : 0.12f; witness.wz(j) = -witness.vx(j) / 0.401f;
+      control_sequence_.vx(j) = f::control_vx[j]; control_sequence_.wz(j) = f::control_wz[j];
     }
     ASSERT_TRUE(local_clear(witness));
     ASSERT_FALSE(local_clear(control_sequence_));
     ASSERT_FALSE(cuspSequenceFeasible(witness));  // Local entry is not full endpoint completion.
-    const auto original_path=path_;
+    const auto original_path = path_;
     control_sequence_.vx.fill(0);control_sequence_.wz.fill(0);
-    const auto untouched=control_sequence_;
-    initialize_long_cusp_entry_=false;
+    const auto untouched = control_sequence_;
+    initialize_long_cusp_entry_ = false;
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,untouched.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,untouched.wz)));
-    initialize_long_cusp_entry_=true;seed_short_cusp_on_handoff_=false;
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, untouched.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, untouched.wz)));
+    initialize_long_cusp_entry_ = true;seed_short_cusp_on_handoff_ = false;
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,untouched.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,untouched.wz)));
-    seed_short_cusp_on_handoff_=true;setActiveCuspDirection(-1);
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, untouched.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, untouched.wz)));
+    seed_short_cusp_on_handoff_ = true;setActiveCuspDirection(-1);
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,untouched.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,untouched.wz)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, untouched.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, untouched.wz)));
     setActiveCuspDirection(1);
-    effective_cusp_tolerances_=std::make_pair(std::numeric_limits<double>::infinity(),0.1);
+    effective_cusp_tolerances_ = std::make_pair(std::numeric_limits<double>::infinity(), 0.1);
     EXPECT_FALSE(initializeShortCuspMean());
-    setCuspTolerances(std::make_pair(0.05,0.10));
+    setCuspTolerances(std::make_pair(0.05, 0.10));
     ASSERT_TRUE(initializeShortCuspMean());
     EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
     EXPECT_TRUE(local_clear(control_sequence_));
-    EXPECT_TRUE(xt::all(xt::equal(path_.x,original_path.x)));
-    EXPECT_TRUE(xt::all(xt::equal(path_.y,original_path.y)));
-    EXPECT_TRUE(xt::all(xt::equal(path_.yaws,original_path.yaws)));
-    EXPECT_EQ(critics_data_.real_path_point_count.value(),36u);
-    EXPECT_EQ(active_cusp_direction_,1);
-    EXPECT_EQ(path_direction_,1);
-    EXPECT_EQ(effective_cusp_tolerances_.value(),std::make_pair(0.05,0.10));
-    EXPECT_DOUBLE_EQ(goal_.position.x,f::goal[0]);
-    nav_msgs::msg::Path full_plan;full_plan.header.frame_id="odom";
-    for(size_t k=0;k<36;++k) {
-      geometry_msgs::msg::PoseStamped target;target.header=full_plan.header;
-      target.pose.position.x=f::path_x[k];target.pose.position.y=f::path_y[k];
-      target.pose.orientation=tf2::toMsg(tf2::Quaternion(tf2::Vector3(0,0,1),f::path_yaw[k]));
+    EXPECT_TRUE(xt::all(xt::equal(path_.x, original_path.x)));
+    EXPECT_TRUE(xt::all(xt::equal(path_.y, original_path.y)));
+    EXPECT_TRUE(xt::all(xt::equal(path_.yaws, original_path.yaws)));
+    EXPECT_EQ(critics_data_.real_path_point_count.value(), 36u);
+    EXPECT_EQ(active_cusp_direction_, 1);
+    EXPECT_EQ(path_direction_, 1);
+    EXPECT_EQ(effective_cusp_tolerances_.value(), std::make_pair(0.05, 0.10));
+    EXPECT_DOUBLE_EQ(goal_.position.x, f::goal[0]);
+    nav_msgs::msg::Path full_plan;full_plan.header.frame_id = "odom";
+    for(size_t k = 0; k < 36; ++k) {
+      geometry_msgs::msg::PoseStamped target;target.header = full_plan.header;
+      target.pose.position.x = f::path_x[k];target.pose.position.y = f::path_y[k];
+      target.pose.orientation = tf2::toMsg(tf2::Quaternion(tf2::Vector3(0, 0, 1), f::path_yaw[k]));
       full_plan.poses.push_back(target);
     }
     control_sequence_.vx.fill(0);control_sequence_.wz.fill(0);
     ASSERT_FALSE(local_clear(control_sequence_));
     requestShortCuspSeed();
-    prepare(state_.pose,state_.speed,full_plan,goal_,nullptr);
+    prepare(state_.pose, state_.speed, full_plan, goal_, nullptr);
     EXPECT_FALSE(short_cusp_seed_requested_);
     EXPECT_FALSE(long_entry_);EXPECT_FALSE(long_entry_required_);
     EXPECT_TRUE(local_clear(control_sequence_));
-    control_sequence_=witness;
-    prepare(state_.pose,state_.speed,full_plan,goal_,nullptr);
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,witness.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,witness.wz)));
-    const auto before_blocked=control_sequence_;
-    std::fill(costmap_->getCharMap(),costmap_->getCharMap()+22500,nav2_costmap_2d::LETHAL_OBSTACLE);
+    control_sequence_ = witness;
+    prepare(state_.pose, state_.speed, full_plan, goal_, nullptr);
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, witness.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, witness.wz)));
+    const auto before_blocked = control_sequence_;
+    std::fill(costmap_->getCharMap(), costmap_->getCharMap() + 22500,
+      nav2_costmap_2d::LETHAL_OBSTACLE);
     EXPECT_FALSE(initializeShortCuspMean());
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx,before_blocked.vx)));
-    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz,before_blocked.wz)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.vx, before_blocked.vx)));
+    EXPECT_TRUE(xt::all(xt::equal(control_sequence_.wz, before_blocked.wz)));
   }
 
   models::ControlSequence departureControlsForTest() const {return control_sequence_;}
@@ -893,9 +936,12 @@ public:
     setInitialSteering(entry_shift_fixture::steering[0]);
     setInitialConditionedSteering(entry_shift_fixture::steering[1]);
     path_.reset(entry_shift_fixture::path_x.size());
-    std::copy(entry_shift_fixture::path_x.begin(), entry_shift_fixture::path_x.end(), path_.x.begin());
-    std::copy(entry_shift_fixture::path_y.begin(), entry_shift_fixture::path_y.end(), path_.y.begin());
-    std::copy(entry_shift_fixture::path_yaw.begin(), entry_shift_fixture::path_yaw.end(), path_.yaws.begin());
+    std::copy(entry_shift_fixture::path_x.begin(), entry_shift_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(entry_shift_fixture::path_y.begin(), entry_shift_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(entry_shift_fixture::path_yaw.begin(), entry_shift_fixture::path_yaw.end(),
+      path_.yaws.begin());
     setRealPathPointCount(11); setActiveCuspDirection(-1); setPathDirection(-1);
     seed_short_cusp_on_handoff_ = true; preserve_short_cusp_feasibility_ = true;
     initialize_long_cusp_entry_ = true;
@@ -1006,9 +1052,12 @@ public:
     setInitialSteering(hidden_future_gear_fixture::steering[0]);
     setInitialConditionedSteering(hidden_future_gear_fixture::steering[1]);
     path_.reset(hidden_future_gear_fixture::path_x.size());
-    std::copy(hidden_future_gear_fixture::path_x.begin(), hidden_future_gear_fixture::path_x.end(), path_.x.begin());
-    std::copy(hidden_future_gear_fixture::path_y.begin(), hidden_future_gear_fixture::path_y.end(), path_.y.begin());
-    std::copy(hidden_future_gear_fixture::path_yaw.begin(), hidden_future_gear_fixture::path_yaw.end(), path_.yaws.begin());
+    std::copy(hidden_future_gear_fixture::path_x.begin(), hidden_future_gear_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(hidden_future_gear_fixture::path_y.begin(), hidden_future_gear_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(hidden_future_gear_fixture::path_yaw.begin(),
+      hidden_future_gear_fixture::path_yaw.end(), path_.yaws.begin());
     setRealPathPointCount(3); setActiveCuspDirection(1); setPathDirection(1);
     preserve_short_cusp_feasibility_ = true; seed_short_cusp_on_handoff_ = true;
     control_sequence_.vx.fill(0.0f); control_sequence_.wz.fill(0.0f);
@@ -1045,9 +1094,12 @@ public:
     setInitialSteering(long_prefix_gear_fixture::steering[0]);
     setInitialConditionedSteering(long_prefix_gear_fixture::steering[1]);
     path_.reset(long_prefix_gear_fixture::path_x.size());
-    std::copy(long_prefix_gear_fixture::path_x.begin(), long_prefix_gear_fixture::path_x.end(), path_.x.begin());
-    std::copy(long_prefix_gear_fixture::path_y.begin(), long_prefix_gear_fixture::path_y.end(), path_.y.begin());
-    std::copy(long_prefix_gear_fixture::path_yaw.begin(), long_prefix_gear_fixture::path_yaw.end(), path_.yaws.begin());
+    std::copy(long_prefix_gear_fixture::path_x.begin(), long_prefix_gear_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(long_prefix_gear_fixture::path_y.begin(), long_prefix_gear_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(long_prefix_gear_fixture::path_yaw.begin(), long_prefix_gear_fixture::path_yaw.end(),
+      path_.yaws.begin());
     setRealPathPointCount(34); setActiveCuspDirection(1); setPathDirection(1);
     preserve_short_cusp_feasibility_ = false; seed_short_cusp_on_handoff_ = false;
     condition_control_on_path_direction_ = true;
@@ -1168,11 +1220,16 @@ public:
     setInitialSteering(effective_gate_fixture::steering[0]);
     setInitialConditionedSteering(effective_gate_fixture::steering[1]);
     path_.reset(effective_gate_fixture::path_x.size());
-    std::copy(effective_gate_fixture::path_x.begin(), effective_gate_fixture::path_x.end(), path_.x.begin());
-    std::copy(effective_gate_fixture::path_y.begin(), effective_gate_fixture::path_y.end(), path_.y.begin());
-    std::copy(effective_gate_fixture::path_yaw.begin(), effective_gate_fixture::path_yaw.end(), path_.yaws.begin());
-    std::copy(effective_gate_fixture::vx.begin(), effective_gate_fixture::vx.end(), control_sequence_.vx.begin());
-    std::copy(effective_gate_fixture::wz.begin(), effective_gate_fixture::wz.end(), control_sequence_.wz.begin());
+    std::copy(effective_gate_fixture::path_x.begin(), effective_gate_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(effective_gate_fixture::path_y.begin(), effective_gate_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(effective_gate_fixture::path_yaw.begin(), effective_gate_fixture::path_yaw.end(),
+      path_.yaws.begin());
+    std::copy(effective_gate_fixture::vx.begin(), effective_gate_fixture::vx.end(),
+      control_sequence_.vx.begin());
+    std::copy(effective_gate_fixture::wz.begin(), effective_gate_fixture::wz.end(),
+      control_sequence_.wz.begin());
     setRealPathPointCount(1); setActiveCuspDirection(1); setPathDirection(1);
     ASSERT_TRUE(shortCuspSequenceFeasible());  // Legacy raw5cm gate.
     setCuspTolerances(std::make_pair(0.023990616202354431, 0.10));
@@ -1204,9 +1261,12 @@ public:
     setInitialSteering(exit_completion_fixture::steering[0]);
     setInitialConditionedSteering(exit_completion_fixture::steering[1]);
     path_.reset(exit_completion_fixture::path_x.size());
-    std::copy(exit_completion_fixture::path_x.begin(), exit_completion_fixture::path_x.end(), path_.x.begin());
-    std::copy(exit_completion_fixture::path_y.begin(), exit_completion_fixture::path_y.end(), path_.y.begin());
-    std::copy(exit_completion_fixture::path_yaw.begin(), exit_completion_fixture::path_yaw.end(), path_.yaws.begin());
+    std::copy(exit_completion_fixture::path_x.begin(), exit_completion_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(exit_completion_fixture::path_y.begin(), exit_completion_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(exit_completion_fixture::path_yaw.begin(), exit_completion_fixture::path_yaw.end(),
+      path_.yaws.begin());
     setRealPathPointCount(3); setActiveCuspDirection(1); setPathDirection(1);
     setCuspTolerances(std::make_pair(0.05, 0.10));
     seed_short_cusp_on_handoff_ = true; preserve_short_cusp_feasibility_ = true;
@@ -1242,7 +1302,8 @@ public:
     state_ = sampled_state;
     std::fill(costmap_->getCharMap(), costmap_->getCharMap() +
       costmap_->getSizeInCellsX() * costmap_->getSizeInCellsY(), 0);
-    EXPECT_FALSE(tryExtendedShortCuspContinuation(true));  // Never restart delay after invalidation.
+    // Never restart delay after invalidation.
+    EXPECT_FALSE(tryExtendedShortCuspContinuation(true));
     requestShortCuspSeed();
     ASSERT_TRUE(tryExtendedShortCuspContinuation(true));
     setActiveCuspDirection(0);
@@ -1270,11 +1331,16 @@ public:
     setInitialSteering(sampled_failure_fixture::steering[0]);
     setInitialConditionedSteering(sampled_failure_fixture::steering[1]);
     path_.reset(sampled_failure_fixture::path_x.size());
-    std::copy(sampled_failure_fixture::path_x.begin(), sampled_failure_fixture::path_x.end(), path_.x.begin());
-    std::copy(sampled_failure_fixture::path_y.begin(), sampled_failure_fixture::path_y.end(), path_.y.begin());
-    std::copy(sampled_failure_fixture::path_yaw.begin(), sampled_failure_fixture::path_yaw.end(), path_.yaws.begin());
-    std::copy(sampled_failure_fixture::warm_vx.begin(), sampled_failure_fixture::warm_vx.end(), control_sequence_.vx.begin());
-    std::copy(sampled_failure_fixture::warm_wz.begin(), sampled_failure_fixture::warm_wz.end(), control_sequence_.wz.begin());
+    std::copy(sampled_failure_fixture::path_x.begin(), sampled_failure_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(sampled_failure_fixture::path_y.begin(), sampled_failure_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(sampled_failure_fixture::path_yaw.begin(), sampled_failure_fixture::path_yaw.end(),
+      path_.yaws.begin());
+    std::copy(sampled_failure_fixture::warm_vx.begin(), sampled_failure_fixture::warm_vx.end(),
+      control_sequence_.vx.begin());
+    std::copy(sampled_failure_fixture::warm_wz.begin(), sampled_failure_fixture::warm_wz.end(),
+      control_sequence_.wz.begin());
     setRealPathPointCount(2); setActiveCuspDirection(1); setPathDirection(1);
     seed_short_cusp_on_handoff_ = true; preserve_short_cusp_feasibility_ = true;
     applyControlSequenceConstraints();
@@ -1325,11 +1391,16 @@ public:
     setInitialSteering(warm_start_fixture::steering[0]);
     setInitialConditionedSteering(warm_start_fixture::steering[1]);
     path_.reset(warm_start_fixture::path_x.size());
-    std::copy(warm_start_fixture::path_x.begin(), warm_start_fixture::path_x.end(), path_.x.begin());
-    std::copy(warm_start_fixture::path_y.begin(), warm_start_fixture::path_y.end(), path_.y.begin());
-    std::copy(warm_start_fixture::path_yaw.begin(), warm_start_fixture::path_yaw.end(), path_.yaws.begin());
-    std::copy(warm_start_fixture::warm_vx.begin(), warm_start_fixture::warm_vx.end(), control_sequence_.vx.begin());
-    std::copy(warm_start_fixture::warm_wz.begin(), warm_start_fixture::warm_wz.end(), control_sequence_.wz.begin());
+    std::copy(warm_start_fixture::path_x.begin(), warm_start_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(warm_start_fixture::path_y.begin(), warm_start_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(warm_start_fixture::path_yaw.begin(), warm_start_fixture::path_yaw.end(),
+      path_.yaws.begin());
+    std::copy(warm_start_fixture::warm_vx.begin(), warm_start_fixture::warm_vx.end(),
+      control_sequence_.vx.begin());
+    std::copy(warm_start_fixture::warm_wz.begin(), warm_start_fixture::warm_wz.end(),
+      control_sequence_.wz.begin());
     setRealPathPointCount(4); setActiveCuspDirection(1); setPathDirection(1);
     ASSERT_TRUE(shortCuspSequenceFeasible());
     const auto warm = control_sequence_;
@@ -1373,11 +1444,16 @@ public:
     setInitialSteering(-0.10846415162086487f);
     setInitialConditionedSteering(-0.10847083479166031f);
     path_.reset(mixed_gear_fixture::path_x.size());
-    std::copy(mixed_gear_fixture::path_x.begin(), mixed_gear_fixture::path_x.end(), path_.x.begin());
-    std::copy(mixed_gear_fixture::path_y.begin(), mixed_gear_fixture::path_y.end(), path_.y.begin());
-    std::copy(mixed_gear_fixture::path_yaw.begin(), mixed_gear_fixture::path_yaw.end(), path_.yaws.begin());
-    std::copy(mixed_gear_fixture::vx.begin(), mixed_gear_fixture::vx.end(), control_sequence_.vx.begin());
-    std::copy(mixed_gear_fixture::wz.begin(), mixed_gear_fixture::wz.end(), control_sequence_.wz.begin());
+    std::copy(mixed_gear_fixture::path_x.begin(), mixed_gear_fixture::path_x.end(),
+      path_.x.begin());
+    std::copy(mixed_gear_fixture::path_y.begin(), mixed_gear_fixture::path_y.end(),
+      path_.y.begin());
+    std::copy(mixed_gear_fixture::path_yaw.begin(), mixed_gear_fixture::path_yaw.end(),
+      path_.yaws.begin());
+    std::copy(mixed_gear_fixture::vx.begin(), mixed_gear_fixture::vx.end(),
+      control_sequence_.vx.begin());
+    std::copy(mixed_gear_fixture::wz.begin(), mixed_gear_fixture::wz.end(),
+      control_sequence_.wz.begin());
     setRealPathPointCount(3); setActiveCuspDirection(-1); setPathDirection(-1);
     EXPECT_GT(xt::amax(control_sequence_.vx)(), 0.07f);
     EXPECT_FALSE(shortCuspSequenceFeasible());
@@ -1513,7 +1589,8 @@ public:
     EXPECT_THROW(enforceShortCuspMeanFeasibility(), nav2_core::FailedToMakeProgress);
   }
 
-  bool recordedShortCuspSeed(bool enabled, int gear, size_t real = 2,
+  bool recordedShortCuspSeed(
+    bool enabled, int gear, size_t real = 2,
     float yaw_offset = 0.0f, bool closer_handoff = false)
   {
     seed_short_cusp_on_handoff_ = enabled;
@@ -1604,20 +1681,23 @@ public:
     EXPECT_EQ(critics_data_.active_cusp_direction, gear);
   }
 
-  bool conditionForTest(bool enabled, int gear, size_t real, float a, float b,
-    xt::xtensor<float, 1> & weights, float forward_cost = 0.0f, int cusp_gear = 0) {
+  bool conditionForTest(
+    bool enabled, int gear, size_t real, float a, float b,
+    xt::xtensor<float, 1> & weights, float forward_cost = 0.0f, int cusp_gear = 0)
+  {
     condition_control_on_path_direction_ = enabled;
     settings_.shift_control_sequence = true;settings_.temperature = 0.3f;
     path_.reset(2);path_.x = {0.0f, 0.1f * gear};path_.y.fill(0);path_.yaws.fill(0);
-    critics_data_.real_path_point_count = real;state_.reset(2,2);
+    critics_data_.real_path_point_count = real;state_.reset(2, 2);
     setActiveCuspDirection(cusp_gear);
-    state_.cvx(0,0) = -a;state_.cvx(1,0) = -b;
-    state_.cvx(0,1) = a;state_.cvx(1,1) = b;
-    costs_ = {forward_cost,0.0f};
+    state_.cvx(0, 0) = -a;state_.cvx(1, 0) = -b;
+    state_.cvx(0, 1) = a;state_.cvx(1, 1) = b;
+    costs_ = {forward_cost, 0.0f};
     return conditionControlExponents(weights);
   }
 
-  bool terminalConditionForTest(bool enabled, int gear, float along,
+  bool terminalConditionForTest(
+    bool enabled, int gear, float along,
     xt::xtensor<float, 1> & weights)
   {
     condition_terminal_path_direction_ = enabled;
@@ -1628,21 +1708,23 @@ public:
     return conditionForTest(true, 1, 1, 0.02f, -0.02f, weights);
   }
 
-  bool filteredConditionForTest(int gear, xt::xtensor<float, 1> & weights) {
+  bool filteredConditionForTest(int gear, xt::xtensor<float, 1> & weights)
+  {
     condition_control_on_path_direction_ = true;
     smooth_control_sequence_ = true;
     settings_.shift_control_sequence = true;settings_.temperature = 0.3f;
     path_.reset(2);path_.x = {0.0f, 0.1f * gear};path_.y.fill(0);path_.yaws.fill(0);
-    critics_data_.real_path_point_count = 2;state_.reset(2,41);
-    for (auto & h : control_history_) {h = {0.0f,0.0f,0.0f};}
+    critics_data_.real_path_point_count = 2;state_.reset(2, 41);
+    for (auto & h : control_history_) {h = {0.0f, 0.0f, 0.0f};}
     xt::view(state_.cvx, 0, xt::all()).fill(-0.02f * gear);
-    state_.cvx(0,1) = 0.0373f * gear;
+    state_.cvx(0, 1) = 0.0373f * gear;
     xt::view(state_.cvx, 1, xt::all()).fill(0.01f * gear);
-    costs_ = {0.0f,0.0f};
+    costs_ = {0.0f, 0.0f};
     return conditionControlExponents(weights);
   }
 
-  bool brakingConditionForTest(bool enabled, int gear, float measured,
+  bool brakingConditionForTest(
+    bool enabled, int gear, float measured,
     float candidate, xt::xtensor<float, 1> & weights)
   {
     condition_control_on_path_direction_ = true;
@@ -1650,16 +1732,17 @@ public:
     smooth_control_sequence_ = true;
     settings_.shift_control_sequence = true;settings_.temperature = 0.3f;
     path_.reset(2);path_.x = {0.0f, .1f * gear};path_.y.fill(0);path_.yaws.fill(0);
-    critics_data_.real_path_point_count = 2;state_.reset(2,41);
+    critics_data_.real_path_point_count = 2;state_.reset(2, 41);
     state_.speed.linear.x = measured;
-    for (auto & h : control_history_) {h = {0.0f,0.0f,0.0f};}
+    for (auto & h : control_history_) {h = {0.0f, 0.0f, 0.0f};}
     xt::view(state_.cvx, 0, xt::all()).fill(candidate);
     xt::view(state_.cvx, 1, xt::all()).fill(.01f * gear);
-    costs_ = {0.0f,1.0f};
+    costs_ = {0.0f, 1.0f};
     return conditionControlExponents(weights);
   }
 
-  bool carriedGearHistoryForTest(int gear, bool clear_history,
+  bool carriedGearHistoryForTest(
+    int gear, bool clear_history,
     xt::xtensor<float, 1> & weights)
   {
     condition_control_on_path_direction_ = true;
@@ -1667,12 +1750,12 @@ public:
     settings_.shift_control_sequence = true;settings_.temperature = 0.3f;
     path_.reset(2);path_.x = {0.0f, 0.1f * gear};
     path_.y.fill(0);path_.yaws.fill(0);
-    critics_data_.real_path_point_count = 2;state_.reset(2,41);
+    critics_data_.real_path_point_count = 2;state_.reset(2, 41);
     for (auto & h : control_history_) {
       h = {clear_history ? 0.0f : -0.2f * gear, 0.0f, 0.0f};
     }
     state_.cvx.fill(0.01f * gear);
-    costs_ = {0.0f,0.0f};
+    costs_ = {0.0f, 0.0f};
     return conditionControlExponents(weights);
   }
 
@@ -1760,18 +1843,18 @@ public:
   {
     control_sequence_.vx.fill(0.3f);
     control_sequence_.wz.fill(0.0f);
-    for (auto & h : control_history_) {h = {-0.003f,0.0f,0.0f};}
+    for (auto & h : control_history_) {h = {-0.003f, 0.0f, 0.0f};}
     setRealPathPointCount(2);
     setActiveCuspDirection(-1);
     geometry_msgs::msg::PoseStamped pose;
     pose.pose.orientation.w = 1.0;pose.pose.position.x = 1.25;
     geometry_msgs::msg::Twist speed;speed.linear.x = physical_speed;
-    nav_msgs::msg::Path plan;plan.poses = {pose,pose};
+    nav_msgs::msg::Path plan;plan.poses = {pose, pose};
     plan.poses[1].pose.position.x -= 0.1;
-    auto command = evalControl(pose,speed,plan,plan.poses.back().pose,nullptr);
-    EXPECT_DOUBLE_EQ(state_.pose.pose.position.x,1.25);
-    EXPECT_DOUBLE_EQ(state_.speed.linear.x,physical_speed);
-    EXPECT_NEAR(settings_.constraints.vx_max,0.1f,1e-6);
+    auto command = evalControl(pose, speed, plan, plan.poses.back().pose, nullptr);
+    EXPECT_DOUBLE_EQ(state_.pose.pose.position.x, 1.25);
+    EXPECT_DOUBLE_EQ(state_.speed.linear.x, physical_speed);
+    EXPECT_NEAR(settings_.constraints.vx_max, 0.1f, 1e-6);
     return command;
   }
 
@@ -2018,7 +2101,8 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, -0.010f, 1e-4);
 
-    // 1d. Intermediate cusp outside approach radius (30 cm away > 15 cm radius) -> floor NOT applied
+    // 1d. Intermediate cusp outside approach radius (30 cm away > 15 cm radius) -> floor NOT
+    // applied
     setActiveCuspDirection(1);
     path_.reset(2);
     path_.x = {0.0f, 0.30f};
@@ -2030,7 +2114,8 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.010f, 1e-4);
 
-    // 2. Final segment (active_cusp_direction_ == 0) within approach radius (10 cm away) floored forward
+    // 2. Final segment (active_cusp_direction_ == 0) within approach radius (10 cm away) floored
+    // forward
     active_cusp_direction_ = 0;
     path_direction_ = 1;
     state_.pose.pose.position.x = 0.0;
@@ -2053,7 +2138,8 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, -0.015f, 1e-4);  // Do not floor away from the goal.
 
-    // 4. Final segment inside terminal radius (2 cm away <= 4 cm radius) -> floor released to decelerate/stop
+    // 4. Final segment inside terminal radius (2 cm away <= 4 cm radius) -> floor released to
+    // decelerate/stop
     path_direction_ = 1;
     state_.pose.pose.position.x = 0.08;
     state_.pose.pose.position.y = 0.0;
@@ -2063,7 +2149,8 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
 
-    // 5. Final segment outside approach radius (30 cm away > 15 cm radius) -> floor NOT applied (normal MPPI)
+    // 5. Final segment outside approach radius (30 cm away > 15 cm radius) -> floor NOT applied
+    // (normal MPPI)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
     goal_.position.x = 0.30;
@@ -2072,15 +2159,17 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.020f, 1e-4);
 
-    // 6. Final segment within approach radius with negative noise -> directional floor forces positive approach (no chatter)
+    // 6. Final segment within approach radius with negative noise -> directional floor forces
+    // positive approach (no chatter)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
-    goal_.position.x = 0.10; // 10 cm <= 15 cm approach radius
+    goal_.position.x = 0.10;  // 10 cm <= 15 cm approach radius
     control_sequence_.vx.fill(-0.005f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    // 7. Final segment within approach radius, but heading misaligned to path (> 30 deg) -> floor NOT applied (let MPPI steer)
+    // 7. Final segment within approach radius, but heading misaligned to path (> 30 deg) -> floor
+    // NOT applied (let MPPI steer)
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
     path_.reset(2);
@@ -2088,7 +2177,7 @@ public:
     path_.y.fill(0.0f);
     path_.yaws.fill(0.0f);
     tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, 1.0); // ~57 deg misaligned from path heading (0.0)
+    q.setRPY(0.0, 0.0, 1.0);  // ~57 deg misaligned from path heading (0.0)
     state_.pose.pose.orientation = tf2::toMsg(q);
     goal_.position.x = 0.10;
     goal_.position.y = 0.0;
@@ -2097,20 +2186,22 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.015f, 1e-4);
 
-    // 8. Final segment with reverse path_direction_ (-1) but goal is in front and MPPI commands forward creep (+0.020f)
+    // 8. Final segment with reverse path_direction_ (-1) but goal is in front and MPPI commands
+    // forward creep (+0.020f)
     // -> effective_direction aligns forward, floored to +0.050f (never inverted to -0.050f)
     path_direction_ = -1;
     state_.pose.pose.position.x = 0.0;
     state_.pose.pose.position.y = 0.0;
     state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
     path_.yaws.fill(0.0f);
-    goal_.position.x = 0.10; // in front
+    goal_.position.x = 0.10;  // in front
     goal_.position.y = 0.0;
     control_sequence_.vx.fill(0.020f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_GE(cmd.twist.linear.x, 0.050f);
 
-    // 9. Final segment with reverse path_direction_ (-1) and MPPI commands deliberate forward maneuver (+0.180f)
+    // 9. Final segment with reverse path_direction_ (-1) and MPPI commands deliberate forward
+    // maneuver (+0.180f)
     // -> preserved without modification (never inverted to -0.050f)
     control_sequence_.vx.fill(0.180f);
     cmd = getControlFromSequenceAsTwistWrapper();
@@ -2123,7 +2214,7 @@ public:
     state_.pose.pose.orientation = tf2::toMsg(tf2::Quaternion::getIdentity());
     path_.yaws.fill(0.0f);
     goal_.position.x = 0.0;
-    goal_.position.y = 0.10; // 10 cm directly abeam (d_long = 0.0 <= 0.02m deadband)
+    goal_.position.y = 0.10;  // 10 cm directly abeam (d_long = 0.0 <= 0.02m deadband)
 
     // 10a. Commanded forward creep (+0.015f) -> floored to +0.050f
     control_sequence_.vx.fill(0.015f);
@@ -2135,7 +2226,8 @@ public:
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_LE(cmd.twist.linear.x, -0.050f);
 
-    // 10c. Commanded standstill (0.0f) with goal abeam -> preserved at 0.0f (never floored to +/-0.050f)
+    // 10c. Commanded standstill (0.0f) with goal abeam -> preserved at 0.0f (never floored to
+    // +/-0.050f)
     control_sequence_.vx.fill(0.0f);
     cmd = getControlFromSequenceAsTwistWrapper();
     EXPECT_NEAR(cmd.twist.linear.x, 0.0f, 1e-4);
@@ -2208,7 +2300,8 @@ TEST(OptimizerTests, ExitCuspContinuationPreservesHorizonAndNeverRestartsDelay)
   node->declare_parameter("mppic.AckermannConstraints.predict_steering_conditioning", true);
   node->declare_parameter("mppic.AckermannConstraints.steering_actuator_rate", 1.0);
   node->declare_parameter("mppic.critics", std::vector<std::string>{"PathFollowCritic"});
-  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("exit_completion_map", "", "exit_completion_map", true);
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("exit_completion_map", "",
+    "exit_completion_map", true);
   rclcpp_lifecycle::State lifecycle; cm->on_configure(lifecycle);
   cm->getLayeredCostmap()->resizeMap(80, 80, 0.025, -1.0, -1.0);
   std::fill(cm->getCostmap()->getCharMap(), cm->getCostmap()->getCharMap() + 6400, 0);
@@ -2338,7 +2431,8 @@ TEST(OptimizerTests, RecordedEmittedMeanMustHonorEffectiveCuspGate)
   node->declare_parameter("mppic.inversion_xy_tolerance", 0.05);
   node->declare_parameter("mppic.inversion_yaw_tolerance", 0.10);
   node->declare_parameter("mppic.critics", std::vector<std::string>{});
-  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("effective_gate_map", "", "effective_gate_map", true);
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("effective_gate_map", "",
+    "effective_gate_map", true);
   cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   rclcpp_lifecycle::State lifecycle; cm->on_configure(lifecycle);
   cm->getLayeredCostmap()->resizeMap(80, 80, 0.05, -1.0, -1.0);
@@ -2725,7 +2819,8 @@ TEST(OptimizerTests, AckermannCommandRemainsFeasibleAfterSmoothing)
   node->declare_parameter("mppic.vx_max", rclcpp::ParameterValue(0.5));
   node->declare_parameter("mppic.vx_min", rclcpp::ParameterValue(-0.3));
   node->declare_parameter("mppic.motion_model", rclcpp::ParameterValue("Ackermann"));
-  node->declare_parameter("mppic.AckermannConstraints.min_turning_r", rclcpp::ParameterValue(0.401));
+  node->declare_parameter("mppic.AckermannConstraints.min_turning_r",
+    rclcpp::ParameterValue(0.401));
   auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler parameters(node);
@@ -2874,78 +2969,78 @@ TEST(OptimizerTests, integrateStateVelocitiesTests)
 }
 
 TEST(OptimizerTests, DirectionConditioningIsOptInAndUsesCommandOffset) {
- OptimizerTester o;xt::xtensor<float,1> w={0.2f,0.8f};
- EXPECT_FALSE(o.conditionForTest(false,1,2,0.02f,-0.02f,w));
- EXPECT_FLOAT_EQ(w(0),0.2f);EXPECT_FLOAT_EQ(w(1),0.8f);
- EXPECT_TRUE(o.conditionForTest(true,1,2,0.02f,-0.02f,w));
- EXPECT_FLOAT_EQ(w(0),1.0f);EXPECT_FLOAT_EQ(w(1),0.0f);
- EXPECT_TRUE(o.conditionForTest(true,-1,2,0.02f,-0.02f,w));
- EXPECT_FLOAT_EQ(w(0),0.0f);EXPECT_FLOAT_EQ(w(1),1.0f);
+ OptimizerTester o;xt::xtensor<float, 1> w = {0.2f, 0.8f};
+ EXPECT_FALSE(o.conditionForTest(false, 1, 2, 0.02f, -0.02f, w));
+ EXPECT_FLOAT_EQ(w(0), 0.2f);EXPECT_FLOAT_EQ(w(1), 0.8f);
+ EXPECT_TRUE(o.conditionForTest(true, 1, 2, 0.02f, -0.02f, w));
+ EXPECT_FLOAT_EQ(w(0), 1.0f);EXPECT_FLOAT_EQ(w(1), 0.0f);
+ EXPECT_TRUE(o.conditionForTest(true, -1, 2, 0.02f, -0.02f, w));
+ EXPECT_FLOAT_EQ(w(0), 0.0f);EXPECT_FLOAT_EQ(w(1), 1.0f);
 }
 TEST(OptimizerTests, DirectionConditioningIgnoresGhostsAndFailsWithoutSamples) {
- OptimizerTester o;xt::xtensor<float,1> w={0.2f,0.8f};
- EXPECT_FALSE(o.conditionForTest(true,1,1,0.02f,-0.02f,w));
- EXPECT_FLOAT_EQ(w(0),0.2f);EXPECT_FLOAT_EQ(w(1),0.8f);
- EXPECT_THROW(o.conditionForTest(true,1,2,-0.02f,-0.01f,w),nav2_core::NoValidControl);
+ OptimizerTester o;xt::xtensor<float, 1> w = {0.2f, 0.8f};
+ EXPECT_FALSE(o.conditionForTest(true, 1, 1, 0.02f, -0.02f, w));
+ EXPECT_FLOAT_EQ(w(0), 0.2f);EXPECT_FLOAT_EQ(w(1), 0.8f);
+ EXPECT_THROW(o.conditionForTest(true, 1, 2, -0.02f, -0.01f, w), nav2_core::NoValidControl);
 }
 TEST(OptimizerTests, DirectionConditioningRenormalizesUnderflowedEligibleWeights) {
- OptimizerTester o;xt::xtensor<float,1> w={0.0f,1.0f};
- EXPECT_TRUE(o.conditionForTest(true,1,2,0.02f,-0.02f,w,10000.0f));
- EXPECT_FLOAT_EQ(w(0),1.0f);EXPECT_FLOAT_EQ(w(1),0.0f);
+ OptimizerTester o;xt::xtensor<float, 1> w = {0.0f, 1.0f};
+ EXPECT_TRUE(o.conditionForTest(true, 1, 2, 0.02f, -0.02f, w, 10000.0f));
+ EXPECT_FLOAT_EQ(w(0), 1.0f);EXPECT_FLOAT_EQ(w(1), 0.0f);
 }
 
 TEST(OptimizerTests, DirectionConditioningRejectsNonFiniteEligibleCostWithFastMath) {
- OptimizerTester o;xt::xtensor<float,1> w={0.0f,1.0f};
- uint32_t bits=0x7fc00000u;float nan;std::memcpy(&nan,&bits,sizeof(nan));
- EXPECT_THROW(o.conditionForTest(true,1,2,0.02f,-0.02f,w,nan),nav2_core::NoValidControl);
+ OptimizerTester o;xt::xtensor<float, 1> w = {0.0f, 1.0f};
+ uint32_t bits = 0x7fc00000u;float nan;std::memcpy(&nan, &bits, sizeof(nan));
+ EXPECT_THROW(o.conditionForTest(true, 1, 2, 0.02f, -0.02f, w, nan), nav2_core::NoValidControl);
 }
 
 TEST(OptimizerTests, DirectionBrakingIsOptInAndRequiresMeasuredDeceleration) {
   for (int gear : {-1, 1}) {
-    OptimizerTester o;xt::xtensor<float,1> w={.5f,.5f};
-    EXPECT_TRUE(o.brakingConditionForTest(false,gear,-.06f*gear,-.01f*gear,w));
-    EXPECT_FLOAT_EQ(w(0),0.0f);
-    EXPECT_TRUE(o.brakingConditionForTest(true,gear,-.06f*gear,-.01f*gear,w));
-    EXPECT_GT(w(0),.9f);
-    for (float measured : {0.0f,.06f*gear}) {
-      EXPECT_TRUE(o.brakingConditionForTest(true,gear,measured,-.01f*gear,w));
-      EXPECT_FLOAT_EQ(w(0),0.0f);
+    OptimizerTester o;xt::xtensor<float, 1> w = {.5f, .5f};
+    EXPECT_TRUE(o.brakingConditionForTest(false, gear, -.06f * gear, -.01f * gear, w));
+    EXPECT_FLOAT_EQ(w(0), 0.0f);
+    EXPECT_TRUE(o.brakingConditionForTest(true, gear, -.06f * gear, -.01f * gear, w));
+    EXPECT_GT(w(0), .9f);
+    for (float measured : {0.0f, .06f * gear}) {
+      EXPECT_TRUE(o.brakingConditionForTest(true, gear, measured, -.01f * gear, w));
+      EXPECT_FLOAT_EQ(w(0), 0.0f);
     }
-    EXPECT_TRUE(o.brakingConditionForTest(true,gear,-.06f*gear,-.12f*gear,w));
-    EXPECT_FLOAT_EQ(w(0),0.0f);
+    EXPECT_TRUE(o.brakingConditionForTest(true, gear, -.06f * gear, -.12f * gear, w));
+    EXPECT_FLOAT_EQ(w(0), 0.0f);
   }
 }
 
 TEST(OptimizerTests, DirectionConditioningRejectsTemporalFilterCancellation) {
- OptimizerTester o;xt::xtensor<float,1> w={0.5f,0.5f};
- EXPECT_TRUE(o.filteredConditionForTest(1,w));
- EXPECT_FLOAT_EQ(w(0),0.0f);EXPECT_FLOAT_EQ(w(1),1.0f);
- EXPECT_TRUE(o.filteredConditionForTest(-1,w));
- EXPECT_FLOAT_EQ(w(0),0.0f);EXPECT_FLOAT_EQ(w(1),1.0f);
+ OptimizerTester o;xt::xtensor<float, 1> w = {0.5f, 0.5f};
+ EXPECT_TRUE(o.filteredConditionForTest(1, w));
+ EXPECT_FLOAT_EQ(w(0), 0.0f);EXPECT_FLOAT_EQ(w(1), 1.0f);
+ EXPECT_TRUE(o.filteredConditionForTest(-1, w));
+ EXPECT_FLOAT_EQ(w(0), 0.0f);EXPECT_FLOAT_EQ(w(1), 1.0f);
 }
 
 TEST(OptimizerTests, OldGearHistoryCanRejectEveryOtherwiseCorrectNewGearSample) {
   // A sufficient synthetic mechanism, not a reconstruction of live history.
   // Three past samples contribute 107/231 of the shifted SG stencil: old
   // -0.2 m/s commands outweigh new +0.01 m/s controls in either gear.
-  OptimizerTester o;xt::xtensor<float,1> w={0.5f,0.5f};
-  for (int gear : {-1,1}) {
-    EXPECT_THROW(o.carriedGearHistoryForTest(gear,false,w),nav2_core::NoValidControl);
-    EXPECT_TRUE(o.carriedGearHistoryForTest(gear,true,w));
-    EXPECT_FLOAT_EQ(w(0),1.0f);EXPECT_FLOAT_EQ(w(1),1.0f);
+  OptimizerTester o;xt::xtensor<float, 1> w = {0.5f, 0.5f};
+  for (int gear : {-1, 1}) {
+    EXPECT_THROW(o.carriedGearHistoryForTest(gear, false, w), nav2_core::NoValidControl);
+    EXPECT_TRUE(o.carriedGearHistoryForTest(gear, true, w));
+    EXPECT_FLOAT_EQ(w(0), 1.0f);EXPECT_FLOAT_EQ(w(1), 1.0f);
   }
 }
 
 TEST(OptimizerTests, PrunedActiveCuspRetainsGearButFinalSingletonDoesNot) {
-  OptimizerTester o;xt::xtensor<float,1> w={0.5f,0.5f};
+  OptimizerTester o;xt::xtensor<float, 1> w = {0.5f, 0.5f};
   // Recorded failures leave a real singleton plus ghosts. Opposite commands
   // cancel unless the original active cusp's gear survives pruning. Ghost
   // geometry deliberately points forward while the real segment is reverse.
-  EXPECT_TRUE(o.conditionForTest(true,1,1,0.02f,-0.02f,w,0.0f,-1));
-  EXPECT_FLOAT_EQ(w(0),0.0f);EXPECT_FLOAT_EQ(w(1),1.0f);
-  w={0.5f,0.5f};
-  EXPECT_FALSE(o.conditionForTest(true,1,1,0.02f,-0.02f,w));
-  EXPECT_FLOAT_EQ(w(0),0.5f);EXPECT_FLOAT_EQ(w(1),0.5f);
+  EXPECT_TRUE(o.conditionForTest(true, 1, 1, 0.02f, -0.02f, w, 0.0f, -1));
+  EXPECT_FLOAT_EQ(w(0), 0.0f);EXPECT_FLOAT_EQ(w(1), 1.0f);
+  w = {0.5f, 0.5f};
+  EXPECT_FALSE(o.conditionForTest(true, 1, 1, 0.02f, -0.02f, w));
+  EXPECT_FLOAT_EQ(w(0), 0.5f);EXPECT_FLOAT_EQ(w(1), 0.5f);
 }
 
 TEST(OptimizerTests, FinalSingletonGearIsOptInAndReleasesAfterOvershoot)
@@ -2971,35 +3066,38 @@ TEST(OptimizerTests, FinalSingletonGearIsOptInAndReleasesAfterOvershoot)
 TEST(OptimizerTests, WrongWarmGearRetriesWithinExistingBudgetWithoutResettingPlant)
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("gear_retry_test");
-  node->declare_parameter("controller_frequency",20.0);
-  node->declare_parameter("mppic.model_dt",0.05);
-  node->declare_parameter("mppic.time_steps",41);
-  node->declare_parameter("mppic.vx_std",0.01);
-  node->declare_parameter("mppic.gamma",0.0);
-  node->declare_parameter("mppic.condition_control_on_path_direction",true);
-  node->declare_parameter("mppic.retry_attempt_limit",1);
-  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("retry_costmap","","retry_costmap",true);
+  node->declare_parameter("controller_frequency", 20.0);
+  node->declare_parameter("mppic.model_dt", 0.05);
+  node->declare_parameter("mppic.time_steps", 41);
+  node->declare_parameter("mppic.vx_std", 0.01);
+  node->declare_parameter("mppic.gamma", 0.0);
+  node->declare_parameter("mppic.condition_control_on_path_direction", true);
+  node->declare_parameter("mppic.retry_attempt_limit", 1);
+  auto cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("retry_costmap", "", "retry_costmap",
+    true);
   cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
   ParametersHandler parameters(node);rclcpp_lifecycle::State state;cm->on_configure(state);
   cm->pause();
   cm->getCostmap()->resizeMap(160, 160, 0.05, -3.0, -3.0);
   std::fill_n(cm->getCostmap()->getCharMap(), 25600, nav2_costmap_2d::FREE_SPACE);
-  OptimizerTester optimizer;optimizer.initialize(node,"mppic",cm,&parameters);
-  optimizer.setSpeedLimit(0.1,false);
+  OptimizerTester optimizer;optimizer.initialize(node, "mppic", cm, &parameters);
+  optimizer.setSpeedLimit(0.1, false);
   EXPECT_NO_THROW({
     auto cmd = optimizer.recoverWrongWarmGear(0.0f);
-    EXPECT_LT(cmd.twist.linear.x,0.0);
-    EXPECT_LE(std::abs(cmd.twist.linear.x),0.1);
+    EXPECT_LT(cmd.twist.linear.x, 0.0);
+    EXPECT_LE(std::abs(cmd.twist.linear.x), 0.1);
   });
   // Forward physical velocity cannot reverse within one acceleration-limited
   // step. Even a fresh batch must fail; never reset the measured plant speed.
-  EXPECT_THROW(optimizer.recoverWrongWarmGear(0.5f),nav2_core::NoValidControl);
+  EXPECT_THROW(optimizer.recoverWrongWarmGear(0.5f), nav2_core::NoValidControl);
 }
 
 TEST(OptimizerTests, ActiveCuspMetadataReachesCriticsAndClearsOnFinalSegment)
 {
   OptimizerTester optimizer;
-  for (int gear : {0, -1, 1, 0}) {optimizer.checkCuspCriticMetadata(gear);}
+  for (int gear : {0, -1, 1, 0}) {
+    optimizer.checkCuspCriticMetadata(gear);
+                                                                          }
 }
 
 TEST(OptimizerTests, ExactFinalCollisionCaptureIsOptionalAndDoesNotAlterCommands)
@@ -3122,7 +3220,8 @@ TEST(OptimizerTests, FailedBatchCaptureOccursBeforeControlUpdateAndPreservesFail
   if (after_text) {
     const auto after = mppi::diagnostic::minimumCaptureStamp(after_text);
     ASSERT_TRUE(after && std::isfinite(*after) && *after > 123.0);
-    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr), nav2_core::NoValidControl);
+    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr),
+      nav2_core::NoValidControl);
     EXPECT_FALSE(std::filesystem::exists(sidecar));
     pose.header.stamp.sec = static_cast<int32_t>(std::ceil(*after)) + 1;
   }
@@ -3130,11 +3229,13 @@ TEST(OptimizerTests, FailedBatchCaptureOccursBeforeControlUpdateAndPreservesFail
   if (stationary_only && std::string(stationary_only) == "1") {
     // Filtered failures must still propagate, without consuming the one-shot.
     speed.linear.x = 0.1;
-    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr), nav2_core::NoValidControl);
+    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr),
+      nav2_core::NoValidControl);
     EXPECT_FALSE(std::filesystem::exists(sidecar));
     speed.linear.x = 0.0;
     speed.angular.z = 0.1;
-    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr), nav2_core::NoValidControl);
+    EXPECT_THROW(optimizer.evalControl(pose, speed, plan, goal, nullptr),
+      nav2_core::NoValidControl);
     EXPECT_FALSE(std::filesystem::exists(sidecar));
     speed.angular.z = 0.0;
   }
@@ -3211,8 +3312,11 @@ TEST(OptimizerTests, FailedBatchCaptureOccursBeforeControlUpdateAndPreservesFail
 
 TEST(OptimizerTests, DepartureRejectionCapturesActualLockedInputsWithoutChangingPolicy)
 {
-  const auto file = std::filesystem::temp_directory_path() / "office_departure_rejection_test.jsonl";
-  for (int k = 0; k < 8; ++k) {std::filesystem::remove(file.string() + "." + std::to_string(k) + ".json");}
+  const auto file = std::filesystem::temp_directory_path() /
+    "office_departure_rejection_test.jsonl";
+  for (int k = 0; k < 8; ++k) {
+    std::filesystem::remove(file.string() + "." + std::to_string(k) + ".json");
+  }
   const std::string path = file.string();
   unsetenv("MPPI_DEPARTURE_REJECTION_TRACE_PATH");
   unsetenv("MPPI_CUSP_MEAN_TRACE_PATH");
@@ -3225,9 +3329,11 @@ TEST(OptimizerTests, DepartureRejectionCapturesActualLockedInputsWithoutChanging
   node->declare_parameter("mppic.AckermannConstraints.min_turning_r", 0.401);
   node->declare_parameter("mppic.AckermannConstraints.predict_steering_conditioning", true);
   node->declare_parameter("mppic.AckermannConstraints.steering_actuator_rate", 1.0);
-  auto cm = std::make_shared<SettledTestCostmap>("departure_capture_map", "", "departure_capture_map", false);
+  auto cm = std::make_shared<SettledTestCostmap>("departure_capture_map", "",
+    "departure_capture_map", false);
   cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("footprint", std::string("[[-0.05,-0.151],[0.276,-0.151],[0.276,0.151],[-0.05,0.151]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string("[[-0.05,-0.151],[0.276,-0.151],[0.276,0.151],[-0.05,0.151]]")));
   rclcpp_lifecycle::State lifecycle; cm->on_configure(lifecycle);
   auto * grid = cm->getCostmap(); grid->resizeMap(80, 80, 0.05, -1.0, -1.0);
   std::fill(grid->getCharMap(), grid->getCharMap() + 6400, 0);
@@ -3307,7 +3413,9 @@ TEST(OptimizerTests, DepartureRejectionCapturesActualLockedInputsWithoutChanging
   }
   EXPECT_EQ(count, 8u);
   std::set<int64_t> expected;
-  for (int sec = 2141; sec <= 2148; ++sec) {expected.insert(sec * 1000000000LL + 500000000);}
+  for (int sec = 2141; sec <= 2148; ++sec) {
+    expected.insert(sec * 1000000000LL + 500000000);
+                                                                                            }
   EXPECT_EQ(retained, expected);
   EXPECT_EQ(optimizer.departureControlsForTest().vx, before.vx);
   EXPECT_EQ(optimizer.departureControlsForTest().wz, before.wz);
@@ -3318,38 +3426,48 @@ TEST(OptimizerTests, DepartureRejectionCapturesActualLockedInputsWithoutChanging
 
 TEST(OptimizerTests, RecordedPostHandoffGuardHorizonExceedsInitializerHorizon)
 {
-  namespace f=handoff_horizon_fixture;
-  ASSERT_EQ(f::grid.size(),22500u);ASSERT_EQ(f::origin.size(),2u);
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("post_handoff_horizon");
+  namespace f = handoff_horizon_fixture;
+  ASSERT_EQ(f::grid.size(), 22500u);ASSERT_EQ(f::origin.size(), 2u);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("post_handoff_horizon");
   f::declareParameters(node);
-  auto cm=std::make_shared<SettledTestCostmap>("post_handoff_horizon_map","","post_handoff_horizon_map",false);
-  cm->set_parameter(rclcpp::Parameter("plugins",std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623438,-0.1609999928623438],[0.2859999928623438,0.1609999928623438],[-0.06000000052154064,0.1609999928623438]]")));
-  cm->set_parameter(rclcpp::Parameter("footprint_padding",0.0));
+  auto cm = std::make_shared<SettledTestCostmap>("post_handoff_horizon_map", "",
+    "post_handoff_horizon_map", false);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string(
+    "[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623"
+      "438,-0.1609999928623438],[0.2859999928623438,0.1609999928623"
+      "438],[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
   rclcpp_lifecycle::State lifecycle;cm->on_configure(lifecycle);
-  auto * grid=cm->getCostmap();grid->resizeMap(150,150,0.02,f::origin[0],f::origin[1]);
-  std::copy(f::grid.begin(),f::grid.end(),grid->getCharMap());
+  auto * grid = cm->getCostmap();grid->resizeMap(150, 150, 0.02, f::origin[0], f::origin[1]);
+  std::copy(f::grid.begin(), f::grid.end(), grid->getCharMap());
   ParametersHandler parameters(node);OptimizerTester optimizer;
-  optimizer.initialize(node,"mppi",cm,&parameters);
+  optimizer.initialize(node, "mppi", cm, &parameters);
   optimizer.testRecordedPostHandoffHorizon();
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
 TEST(OptimizerTests, RecordedLongHandoffDeliversRetainedExecutablePrefix)
 {
-  namespace f=handoff_horizon_fixture;
-  ASSERT_EQ(f::grid.size(),22500u);ASSERT_EQ(f::origin.size(),2u);
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("post_handoff_horizon");
+  namespace f = handoff_horizon_fixture;
+  ASSERT_EQ(f::grid.size(), 22500u);ASSERT_EQ(f::origin.size(), 2u);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("post_handoff_horizon");
   f::declareParameters(node);
-  auto cm=std::make_shared<SettledTestCostmap>("post_handoff_horizon_map","","post_handoff_horizon_map",false);
-  cm->set_parameter(rclcpp::Parameter("plugins",std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623438,-0.1609999928623438],[0.2859999928623438,0.1609999928623438],[-0.06000000052154064,0.1609999928623438]]")));
-  cm->set_parameter(rclcpp::Parameter("footprint_padding",0.0));
-  cm->set_parameter(rclcpp::Parameter("global_frame",std::string("odom")));
+  auto cm = std::make_shared<SettledTestCostmap>("post_handoff_horizon_map", "",
+    "post_handoff_horizon_map", false);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string(
+    "[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623"
+      "438,-0.1609999928623438],[0.2859999928623438,0.1609999928623"
+      "438],[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
+  cm->set_parameter(rclcpp::Parameter("global_frame", std::string("odom")));
   rclcpp_lifecycle::State lifecycle;cm->on_configure(lifecycle);
-  auto * grid=cm->getCostmap();grid->resizeMap(150,150,0.02,f::origin[0],f::origin[1]);
-  std::copy(f::grid.begin(),f::grid.end(),grid->getCharMap());
+  auto * grid = cm->getCostmap();grid->resizeMap(150, 150, 0.02, f::origin[0], f::origin[1]);
+  std::copy(f::grid.begin(), f::grid.end(), grid->getCharMap());
   ParametersHandler parameters(node);OptimizerTester optimizer;
-  optimizer.initialize(node,"mppi",cm,&parameters);
+  optimizer.initialize(node, "mppi", cm, &parameters);
   optimizer.testRecordedPostHandoffHorizon(true);
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
@@ -3357,58 +3475,84 @@ TEST(OptimizerTests, RecordedLongHandoffDeliversRetainedExecutablePrefix)
 
 TEST(OptimizerTests, RecordedLongPathHandoffSeedsLocalEntryWithoutChangingEndpoint)
 {
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("long_prefix_entry");
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("long_prefix_entry");
   handoff_prefix_fixture::declareParameters(node);
-  auto cm=std::make_shared<SettledTestCostmap>("long_prefix_entry_map","","long_prefix_entry_map",false);
-  cm->set_parameter(rclcpp::Parameter("global_frame",std::string("odom")));
-  cm->set_parameter(rclcpp::Parameter("plugins",std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623438,-0.1609999928623438],[0.2859999928623438,0.1609999928623438],[-0.06000000052154064,0.1609999928623438]]")));
-  cm->set_parameter(rclcpp::Parameter("footprint_padding",0.0));
+  auto cm = std::make_shared<SettledTestCostmap>("long_prefix_entry_map", "",
+    "long_prefix_entry_map", false);
+  cm->set_parameter(rclcpp::Parameter("global_frame", std::string("odom")));
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string(
+    "[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623"
+      "438,-0.1609999928623438],[0.2859999928623438,0.1609999928623"
+      "438],[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
   rclcpp_lifecycle::State lifecycle;cm->on_configure(lifecycle);
-  auto * grid=cm->getCostmap();grid->resizeMap(150,150,0.02,handoff_prefix_fixture::origin[0],handoff_prefix_fixture::origin[1]);
-  std::copy(handoff_prefix_fixture::grid.begin(),handoff_prefix_fixture::grid.end(),grid->getCharMap());
+  auto * grid = cm->getCostmap();
+    grid->resizeMap(150, 150, 0.02, handoff_prefix_fixture::origin[0],
+    handoff_prefix_fixture::origin[1]);
+  std::copy(handoff_prefix_fixture::grid.begin(), handoff_prefix_fixture::grid.end(),
+    grid->getCharMap());
   ParametersHandler parameters(node);OptimizerTester optimizer;
-  optimizer.initialize(node,"mppi",cm,&parameters);
+  optimizer.initialize(node, "mppi", cm, &parameters);
   optimizer.testRecordedLongPathLocalEntry();
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
 
 TEST(OptimizerTests, RecordedShortDepartureRejectsEarlyButClearReversePrefixesEnableSameFamily)
 {
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("retained_departure");
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("retained_departure");
   handoff_prefix_fixture::declareParameters(node);
-  auto cm=std::make_shared<SettledTestCostmap>("retained_departure_map","","retained_departure_map",false);
-  cm->set_parameter(rclcpp::Parameter("plugins",std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("global_frame",std::string("odom")));
-  cm->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623438,-0.1609999928623438],[0.2859999928623438,0.1609999928623438],[-0.06000000052154064,0.1609999928623438]]")));
-  cm->set_parameter(rclcpp::Parameter("footprint_padding",0.0));
+  auto cm = std::make_shared<SettledTestCostmap>("retained_departure_map", "",
+    "retained_departure_map", false);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("global_frame", std::string("odom")));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string(
+    "[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623"
+      "438,-0.1609999928623438],[0.2859999928623438,0.1609999928623"
+      "438],[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
   rclcpp_lifecycle::State lifecycle;cm->on_configure(lifecycle);
-  auto * grid=cm->getCostmap();grid->resizeMap(150,150,0.02,retained_departure_fixture::origin[0],retained_departure_fixture::origin[1]);
-  std::copy(retained_departure_fixture::grid.begin(),retained_departure_fixture::grid.end(),grid->getCharMap());
+  auto * grid = cm->getCostmap();
+    grid->resizeMap(150, 150, 0.02, retained_departure_fixture::origin[0],
+    retained_departure_fixture::origin[1]);
+  std::copy(retained_departure_fixture::grid.begin(), retained_departure_fixture::grid.end(),
+    grid->getCharMap());
   ParametersHandler parameters(node);OptimizerTester optimizer;
-  optimizer.initialize(node,"mppi",cm,&parameters);
+  optimizer.initialize(node, "mppi", cm, &parameters);
   optimizer.testRecordedRetainedDeparture();
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
 
 TEST(OptimizerTests, RecordedBlockedForwardEntryRetainsClearHoldAndRejectsCornerCut)
 {
-  ASSERT_EQ(blocked_forward_entry_fixture::origin.size(),2u);
-  auto node=std::make_shared<rclcpp_lifecycle::LifecycleNode>("blocked_forward_entry");
+  ASSERT_EQ(blocked_forward_entry_fixture::origin.size(), 2u);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("blocked_forward_entry");
   handoff_prefix_fixture::declareParameters(node);
-  auto cm=std::make_shared<SettledTestCostmap>("blocked_forward_map","","blocked_forward_map",false);
-  ASSERT_DOUBLE_EQ(node->get_parameter("mppi.AckermannConstraints.steering_actuator_rate").as_double(),1.0);
-  ASSERT_DOUBLE_EQ(node->get_parameter("mppi.AckermannConstraints.response_radius_offset").as_double(),0.093);
-  cm->set_parameter(rclcpp::Parameter("plugins",std::vector<std::string>{}));
-  cm->set_parameter(rclcpp::Parameter("global_frame",std::string("odom")));
-  cm->set_parameter(rclcpp::Parameter("footprint",std::string("[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623438,-0.1609999928623438],[0.2859999928623438,0.1609999928623438],[-0.06000000052154064,0.1609999928623438]]")));
-  cm->set_parameter(rclcpp::Parameter("footprint_padding",0.0));
+  auto cm = std::make_shared<SettledTestCostmap>("blocked_forward_map", "", "blocked_forward_map",
+    false);
+  ASSERT_DOUBLE_EQ(node->get_parameter(
+    "mppi.AckermannConstraints.steering_actuator_rate").as_double(), 1.0);
+  ASSERT_DOUBLE_EQ(node->get_parameter(
+    "mppi.AckermannConstraints.response_radius_offset").as_double(), 0.093);
+  cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  cm->set_parameter(rclcpp::Parameter("global_frame", std::string("odom")));
+  cm->set_parameter(rclcpp::Parameter("footprint",
+    std::string(
+    "[[-0.06000000052154064,-0.1609999928623438],[0.2859999928623"
+      "438,-0.1609999928623438],[0.2859999928623438,0.1609999928623"
+      "438],[-0.06000000052154064,0.1609999928623438]]")));
+  cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
   rclcpp_lifecycle::State lifecycle;cm->on_configure(lifecycle);
-  auto * grid=cm->getCostmap();grid->resizeMap(150,150,0.02,blocked_forward_entry_fixture::origin[0],blocked_forward_entry_fixture::origin[1]);
-  ASSERT_EQ(blocked_forward_entry_fixture::grid.size(),22500u);
-  std::copy(blocked_forward_entry_fixture::grid.begin(),blocked_forward_entry_fixture::grid.end(),grid->getCharMap());
+  auto * grid = cm->getCostmap();
+    grid->resizeMap(150, 150, 0.02, blocked_forward_entry_fixture::origin[0],
+    blocked_forward_entry_fixture::origin[1]);
+  ASSERT_EQ(blocked_forward_entry_fixture::grid.size(), 22500u);
+  std::copy(blocked_forward_entry_fixture::grid.begin(), blocked_forward_entry_fixture::grid.end(),
+    grid->getCharMap());
   ParametersHandler parameters(node);OptimizerTester optimizer;
-  optimizer.initialize(node,"mppi",cm,&parameters);optimizer.testRecordedBlockedForwardEntry();
+  optimizer.initialize(node, "mppi", cm, &parameters);optimizer.testRecordedBlockedForwardEntry();
   optimizer.shutdown();cm->on_cleanup(lifecycle);
 }
 
@@ -3431,4 +3575,3 @@ TEST(OptimizerTests, motorDeadbandFloorTests)
 
   optimizer_tester.testMotorDeadbandFloor();
 }
-
