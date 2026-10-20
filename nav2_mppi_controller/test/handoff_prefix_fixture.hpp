@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
 namespace handoff_prefix_fixture
 {
 inline const std::vector<double> robot = {5.20921294076499, -0.08379389573174266,

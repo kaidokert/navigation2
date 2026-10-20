@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
 namespace handoff_horizon_fixture
 {
 inline const std::vector<double> robot = {
