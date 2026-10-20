@@ -136,3 +136,9 @@ pluginlib_export_plugin_description_file(nav2_core mppic.xml)
 pluginlib_export_plugin_description_file(nav2_mppi_controller critics.xml)
 
 ament_package()
+
+if(BUILD_TESTING)
+  # Full recorded fixtures exceed the 120 s Linux default on Windows bind mounts.
+  # Keep every file and lint rule enabled; bound only the linter execution time.
+  set_tests_properties(cpplint PROPERTIES TIMEOUT 300)
+endif()
