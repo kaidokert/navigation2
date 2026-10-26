@@ -247,15 +247,17 @@ public:
   }
   void exception(const char * message) noexcept
   {try {if (current_) {(*current_)["exception"] = message;}} catch (...) {++errors_;}}
-  Json document() const
+  Json document(bool raw_binary = false) const
   {
     // Called on explicit flush/inspection, outside the observed control scope.
     size_t actual_bytes = 0;
     Json exported = Json::array();
     for (const auto & frame : frames_) {
       Json copy = frame;
-      encodeBinary(copy);
-      actual_bytes += copy.dump().size();
+      if (!raw_binary) {
+        encodeBinary(copy);
+        actual_bytes += copy.dump().size();
+      }
       exported.push_back(std::move(copy));
     }
     return Json{{"schema", "jetacker-decision-trace/1.1.0"}, {"manifest", manifest_},
@@ -266,6 +268,23 @@ public:
           {"retained_charge_upper_bound_bytes", bytes_},
           {"maximum_bytes", config_.maximum_bytes}}},
       {"invocations", std::move(exported)}};
+  }
+  void writeCborExclusive(const std::string & filename) const
+  {
+    auto value = document(true);
+    value["schema"] = "jetacker-native-decision-cbor/1";
+    value["wire_format"] = "jetacker-native-binary-cbor/1";
+    value["health"]["retained_serialized_bytes"] = nullptr;
+    const auto bytes = Json::to_cbor(value);
+    const int fd = ::open(filename.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {throw std::runtime_error("exclusive CBOR trace open failed");}
+    size_t written = 0;
+    while (written < bytes.size()) {
+      const auto count = ::write(fd, bytes.data()+written, bytes.size()-written);
+      if (count <= 0) {::close(fd);throw std::runtime_error("CBOR trace write failed");}
+      written += static_cast<size_t>(count);
+    }
+    if (::close(fd)) {throw std::runtime_error("CBOR trace close failed");}
   }
   void writeExclusive(const std::string & filename) const
   {
@@ -321,6 +340,23 @@ private:
   bool triggered_{false}, frozen_{false}; size_t post_seen_{0};
   std::string reason_{"not_triggered"};
 };
+inline Json readCborTrace(std::istream & input)
+{
+  auto value = Json::from_cbor(input);
+  if (value.at("schema") != "jetacker-native-decision-cbor/1" ||
+    value.at("wire_format") != "jetacker-native-binary-cbor/1" ||
+    !value.at("health").at("retained_serialized_bytes").is_null())
+  {throw std::runtime_error("unrecognized raw CBOR trace");}
+  size_t actual_bytes = 0;
+  for (auto & frame : value.at("invocations")) {
+    encodeBinary(frame);
+    actual_bytes += frame.dump().size();
+  }
+  value["schema"] = "jetacker-decision-trace/1.1.0";
+  value.erase("wire_format");
+  value["health"]["retained_serialized_bytes"] = actual_bytes;
+  return value;
+}
 inline thread_local Recorder * active = nullptr;
 struct Session
 {

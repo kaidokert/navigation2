@@ -58,7 +58,9 @@ TEST(LiveRecorder, ContinuousChunksKeepMovingDecisionsAcrossBoundaries)
   }
   std::vector<int64_t> stamps;
   for (int episode = 1; episode <= 3; ++episode) {
-    auto trace = read(root / "continuous" / ("episode_"+std::to_string(episode)+".trace.json"));
+    std::ifstream binary(root / "continuous" / ("episode_"+std::to_string(episode)+".trace.cbor"),
+      std::ios::binary);
+    auto trace = rec::readCborTrace(binary);
     ASSERT_EQ(trace["invocations"].size(), 8u);
     for (const auto & frame : trace["invocations"]) {
       EXPECT_TRUE(frame["complete"].get<bool>());
@@ -93,6 +95,23 @@ TEST(RecorderResource, EscapedKeyChargeRemainsConservativeWithoutSixfoldAsciiCha
     EXPECT_GE(rec::serializedUpperBound(value), encoded.dump().size());
   }
   EXPECT_LT(rec::serializedUpperBound(cases.front()), 2 * cases.front().dump().size());
+}
+TEST(RecorderResource, CborConversionExactlyPreservesCanonicalTrace)
+{
+  auto root = directory("cbor_canonical_roundtrip");
+  rec::Config config;config.pre = 1;config.post = 0;
+  rec::Recorder recorder({{"source", "unicode-\u00b5"}}, config);
+  recorder.trigger("continuous_chunk");
+  recorder.begin(123);
+  recorder.event("fixture", [] {return rec::Json{
+      {"bytes", rec::Json::binary({0, 1, 2, 128, 254, 255})},
+      {"negative_zero", -0.0}, {"small", 1e-250}, {"integer", INT64_C(9007199254740993)}};});
+  recorder.end();
+  const auto expected = recorder.document().dump();
+  recorder.writeCborExclusive((root/"trace.cbor").string());
+  std::ifstream input(root/"trace.cbor", std::ios::binary);
+  EXPECT_EQ(rec::readCborTrace(input).dump(), expected);
+  EXPECT_THROW(recorder.writeCborExclusive((root/"trace.cbor").string()), std::runtime_error);
 }
 TEST(RecorderResource, StreamedWriterMatchesCanonicalDocumentAndRejectsOverwrite)
 {

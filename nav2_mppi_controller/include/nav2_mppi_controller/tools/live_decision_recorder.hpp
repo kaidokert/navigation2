@@ -249,7 +249,8 @@ private:
   {
     if (!recorder_) {return;}
     recorder_->trigger(reason);
-    enqueue({folder_, "episode_" + std::to_string(episode_) + ".trace.json", {},
+    enqueue({folder_, "episode_" + std::to_string(episode_) +
+        (continuous_ ? ".trace.cbor" : ".trace.json"), {},
         std::move(recorder_)});
   }
   void enqueue(Job job)
@@ -280,7 +281,11 @@ private:
         if (job.capture) {
           if(before_flush_) {before_flush_();}
           const auto started = monotonicNs();
-          job.capture->writeExclusive(job.folder + "/" + job.name);
+          if (job.name.size() >= 5 && job.name.substr(job.name.size()-5) == ".cbor") {
+            job.capture->writeCborExclusive(job.folder + "/" + job.name);
+          } else {
+            job.capture->writeExclusive(job.folder + "/" + job.name);
+          }
           append(job.folder, {{"kind", "capture_written"}, {"filename", job.name},
               {"host_ns", monotonicNs()}, {"flush_duration_ns", monotonicNs() - started},
               {"bytes", std::filesystem::file_size(job.folder + "/" + job.name)}});
