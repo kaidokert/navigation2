@@ -54,6 +54,9 @@ void PathHandler::initialize(
     getParam(ghost_min_seed_points_, "ghost_min_seed_points", 4);
     getParam(micro_cusp_length_threshold_, "micro_cusp_length_threshold", 0.25);
     getParam(micro_cusp_yaw_scale_, "micro_cusp_yaw_scale", 2.0);
+    getParam(terminal_stub_max_length_, "terminal_stub_max_length", 0.08);
+    getParam(terminal_stub_max_yaw_diff_, "terminal_stub_max_yaw_diff", 0.175);
+    getParam(goal_checker_xy_tolerance_, "terminal_stub_goal_xy_tolerance", 0.25);
     getParam(handoff_yaw_relax_per_cycle_, "handoff_yaw_relax_per_cycle", 0.005);
     getParam(handoff_yaw_relax_cap_, "handoff_yaw_relax_cap", 0.8);
     // <=0 disables the escape policy (default: disabled pending oscillation latch)
@@ -74,6 +77,9 @@ void PathHandler::initialize(
     ghost_min_seed_points_ = std::max(ghost_min_seed_points_, 2);
     micro_cusp_length_threshold_ = std::max(micro_cusp_length_threshold_, 0.0);
     micro_cusp_yaw_scale_ = std::max(micro_cusp_yaw_scale_, 1.0);
+    terminal_stub_max_length_ = std::max(terminal_stub_max_length_, 0.0);
+    terminal_stub_max_yaw_diff_ = std::max(terminal_stub_max_yaw_diff_, 0.0);
+    goal_checker_xy_tolerance_ = std::max(goal_checker_xy_tolerance_, 0.0);
     inversion_locale_ = 0u;
   }
 }
@@ -98,6 +104,28 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
     [&global_pose](const geometry_msgs::msg::PoseStamped & ps) {
       return euclidean_distance(global_pose, ps);
     });
+
+  // When a post-cusp handoff has only 2 poses ([cusp_pose, goal_pose]), retain
+  // the cusp pose when it is within prune_distance_ and inside the costmap bounds
+  // so the 2-pose post-cusp segment does not collapse to a 1-pose path.
+  if (two_pose_post_cusp_segment_ &&
+    global_plan_up_to_inversion_.poses.size() == 2 &&
+    closest_point == global_plan_up_to_inversion_.poses.end() - 1)
+  {
+    auto prev_point = global_plan_up_to_inversion_.poses.end() - 2;
+    geometry_msgs::msg::PoseStamped prev_pose = *prev_point;
+    prev_pose.header.stamp = global_pose.header.stamp;
+    prev_pose.header.frame_id = global_plan_.header.frame_id;
+    geometry_msgs::msg::PoseStamped prev_costmap_pose;
+    unsigned int prev_mx, prev_my;
+    if (euclidean_distance(prev_pose, *closest_point) <= prune_distance_ &&
+      transformPose(costmap_->getGlobalFrameID(), prev_pose, prev_costmap_pose) &&
+      costmap_->getCostmap()->worldToMap(
+        prev_costmap_pose.pose.position.x, prev_costmap_pose.pose.position.y, prev_mx, prev_my))
+    {
+      closest_point = prev_point;
+    }
+  }
 
   nav_msgs::msg::Path transformed_plan;
   transformed_plan.header.frame_id = costmap_->getGlobalFrameID();
@@ -160,13 +188,31 @@ nav_msgs::msg::Path PathHandler::transformPath(
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
-  if (enforce_path_inversion_ && inversion_locale_ != 0u) {
+  if (enforce_path_inversion_ && inversion_locale_ != 0u && !terminal_stub_aligned_) {
     if (isWithinInversionTolerances(global_pose)) {
-      prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_);
+      const size_t post_cusp_poses =
+        global_plan_.poses.size() > static_cast<size_t>(inversion_locale_) ?
+        global_plan_.poses.size() - static_cast<size_t>(inversion_locale_) : 0u;
+      const bool retain_cusp_pose = (post_cusp_poses == 1u && inversion_locale_ >= 1u);
+      const size_t prune_idx = retain_cusp_pose ?
+        static_cast<size_t>(inversion_locale_ - 1u) :
+        static_cast<size_t>(inversion_locale_);
+      prunePlan(global_plan_, global_plan_.poses.begin() + prune_idx);
       global_plan_up_to_inversion_ = global_plan_;
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+      has_cusp_original_orientation_ = false;
+      if (inversion_locale_ > 0u &&
+        static_cast<size_t>(inversion_locale_) <= global_plan_.poses.size())
+      {
+        cusp_original_orientation_ =
+          global_plan_.poses[inversion_locale_ - 1u].pose.orientation;
+        has_cusp_original_orientation_ = true;
+      }
+      two_pose_post_cusp_segment_ =
+        retain_cusp_pose && (global_plan_up_to_inversion_.poses.size() == 2u);
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
+      absorbTerminalGoalSnapMicroStub();
       {
         const auto & cusp_pose = global_plan_up_to_inversion_.poses.back();
         double dx = global_pose.pose.position.x - cusp_pose.pose.position.x;
@@ -450,7 +496,15 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  // Preserve the robot nose orientation on reverse segments (where travel heading
+  // is nose + pi) and whenever terminal_stub_aligned_ has stamped the final goal
+  // orientation onto the cusp pose.
+  const double endpoint_yaw = tf2::getYaw(next_pose.pose.orientation);
+  if (!terminal_stub_aligned_ &&
+    std::fabs(angles::shortest_angular_distance(endpoint_yaw, heading)) <= M_PI_2)
+  {
+    next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  }
 
   while (appended_length + 1e-4 < requested_extension) {
     const double step = std::min(
@@ -529,10 +583,116 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
 {
   global_plan_ = plan;
   global_plan_up_to_inversion_ = global_plan_;
+  terminal_stub_aligned_ = false;
+  two_pose_post_cusp_segment_ = false;
+  has_cusp_original_orientation_ = false;
   if (enforce_path_inversion_) {
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+    if (inversion_locale_ > 0u &&
+      static_cast<size_t>(inversion_locale_) <= global_plan_.poses.size())
+    {
+      cusp_original_orientation_ =
+        global_plan_.poses[inversion_locale_ - 1u].pose.orientation;
+      has_cusp_original_orientation_ = true;
+    }
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
+    absorbTerminalGoalSnapMicroStub();
+  }
+}
+
+void PathHandler::setGoalChecker(nav2_core::GoalChecker * goal_checker)
+{
+  bool has_tol = false;
+  double xy_tol = 0.0;
+  if (goal_checker != nullptr) {
+    geometry_msgs::msg::Pose pose_tol;
+    geometry_msgs::msg::Twist vel_tol;
+    if (goal_checker->getTolerances(pose_tol, vel_tol)) {
+      const double cand = std::min(pose_tol.position.x, pose_tol.position.y);
+      if (std::isfinite(cand) && cand > 0.0) {
+        has_tol = true;
+        xy_tol = cand;
+      }
+    }
+  }
+  if (has_tol != has_active_goal_checker_xy_tolerance_ ||
+    (has_tol && std::fabs(xy_tol - active_goal_checker_xy_tolerance_) > 1e-9))
+  {
+    has_active_goal_checker_xy_tolerance_ = has_tol;
+    active_goal_checker_xy_tolerance_ = xy_tol;
+    if (enforce_path_inversion_ && inversion_locale_ != 0u) {
+      absorbTerminalGoalSnapMicroStub();
+    }
+  }
+}
+
+void PathHandler::absorbTerminalGoalSnapMicroStub()
+{
+  terminal_stub_aligned_ = false;
+  if (!enforce_path_inversion_ || inversion_locale_ == 0u ||
+    static_cast<size_t>(inversion_locale_) >= global_plan_.poses.size())
+  {
+    return;
+  }
+
+  if (has_cusp_original_orientation_) {
+    global_plan_.poses[inversion_locale_ - 1u].pose.orientation = cusp_original_orientation_;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      global_plan_up_to_inversion_.poses.back().pose.orientation = cusp_original_orientation_;
+    }
+  }
+
+  nav_msgs::msg::Path post_cusp_tail;
+  post_cusp_tail.header = global_plan_.header;
+  post_cusp_tail.poses.assign(
+    global_plan_.poses.begin() + (inversion_locale_ - 1u),
+    global_plan_.poses.end());
+  nav_msgs::msg::Path tail_up_to_inv = post_cusp_tail;
+  const unsigned int next_inv = utils::removePosesAfterFirstInversion(tail_up_to_inv);
+  const double tail_length = static_cast<double>(utils::pathLength(post_cusp_tail));
+  const auto & cusp_pose = global_plan_.poses[inversion_locale_ - 1u];
+  const auto & goal_pose = global_plan_.poses.back();
+  const double goal_dist = std::hypot(
+    goal_pose.pose.position.x - cusp_pose.pose.position.x,
+    goal_pose.pose.position.y - cusp_pose.pose.position.y);
+  const double goal_yaw_diff = std::fabs(angles::shortest_angular_distance(
+    tf2::getYaw(cusp_pose.pose.orientation),
+    tf2::getYaw(goal_pose.pose.orientation)));
+
+  const double effective_goal_xy_tol =
+    has_active_goal_checker_xy_tolerance_ ?
+    active_goal_checker_xy_tolerance_ :
+    goal_checker_xy_tolerance_;
+  const double max_stub_len = std::min(terminal_stub_max_length_, micro_cusp_length_threshold_);
+  const double max_goal_dist = std::min(
+    max_stub_len,
+    std::min(static_cast<double>(inversion_xy_tolerance_), effective_goal_xy_tol));
+  const double max_yaw_diff = std::min(
+    terminal_stub_max_yaw_diff_,
+    static_cast<double>(inversion_yaw_tolerance_) * micro_cusp_yaw_scale_);
+
+  if (next_inv == 0u &&
+    tail_length <= max_stub_len &&
+    tail_length < current_segment_length_ &&
+    goal_dist <= max_goal_dist &&
+    goal_yaw_diff <= max_yaw_diff)
+  {
+    // Stamp the final goal's orientation onto the cusp pose while keeping the
+    // cusp active (inversion_locale_ != 0u) so ghost-path continuation remains
+    // active during the approach and aligns the robot to the final goal yaw,
+    // and inhibit handoff pruning into the micro-stub via terminal_stub_aligned_.
+    const auto goal_orientation = goal_pose.pose.orientation;
+    global_plan_.poses[inversion_locale_ - 1u].pose.orientation = goal_orientation;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      global_plan_up_to_inversion_.poses.back().pose.orientation = goal_orientation;
+    }
+    terminal_stub_aligned_ = true;
+    RCLCPP_DEBUG(logger_,
+      "[TERMINAL_STUB_ALIGNED] Aligned cusp yaw to goal over %.3fm terminal stub "
+      "(%zu pts, goal_dist=%.3fm, yaw_diff=%.3frad); active segment len=%.3fm",
+      tail_length, post_cusp_tail.poses.size() - 1u, goal_dist, goal_yaw_diff,
+      current_segment_length_);
   }
 }
 

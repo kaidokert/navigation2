@@ -31,6 +31,7 @@
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_core/controller_exceptions.hpp"
+#include "nav2_core/goal_checker.hpp"
 
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
 
@@ -76,6 +77,13 @@ public:
     * @param Plan Path to use
     */
   void setPath(const nav_msgs::msg::Path & plan);
+
+  /**
+   * @brief Update the active goal checker so terminal-stub absorption respects
+   * the selected checker's XY tolerance.
+   * @param goal_checker Pointer to the active goal checker (may be nullptr)
+   */
+  void setGoalChecker(nav2_core::GoalChecker * goal_checker);
 
   /**
     * @brief Get reference path
@@ -214,6 +222,12 @@ protected:
    */
   bool computeEscapeHeading(double & heading) const;
 
+  /**
+   * @brief Absorb a terminal direction-flipped goal-snap micro-stub when the
+   * final cusp is already within inversion tolerances of the goal pose.
+   */
+  void absorbTerminalGoalSnapMicroStub();
+
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -235,6 +249,13 @@ protected:
   int ghost_min_seed_points_{4};
   double micro_cusp_length_threshold_{0.25};
   double micro_cusp_yaw_scale_{2.0};
+  double terminal_stub_max_length_{0.08};
+  double terminal_stub_max_yaw_diff_{0.175};
+  double goal_checker_xy_tolerance_{0.25};
+  double active_goal_checker_xy_tolerance_{0.0};
+  bool has_active_goal_checker_xy_tolerance_{false};
+  geometry_msgs::msg::Quaternion cusp_original_orientation_{};
+  bool has_cusp_original_orientation_{false};
   // Cusp handoff deadlock escape (Layers 1+2, notes/cusp_handoff_fix_plan.md).
   // Cycle-based (one isWithinInversionTolerances call per control cycle) so the
   // policy is deterministic and unit-testable without a clock.
@@ -248,6 +269,8 @@ protected:
   mutable unsigned int handoff_blocked_cycles_{0u};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
+  bool terminal_stub_aligned_{false};
+  bool two_pose_post_cusp_segment_{false};
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
   // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
