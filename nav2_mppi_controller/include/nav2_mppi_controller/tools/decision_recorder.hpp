@@ -178,6 +178,13 @@ public:
   {
     if (!current_) {return;}
     try {
+      // ControllerServer may catch these failures inside the live outer scope.
+      // Do not rely on an escaping exception to retain their decision banks.
+      if (kind[0] == 'f' && (std::strcmp(kind, "fallback_reset_before") == 0 ||
+        std::strcmp(kind, "final_guard_rejected") == 0))
+      {
+        trigger(kind);
+      }
       if ((*current_)["events"].size() >= 10000) {throw std::runtime_error("event bound");}
       (*current_)["events"].push_back(Json{{"sequence", ++event_id_},
           {"kind", kind}, {"retry_id", retry}, {"iteration_id", iteration},
@@ -230,7 +237,13 @@ public:
   }
   void trigger(const std::string & reason) noexcept
   {
-    if (!triggered_) {triggered_ = true; reason_ = reason; post_seen_ = 0;}
+    if (!triggered_) {
+      try {
+        reason_ = reason;
+        post_seen_ = 0;
+        triggered_ = true;
+      } catch (...) {++errors_;}
+    }
   }
   void exception(const char * message) noexcept
   {try {if (current_) {(*current_)["exception"] = message;}} catch (...) {++errors_;}}

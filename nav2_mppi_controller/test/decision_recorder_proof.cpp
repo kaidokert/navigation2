@@ -60,6 +60,28 @@ public:
   }
   bool failed() const {return critics_data_.fail_flag;}
   bool fallbackNow() {return fallback(critics_data_.fail_flag);}
+  void linearProfile(const geometry_msgs::msg::PoseStamped & pose, const nav_msgs::msg::Path & path)
+  {
+    geometry_msgs::msg::Twist speed;
+    prepare(pose, speed, path, path.poses.back().pose, nullptr);
+    control_sequence_.vx.fill(.1f);
+    control_sequence_.vy.fill(0);
+    control_sequence_.wz.fill(0);
+    control_history_.fill({0, 0, 0});
+  }
+  bool controlMemoryZero() const
+  {
+    return xt::all(xt::equal(control_sequence_.vx, 0.f)) &&
+      xt::all(xt::equal(control_sequence_.vy, 0.f)) &&
+      xt::all(xt::equal(control_sequence_.wz, 0.f)) &&
+      std::all_of(control_history_.begin(), control_history_.end(),
+      [](const auto & h) {return h.vx == 0 && h.vy == 0 && h.wz == 0;});
+  }
+  bool forceFallbackNow()
+  {
+    critics_data_.fail_flag = true;
+    return fallback(true);
+  }
   void scoreAgain()
   {
     costs_.fill(0);critics_data_.fail_flag = false;
@@ -160,6 +182,78 @@ struct Scene
         "explicitly injected bank; production scoring/update/extraction"}};
   }
 };
+
+TEST(DecisionRecorderProof, CaughtFinalVetoTriggersBeforeControlMemoryIsCleared)
+{
+  for (const bool blocked : {false, true}) {
+    Scene s;
+    if (blocked) {
+      for (unsigned int y = 16; y <= 24; ++y) {
+        s.map->getCostmap()->setCost(22, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+      }
+    }
+    s.optimizer.linearProfile(s.pose, s.path);
+    std::optional<geometry_msgs::msg::TwistStamped> unrecorded;
+    bool unrecorded_caught = false;
+    try {
+      unrecorded = s.optimizer.finish(s.pose.header.stamp);
+    } catch (const nav2_core::NoValidControl &) {unrecorded_caught = true;}
+    EXPECT_EQ(unrecorded_caught, blocked);
+    rec::Recorder recorder(s.manifest("caught_final_veto"));
+    bool caught = false;
+    {
+      rec::Session recording(recorder);
+      rec::Invocation outer(1000000000);
+      s.optimizer.linearProfile(s.pose, s.path);
+      try {
+        const auto command = s.optimizer.finish(s.pose.header.stamp);
+        EXPECT_GT(command.twist.linear.x, .02);
+        ASSERT_TRUE(unrecorded.has_value());
+        EXPECT_EQ(command.twist.linear.x, unrecorded->twist.linear.x);
+        EXPECT_EQ(command.twist.angular.z, unrecorded->twist.angular.z);
+      } catch (const nav2_core::NoValidControl &) {
+        // Match ControllerServer's patience catch: the outer scope exits normally.
+        caught = true;
+      }
+    }
+    EXPECT_EQ(caught, blocked);
+    const auto document = recorder.document();
+    EXPECT_EQ(document.at("triggered").get<bool>(), blocked);
+    if (blocked) {
+      EXPECT_TRUE(s.optimizer.controlMemoryZero());
+      EXPECT_EQ(document.at("termination"), "final_guard_rejected");
+      const auto & events = document.at("invocations").at(0).at("events");
+      const auto rejected = std::find_if(events.begin(), events.end(), [](const auto & event) {
+          return event.at("kind") == "final_guard_rejected";
+        });
+      const auto candidate = std::find_if(events.begin(), events.end(), [](const auto & event) {
+          return event.at("kind") == "extracted_candidate";
+        });
+      ASSERT_NE(rejected, events.end());
+      ASSERT_NE(candidate, events.end());
+      EXPECT_GT(candidate->at("payload").at("vx").get<double>(), .02);
+      EXPECT_EQ(rejected->at("payload").at("control_before_clear"),
+        candidate->at("payload").at("control"));
+      EXPECT_EQ(rejected->at("payload").at("history_before_clear"),
+        candidate->at("payload").at("history"));
+    }
+  }
+}
+
+TEST(DecisionRecorderProof, InternalFallbackResetTriggersWithoutEscapingException)
+{
+  Scene s;
+  rec::Recorder recorder(s.manifest("internal_fallback"));
+  {
+    rec::Session recording(recorder);
+    rec::Invocation outer(1000000000);
+    s.optimizer.linearProfile(s.pose, s.path);
+    EXPECT_TRUE(s.optimizer.forceFallbackNow());
+  }
+  EXPECT_TRUE(recorder.document().at("triggered").get<bool>());
+  EXPECT_EQ(recorder.document().at("termination"), "fallback_reset_before");
+  EXPECT_TRUE(s.optimizer.controlMemoryZero());
+}
 void save(
   const std::string & name, rec::Recorder & recorder,
   const geometry_msgs::msg::TwistStamped & command,

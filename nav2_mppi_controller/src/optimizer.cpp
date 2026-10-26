@@ -3380,6 +3380,12 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
       return control;
     }
   }
+  recorder::observe("final_guard_rejected", [&] {
+      return recorder::Json{
+        {"sequence_finite", controlSequenceFinite()},
+        {"control_before_clear", recorder::sequence(control_sequence_)},
+        {"history_before_clear", recorder::history(control_history_)}};
+    });
   control_sequence_.reset(settings_.time_steps);
   control_history_.fill({0.0f, 0.0f, 0.0f});
   throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
