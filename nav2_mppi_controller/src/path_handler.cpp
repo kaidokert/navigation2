@@ -57,12 +57,6 @@ void PathHandler::initialize(
     getParam(terminal_stub_max_length_, "terminal_stub_max_length", 0.08);
     getParam(terminal_stub_max_yaw_diff_, "terminal_stub_max_yaw_diff", 0.175);
     getParam(goal_checker_xy_tolerance_, "terminal_stub_goal_xy_tolerance", 0.25);
-    if (node->has_parameter("general_goal_checker.xy_goal_tolerance")) {
-      const auto param = node->get_parameter("general_goal_checker.xy_goal_tolerance");
-      if (param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-        goal_checker_xy_tolerance_ = std::min(goal_checker_xy_tolerance_, param.as_double());
-      }
-    }
     getParam(handoff_yaw_relax_per_cycle_, "handoff_yaw_relax_per_cycle", 0.005);
     getParam(handoff_yaw_relax_cap_, "handoff_yaw_relax_cap", 0.8);
     // <=0 disables the escape policy (default: disabled pending oscillation latch)
@@ -206,6 +200,14 @@ nav_msgs::msg::Path PathHandler::transformPath(
       prunePlan(global_plan_, global_plan_.poses.begin() + prune_idx);
       global_plan_up_to_inversion_ = global_plan_;
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+      has_cusp_original_orientation_ = false;
+      if (inversion_locale_ > 0u &&
+        static_cast<size_t>(inversion_locale_) <= global_plan_.poses.size())
+      {
+        cusp_original_orientation_ =
+          global_plan_.poses[inversion_locale_ - 1u].pose.orientation;
+        has_cusp_original_orientation_ = true;
+      }
       two_pose_post_cusp_segment_ =
         retain_cusp_pose && (global_plan_up_to_inversion_.poses.size() == 2u);
       current_segment_length_ = static_cast<double>(
@@ -583,11 +585,45 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
   global_plan_up_to_inversion_ = global_plan_;
   terminal_stub_aligned_ = false;
   two_pose_post_cusp_segment_ = false;
+  has_cusp_original_orientation_ = false;
   if (enforce_path_inversion_) {
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
+    if (inversion_locale_ > 0u &&
+      static_cast<size_t>(inversion_locale_) <= global_plan_.poses.size())
+    {
+      cusp_original_orientation_ =
+        global_plan_.poses[inversion_locale_ - 1u].pose.orientation;
+      has_cusp_original_orientation_ = true;
+    }
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
     absorbTerminalGoalSnapMicroStub();
+  }
+}
+
+void PathHandler::setGoalChecker(nav2_core::GoalChecker * goal_checker)
+{
+  bool has_tol = false;
+  double xy_tol = 0.0;
+  if (goal_checker != nullptr) {
+    geometry_msgs::msg::Pose pose_tol;
+    geometry_msgs::msg::Twist vel_tol;
+    if (goal_checker->getTolerances(pose_tol, vel_tol)) {
+      const double cand = std::min(pose_tol.position.x, pose_tol.position.y);
+      if (std::isfinite(cand) && cand > 0.0) {
+        has_tol = true;
+        xy_tol = cand;
+      }
+    }
+  }
+  if (has_tol != has_active_goal_checker_xy_tolerance_ ||
+    (has_tol && std::fabs(xy_tol - active_goal_checker_xy_tolerance_) > 1e-9))
+  {
+    has_active_goal_checker_xy_tolerance_ = has_tol;
+    active_goal_checker_xy_tolerance_ = xy_tol;
+    if (enforce_path_inversion_ && inversion_locale_ != 0u) {
+      absorbTerminalGoalSnapMicroStub();
+    }
   }
 }
 
@@ -598,6 +634,13 @@ void PathHandler::absorbTerminalGoalSnapMicroStub()
     static_cast<size_t>(inversion_locale_) >= global_plan_.poses.size())
   {
     return;
+  }
+
+  if (has_cusp_original_orientation_) {
+    global_plan_.poses[inversion_locale_ - 1u].pose.orientation = cusp_original_orientation_;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      global_plan_up_to_inversion_.poses.back().pose.orientation = cusp_original_orientation_;
+    }
   }
 
   nav_msgs::msg::Path post_cusp_tail;
@@ -617,10 +660,14 @@ void PathHandler::absorbTerminalGoalSnapMicroStub()
     tf2::getYaw(cusp_pose.pose.orientation),
     tf2::getYaw(goal_pose.pose.orientation)));
 
+  const double effective_goal_xy_tol =
+    has_active_goal_checker_xy_tolerance_ ?
+    active_goal_checker_xy_tolerance_ :
+    goal_checker_xy_tolerance_;
   const double max_stub_len = std::min(terminal_stub_max_length_, micro_cusp_length_threshold_);
   const double max_goal_dist = std::min(
     max_stub_len,
-    std::min(static_cast<double>(inversion_xy_tolerance_), goal_checker_xy_tolerance_));
+    std::min(static_cast<double>(inversion_xy_tolerance_), effective_goal_xy_tol));
   const double max_yaw_diff = std::min(
     terminal_stub_max_yaw_diff_,
     static_cast<double>(inversion_yaw_tolerance_) * micro_cusp_yaw_scale_);

@@ -863,9 +863,37 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   EXPECT_EQ(handler.getInversionLocale(), 0u);
   EXPECT_GE(after_closing_handoff.poses.size(), 2u);
 
-  // Negative regression 2: when general_goal_checker.xy_goal_tolerance (0.05m) is tighter
-  // than an 8cm forward terminal stub (x=0 -> x=+0.08), the stub lies outside the actual
-  // goal checker region and must NOT be absorbed; reaching x=0 must hand off to the stub.
+  // Negative regression 2: when the active goal checker passed to computeVelocityCommands()
+  // has a tighter XY tolerance (0.05m) than an 8cm forward terminal stub (x=0.50 -> x=0.58),
+  // the stub lies outside the actual goal checker region and must NOT remain absorbed;
+  // reaching x=0.50 must hand off to the stub even when setPath() ran before setGoalChecker().
+  class TightTestGoalChecker : public nav2_core::GoalChecker
+  {
+public:
+    explicit TightTestGoalChecker(double xy_tol)
+    : xy_tol_(xy_tol) {}
+    void initialize(
+      const rclcpp_lifecycle::LifecycleNode::WeakPtr &,
+      const std::string &,
+      const std::shared_ptr<nav2_costmap_2d::Costmap2DROS>) override {}
+    void reset() override {}
+    bool isGoalReached(
+      const geometry_msgs::msg::Pose &,
+      const geometry_msgs::msg::Pose &,
+      const geometry_msgs::msg::Twist &) override {return false;}
+    bool getTolerances(
+      geometry_msgs::msg::Pose & pose_tolerance,
+      geometry_msgs::msg::Twist &) override
+    {
+      pose_tolerance.position.x = xy_tol_;
+      pose_tolerance.position.y = xy_tol_;
+      return true;
+    }
+
+private:
+    double xy_tol_;
+  };
+
   PathHandlerWrapper tight_goal_handler;
   auto tight_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("rev_tight_goal_node");
   tight_node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(9999.9));
@@ -873,8 +901,6 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   tight_node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
   tight_node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.35));
   tight_node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
-  tight_node->declare_parameter(
-    "general_goal_checker.xy_goal_tolerance", rclcpp::ParameterValue(0.05));
   ParametersHandler tight_param_handler(tight_node);
   tight_goal_handler.initialize(
     tight_node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &tight_param_handler);
@@ -886,7 +912,9 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   outside_goal_tol_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));   // reverse cusp
   outside_goal_tol_path.poses.push_back(makeYawPose(0.58, 0.50, 0.05));  // +8cm forward stub (>5cm)
   tight_goal_handler.setPath(outside_goal_tol_path);
-  // Cusp orientation is not overwritten because 0.08m > 0.05m goal_checker_xy_tolerance.
+  TightTestGoalChecker tight_checker(0.05);
+  tight_goal_handler.setGoalChecker(&tight_checker);
+  // Original cusp orientation is restored because 0.08m > 0.05m active goal checker tolerance.
   EXPECT_NEAR(
     tf2::getYaw(tight_goal_handler.getInvertedPath().poses.back().pose.orientation), 0.0, 1e-4);
   // Reaching the cusp hands off to the required forward closing segment.

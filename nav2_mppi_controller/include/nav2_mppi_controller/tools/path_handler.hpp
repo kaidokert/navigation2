@@ -31,6 +31,7 @@
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_core/controller_exceptions.hpp"
+#include "nav2_core/goal_checker.hpp"
 
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
 
@@ -76,6 +77,13 @@ public:
     * @param Plan Path to use
     */
   void setPath(const nav_msgs::msg::Path & plan);
+
+  /**
+   * @brief Update the active goal checker so terminal-stub absorption respects
+   * the selected checker's XY tolerance.
+   * @param goal_checker Pointer to the active goal checker (may be nullptr)
+   */
+  void setGoalChecker(nav2_core::GoalChecker * goal_checker);
 
   /**
     * @brief Get reference path
@@ -244,6 +252,10 @@ protected:
   double terminal_stub_max_length_{0.08};
   double terminal_stub_max_yaw_diff_{0.175};
   double goal_checker_xy_tolerance_{0.25};
+  double active_goal_checker_xy_tolerance_{0.0};
+  bool has_active_goal_checker_xy_tolerance_{false};
+  geometry_msgs::msg::Quaternion cusp_original_orientation_{};
+  bool has_cusp_original_orientation_{false};
   // Cusp handoff deadlock escape (Layers 1+2, notes/cusp_handoff_fix_plan.md).
   // Cycle-based (one isWithinInversionTolerances call per control cycle) so the
   // policy is deterministic and unit-testable without a clock.
