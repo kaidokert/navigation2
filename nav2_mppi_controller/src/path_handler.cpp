@@ -99,6 +99,14 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
       return euclidean_distance(global_pose, ps);
     });
 
+  // Retain at least 2 poses when available so a 2-pose segment never collapses
+  // to a 1-pose (0-segment) path before handoff or goal completion.
+  if (global_plan_up_to_inversion_.poses.size() >= 2 &&
+    closest_point == global_plan_up_to_inversion_.poses.end() - 1)
+  {
+    closest_point = global_plan_up_to_inversion_.poses.end() - 2;
+  }
+
   nav_msgs::msg::Path transformed_plan;
   transformed_plan.header.frame_id = costmap_->getGlobalFrameID();
   transformed_plan.header.stamp = global_pose.header.stamp;
@@ -160,13 +168,20 @@ nav_msgs::msg::Path PathHandler::transformPath(
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
-  if (enforce_path_inversion_ && inversion_locale_ != 0u) {
+  if (enforce_path_inversion_ && inversion_locale_ != 0u && !terminal_stub_aligned_) {
     if (isWithinInversionTolerances(global_pose)) {
-      prunePlan(global_plan_, global_plan_.poses.begin() + inversion_locale_);
+      const size_t post_cusp_poses =
+        global_plan_.poses.size() > static_cast<size_t>(inversion_locale_) ?
+        global_plan_.poses.size() - static_cast<size_t>(inversion_locale_) : 0u;
+      const size_t prune_idx = (post_cusp_poses == 1u && inversion_locale_ >= 1u) ?
+        static_cast<size_t>(inversion_locale_ - 1u) :
+        static_cast<size_t>(inversion_locale_);
+      prunePlan(global_plan_, global_plan_.poses.begin() + prune_idx);
       global_plan_up_to_inversion_ = global_plan_;
       inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
+      absorbTerminalGoalSnapMicroStub();
       {
         const auto & cusp_pose = global_plan_up_to_inversion_.poses.back();
         double dx = global_pose.pose.position.x - cusp_pose.pose.position.x;
@@ -450,7 +465,14 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  // Preserve the robot nose orientation on reverse segments: estimateGhostHeading()
+  // returns the travel displacement direction (which is nose + pi when backing up).
+  // Overwriting next_pose.pose.orientation with travel heading flips yaw by 180 deg
+  // and causes PathAlignCritic(use_path_orientations) to penalize reversing into the cusp.
+  const double endpoint_yaw = tf2::getYaw(next_pose.pose.orientation);
+  if (std::fabs(angles::shortest_angular_distance(endpoint_yaw, heading)) <= M_PI_2) {
+    next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
+  }
 
   while (appended_length + 1e-4 < requested_extension) {
     const double step = std::min(
@@ -529,10 +551,62 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
 {
   global_plan_ = plan;
   global_plan_up_to_inversion_ = global_plan_;
+  terminal_stub_aligned_ = false;
   if (enforce_path_inversion_) {
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
+    absorbTerminalGoalSnapMicroStub();
+  }
+}
+
+void PathHandler::absorbTerminalGoalSnapMicroStub()
+{
+  terminal_stub_aligned_ = false;
+  if (!enforce_path_inversion_ || inversion_locale_ == 0u ||
+    static_cast<size_t>(inversion_locale_) >= global_plan_.poses.size())
+  {
+    return;
+  }
+
+  nav_msgs::msg::Path post_cusp_tail;
+  post_cusp_tail.header = global_plan_.header;
+  post_cusp_tail.poses.assign(
+    global_plan_.poses.begin() + (inversion_locale_ - 1u),
+    global_plan_.poses.end());
+  nav_msgs::msg::Path tail_up_to_inv = post_cusp_tail;
+  const unsigned int next_inv = utils::removePosesAfterFirstInversion(tail_up_to_inv);
+  const double tail_length = static_cast<double>(utils::pathLength(post_cusp_tail));
+  const auto & cusp_pose = global_plan_.poses[inversion_locale_ - 1u];
+  const auto & goal_pose = global_plan_.poses.back();
+  const double goal_dist = std::hypot(
+    goal_pose.pose.position.x - cusp_pose.pose.position.x,
+    goal_pose.pose.position.y - cusp_pose.pose.position.y);
+  const double goal_yaw_diff = std::fabs(angles::shortest_angular_distance(
+    tf2::getYaw(cusp_pose.pose.orientation),
+    tf2::getYaw(goal_pose.pose.orientation)));
+
+  if (next_inv == 0u &&
+    tail_length <= micro_cusp_length_threshold_ &&
+    tail_length < current_segment_length_ &&
+    goal_dist <= inversion_xy_tolerance_ &&
+    goal_yaw_diff <= inversion_yaw_tolerance_ * micro_cusp_yaw_scale_)
+  {
+    // Stamp the final goal's orientation onto the cusp pose while keeping the
+    // cusp active (inversion_locale_ != 0u) so ghost-path continuation remains
+    // active during the approach and aligns the robot to the final goal yaw,
+    // and inhibit handoff pruning into the micro-stub via terminal_stub_aligned_.
+    const auto goal_orientation = goal_pose.pose.orientation;
+    global_plan_.poses[inversion_locale_ - 1u].pose.orientation = goal_orientation;
+    if (!global_plan_up_to_inversion_.poses.empty()) {
+      global_plan_up_to_inversion_.poses.back().pose.orientation = goal_orientation;
+    }
+    terminal_stub_aligned_ = true;
+    RCLCPP_INFO(logger_,
+      "[TERMINAL_STUB_ALIGNED] Aligned cusp yaw to goal over %.3fm terminal stub "
+      "(%zu pts, goal_dist=%.3fm, yaw_diff=%.3frad); active segment len=%.3fm",
+      tail_length, post_cusp_tail.poses.size() - 1u, goal_dist, goal_yaw_diff,
+      current_segment_length_);
   }
 }
 

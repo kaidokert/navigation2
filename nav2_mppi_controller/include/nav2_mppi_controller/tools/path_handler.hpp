@@ -214,6 +214,12 @@ protected:
    */
   bool computeEscapeHeading(double & heading) const;
 
+  /**
+   * @brief Absorb a terminal direction-flipped goal-snap micro-stub when the
+   * final cusp is already within inversion tolerances of the goal pose.
+   */
+  void absorbTerminalGoalSnapMicroStub();
+
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -248,6 +254,7 @@ protected:
   mutable unsigned int handoff_blocked_cycles_{0u};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
+  bool terminal_stub_aligned_{false};
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
   // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
