@@ -37,6 +37,51 @@ void tick(rec::LiveRecorder & live, int64_t stamp, double vx = .1)
       {"wz", 0.0}});
 }
 }  // namespace
+TEST(LiveRecorder, ContinuousChunksKeepMovingDecisionsAcrossBoundaries)
+{
+  auto root = directory("continuous_moving_chunks");
+  std::atomic<unsigned> flushes{0};
+  {
+    rec::LiveRecorder live(root.string(), rec::Json::object(), [&] {++flushes;});
+    live.command({{"operation", "arm"}, {"run_id", "continuous"},
+      {"continuous", true}, {"maximum_episodes", 3}});
+    for (int i = 0; i < 24; ++i) {
+      tick(live, 1000+i, .2);
+      if ((i+1)%8 == 0) {
+        for (int wait = 0; wait < 2000 && flushes < unsigned((i+1)/8); ++wait) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ASSERT_GE(flushes.load(), unsigned((i+1)/8));
+      }
+    }
+    live.command({{"operation", "close"}, {"run_id", "continuous"}});
+  }
+  std::vector<int64_t> stamps;
+  for (int episode = 1; episode <= 3; ++episode) {
+    auto trace = read(root / "continuous" / ("episode_"+std::to_string(episode)+".trace.json"));
+    ASSERT_EQ(trace["invocations"].size(), 8u);
+    for (const auto & frame : trace["invocations"]) {
+      EXPECT_TRUE(frame["complete"].get<bool>());
+      stamps.push_back(frame["stamp_ns"].get<int64_t>());
+    }
+  }
+  for (int i = 0; i < 24; ++i) {EXPECT_EQ(stamps[i], 1000+i);}
+  auto closed = read(root / "continuous/session.closed.json");
+  EXPECT_EQ(closed["capture_wait_ticks"], 0);
+  EXPECT_EQ(closed["budget_exhausted_ticks"], 0);
+  EXPECT_EQ(closed["worker_errors"], 0);
+}
+
+TEST(LiveRecorder, ExtendedEpisodeBudgetRequiresExplicitContinuousMode)
+{
+  auto root = directory("continuous_budget_bounds");
+  rec::LiveRecorder live(root.string(), rec::Json::object());
+  EXPECT_THROW(live.command({{"operation", "arm"}, {"run_id", "legacy"},
+      {"maximum_episodes", 17}}), std::invalid_argument);
+  EXPECT_THROW(live.command({{"operation", "arm"}, {"run_id", "unbounded"},
+      {"continuous", true}, {"maximum_episodes", 257}}), std::invalid_argument);
+}
+
 TEST(RecorderResource, EscapedKeyChargeRemainsConservativeWithoutSixfoldAsciiCharge)
 {
   const std::vector<rec::Json> cases = {

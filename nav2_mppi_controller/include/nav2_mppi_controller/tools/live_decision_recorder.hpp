@@ -57,7 +57,8 @@ public:
         throw std::invalid_argument("maximum_episodes must be an integer");
       }
       const auto maximum = input.value("maximum_episodes", int64_t(8));
-      if(maximum < 1 || maximum > 16) {
+      const bool continuous = input.value("continuous", false);
+      if(maximum < 1 || maximum > (continuous ? 256 : 16)) {
         throw std::invalid_argument("maximum_episodes out of bounds");
       }
       if (id.empty() || id.size() > 120 || !std::all_of(id.begin(), id.end(), [](char c) {
@@ -70,6 +71,7 @@ public:
       if (!std::filesystem::create_directory(folder_)) {throw std::runtime_error("session exists");}
       session_ = input; run_ = id; goal_.clear(); motion_ = nullptr; episode_ = 0;
       maximum_episodes_ = static_cast<size_t>(maximum);capture_wait_ticks_ = budget_wait_ticks_ = 0;
+      continuous_ = continuous;
       dense_status_ = "armed";
       drop_start_ = drops_.load();error_start_ = worker_errors_.load();
       dense_ = input.value("dense", true); armed_ = true;
@@ -140,10 +142,17 @@ public:
                 {"maximum_session_frame_payload_bytes_bound",
                   owner_->maximum_episodes_ * size_t(268435456)}};
               Config capture_config;
+              if (owner_->continuous_) {
+                capture_config.pre = 1;
+                capture_config.post = 7;
+              }
               capture_config.collapse_speed = owner_->episode_ == 0 ? .02 : .005;
               m["recording_policy"]["collapse_speed_mps"] = capture_config.collapse_speed;
               m["recording_policy"]["maximum_live_frame_payload_bytes"] = size_t(2) * 268435456;
               owner_->recorder_ = std::make_unique<Recorder>(std::move(m), capture_config);
+              if (owner_->continuous_) {
+                owner_->recorder_->trigger("continuous_chunk");
+              }
               ++owner_->episode_;
             }
           }
@@ -313,6 +322,7 @@ private:
   std::deque<Job> queue_;std::unique_ptr<Recorder> recorder_;
   bool armed_{false}, dense_{true}, shutdown_{false};
   std::string dense_status_;
+  bool continuous_{false};
   size_t maximum_episodes_{8}, capture_wait_ticks_{0}, budget_wait_ticks_{0};
   size_t episode_{0}, pending_captures_{0}, drop_start_{0}, error_start_{0};uint64_t tick_{0};
   std::atomic<size_t> drops_{0}, worker_errors_{0};
