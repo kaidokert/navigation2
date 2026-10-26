@@ -833,19 +833,68 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   EXPECT_EQ(handler.getInversionLocale(), 4u);
   EXPECT_GE(transformed.poses.size(), 2u);
 
-  // Forward approach + 4cm reverse micro-stub must also preserve aligned goal yaw
-  // on appended ghost poses rather than overwriting with forward travel heading (0 rad).
+  // Forward approach + 4cm reverse micro-stub (yaw_diff = 0.12 rad <= 0.175 rad)
+  // must also preserve aligned goal yaw on appended ghost poses rather than
+  // overwriting with forward travel heading (0 rad).
   nav_msgs::msg::Path fwd_path;
   fwd_path.header.frame_id = "map";
   fwd_path.poses.push_back(makeYawPose(0.20, 0.50, 0.0));
   fwd_path.poses.push_back(makeYawPose(0.30, 0.50, 0.0));
   fwd_path.poses.push_back(makeYawPose(0.40, 0.50, 0.0));
   fwd_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));   // cusp
-  fwd_path.poses.push_back(makeYawPose(0.46, 0.50, 0.25));  // 4cm reverse stub (yaw=0.25 rad)
+  fwd_path.poses.push_back(makeYawPose(0.46, 0.50, 0.12));  // 4cm reverse stub (yaw=0.12 rad)
   handler.setPath(fwd_path);
   auto fwd_transformed = handler.transformPath(makeYawPose(0.42, 0.50, 0.0, "odom"));
   ASSERT_GT(fwd_transformed.poses.size(), 2u);
-  EXPECT_NEAR(tf2::getYaw(fwd_transformed.poses.back().pose.orientation), 0.25, 1e-4);
+  EXPECT_NEAR(tf2::getYaw(fwd_transformed.poses.back().pose.orientation), 0.12, 1e-4);
+
+  // Negative regression 1: a genuine 12.3cm closing forward leg (> 8cm terminal_stub_max_length)
+  // or a 20 deg yaw jump (> 10 deg terminal_stub_max_yaw_diff) must NOT be absorbed, even when
+  // micro_cusp_length_threshold (0.30m) and inversion_xy_tolerance (0.15m) are wider.
+  nav_msgs::msg::Path closing_leg_path;
+  closing_leg_path.header.frame_id = "map";
+  closing_leg_path.poses.push_back(makeYawPose(0.50, 0.20, -M_PI_2));
+  closing_leg_path.poses.push_back(makeYawPose(0.50, 0.35, -M_PI_2));
+  closing_leg_path.poses.push_back(makeYawPose(0.50, 0.50, -1.65));    // cusp
+  closing_leg_path.poses.push_back(makeYawPose(0.50, 0.377, -M_PI_2));  // 12.3cm closing leg
+  handler.setPath(closing_leg_path);
+  EXPECT_NEAR(tf2::getYaw(handler.getInvertedPath().poses.back().pose.orientation), -1.65, 1e-4);
+  auto after_closing_handoff = handler.transformPath(makeYawPose(0.50, 0.50, -1.65, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 0u);
+  EXPECT_GE(after_closing_handoff.poses.size(), 2u);
+
+  // Negative regression 2: when general_goal_checker.xy_goal_tolerance (0.05m) is tighter
+  // than an 8cm forward terminal stub (x=0 -> x=+0.08), the stub lies outside the actual
+  // goal checker region and must NOT be absorbed; reaching x=0 must hand off to the stub.
+  PathHandlerWrapper tight_goal_handler;
+  auto tight_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("rev_tight_goal_node");
+  tight_node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(9999.9));
+  tight_node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  tight_node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  tight_node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.35));
+  tight_node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  tight_node->declare_parameter(
+    "general_goal_checker.xy_goal_tolerance", rclcpp::ParameterValue(0.05));
+  ParametersHandler tight_param_handler(tight_node);
+  tight_goal_handler.initialize(
+    tight_node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &tight_param_handler);
+
+  nav_msgs::msg::Path outside_goal_tol_path;
+  outside_goal_tol_path.header.frame_id = "map";
+  outside_goal_tol_path.poses.push_back(makeYawPose(0.70, 0.50, 0.0));
+  outside_goal_tol_path.poses.push_back(makeYawPose(0.60, 0.50, 0.0));
+  outside_goal_tol_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));   // reverse cusp
+  outside_goal_tol_path.poses.push_back(makeYawPose(0.58, 0.50, 0.05));  // +8cm forward stub (>5cm)
+  tight_goal_handler.setPath(outside_goal_tol_path);
+  // Cusp orientation is not overwritten because 0.08m > 0.05m goal_checker_xy_tolerance.
+  EXPECT_NEAR(
+    tf2::getYaw(tight_goal_handler.getInvertedPath().poses.back().pose.orientation), 0.0, 1e-4);
+  // Reaching the cusp hands off to the required forward closing segment.
+  auto handed_off = tight_goal_handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
+  EXPECT_EQ(tight_goal_handler.getInversionLocale(), 0u);
+  ASSERT_GE(handed_off.poses.size(), 2u);
+  EXPECT_NEAR(handed_off.poses.front().pose.position.x, 0.50, 1e-4);
+  EXPECT_NEAR(handed_off.poses.back().pose.position.x, 0.58, 1e-4);
 }
 
 TEST(PathHandlerTests, SinglePosePostCuspSegmentRetainsTwoPosesAfterHandoff)
@@ -878,8 +927,15 @@ TEST(PathHandlerTests, SinglePosePostCuspSegmentRetainsTwoPosesAfterHandoff)
   EXPECT_EQ(handler.getInversionLocale(), 0u);
   EXPECT_GE(transformed.poses.size(), 2u);
 
-  // If the preceding pose is outside the local costmap bounds, fallback to the
-  // valid final pose instead of returning an empty transformed plan.
+  // Even when the robot moves closer to the final post-cusp pose than the cusp,
+  // the 2-pose post-cusp segment retains both poses so critics still see 1 segment.
+  auto near_post_cusp_end = makeYawPose(0.50, 0.43, -M_PI_2, "odom");
+  auto transformed_near_end = handler.transformPath(near_post_cusp_end);
+  EXPECT_EQ(transformed_near_end.poses.size(), 2u);
+
+  // When the preceding pose lies outside the local costmap bounds, 1 pose is
+  // acceptable as a fallback so getGlobalPlanConsideringBoundsInCostmapFrame()
+  // does not return an empty plan and cause transformPath() to throw InvalidPath.
   nav_msgs::msg::Path sparse_path;
   sparse_path.header.frame_id = "map";
   sparse_path.poses.push_back(makeYawPose(-50.0, -50.0, 0.0));  // out of costmap bounds
