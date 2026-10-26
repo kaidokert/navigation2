@@ -832,6 +832,20 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   auto transformed = handler.transformPath(robot_at_cusp);
   EXPECT_EQ(handler.getInversionLocale(), 4u);
   EXPECT_GE(transformed.poses.size(), 2u);
+
+  // Forward approach + 4cm reverse micro-stub must also preserve aligned goal yaw
+  // on appended ghost poses rather than overwriting with forward travel heading (0 rad).
+  nav_msgs::msg::Path fwd_path;
+  fwd_path.header.frame_id = "map";
+  fwd_path.poses.push_back(makeYawPose(0.20, 0.50, 0.0));
+  fwd_path.poses.push_back(makeYawPose(0.30, 0.50, 0.0));
+  fwd_path.poses.push_back(makeYawPose(0.40, 0.50, 0.0));
+  fwd_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));   // cusp
+  fwd_path.poses.push_back(makeYawPose(0.46, 0.50, 0.25));  // 4cm reverse stub (yaw=0.25 rad)
+  handler.setPath(fwd_path);
+  auto fwd_transformed = handler.transformPath(makeYawPose(0.42, 0.50, 0.0, "odom"));
+  ASSERT_GT(fwd_transformed.poses.size(), 2u);
+  EXPECT_NEAR(tf2::getYaw(fwd_transformed.poses.back().pose.orientation), 0.25, 1e-4);
 }
 
 TEST(PathHandlerTests, SinglePosePostCuspSegmentRetainsTwoPosesAfterHandoff)
@@ -863,4 +877,14 @@ TEST(PathHandlerTests, SinglePosePostCuspSegmentRetainsTwoPosesAfterHandoff)
   auto transformed = handler.transformPath(robot_at_cusp);
   EXPECT_EQ(handler.getInversionLocale(), 0u);
   EXPECT_GE(transformed.poses.size(), 2u);
+
+  // If the preceding pose is outside the local costmap bounds, fallback to the
+  // valid final pose instead of returning an empty transformed plan.
+  nav_msgs::msg::Path sparse_path;
+  sparse_path.header.frame_id = "map";
+  sparse_path.poses.push_back(makeYawPose(-50.0, -50.0, 0.0));  // out of costmap bounds
+  sparse_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));    // inside costmap bounds
+  handler.setPath(sparse_path);
+  auto sparse_transformed = handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
+  EXPECT_EQ(sparse_transformed.poses.size(), 1u);
 }

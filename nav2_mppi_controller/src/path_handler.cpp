@@ -100,11 +100,23 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
     });
 
   // Retain at least 2 poses when available so a 2-pose segment never collapses
-  // to a 1-pose (0-segment) path before handoff or goal completion.
+  // to a 1-pose (0-segment) path before handoff or goal completion, provided
+  // the preceding pose is within prune_distance_ and inside the costmap bounds.
   if (global_plan_up_to_inversion_.poses.size() >= 2 &&
     closest_point == global_plan_up_to_inversion_.poses.end() - 1)
   {
-    closest_point = global_plan_up_to_inversion_.poses.end() - 2;
+    auto prev_point = global_plan_up_to_inversion_.poses.end() - 2;
+    geometry_msgs::msg::PoseStamped prev_costmap_pose;
+    prev_point->header.stamp = global_pose.header.stamp;
+    prev_point->header.frame_id = global_plan_.header.frame_id;
+    unsigned int prev_mx, prev_my;
+    if (euclidean_distance(*prev_point, *closest_point) <= prune_distance_ &&
+      transformPose(costmap_->getGlobalFrameID(), *prev_point, prev_costmap_pose) &&
+      costmap_->getCostmap()->worldToMap(
+        prev_costmap_pose.pose.position.x, prev_costmap_pose.pose.position.y, prev_mx, prev_my))
+    {
+      closest_point = prev_point;
+    }
   }
 
   nav_msgs::msg::Path transformed_plan;
@@ -465,12 +477,13 @@ size_t PathHandler::appendGhostPath(
   size_t appended = 0u;
   double appended_length = 0.0;
   auto next_pose = transformed_plan.poses.back();
-  // Preserve the robot nose orientation on reverse segments: estimateGhostHeading()
-  // returns the travel displacement direction (which is nose + pi when backing up).
-  // Overwriting next_pose.pose.orientation with travel heading flips yaw by 180 deg
-  // and causes PathAlignCritic(use_path_orientations) to penalize reversing into the cusp.
+  // Preserve the robot nose orientation on reverse segments (where travel heading
+  // is nose + pi) and whenever terminal_stub_aligned_ has stamped the final goal
+  // orientation onto the cusp pose.
   const double endpoint_yaw = tf2::getYaw(next_pose.pose.orientation);
-  if (std::fabs(angles::shortest_angular_distance(endpoint_yaw, heading)) <= M_PI_2) {
+  if (!terminal_stub_aligned_ &&
+    std::fabs(angles::shortest_angular_distance(endpoint_yaw, heading)) <= M_PI_2)
+  {
     next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
   }
 
