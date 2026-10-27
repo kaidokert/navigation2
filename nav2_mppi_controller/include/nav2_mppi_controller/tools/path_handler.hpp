@@ -267,6 +267,12 @@ protected:
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
+  // Stranded handoff (#102): the segment before the cusp is fully consumed (no real path left)
+  // while the robot is still within this radius of the cusp but outside inversion_xy_tolerance.
+  // After stranded_handoff_cycles consecutive cycles, hand off anyway. <= 0 disables.
+  double stranded_handoff_radius_{0.0};
+  int stranded_handoff_cycles_{20};
+  unsigned int stranded_cycles_{0u};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
   bool terminal_stub_aligned_{false};
