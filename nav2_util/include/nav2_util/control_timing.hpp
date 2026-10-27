@@ -101,7 +101,7 @@ public:
 
   class Cycle
   {
-  public:
+public:
     explicit Cycle(ControlTiming & owner)
     : owner_(owner)
     {
@@ -141,7 +141,8 @@ public:
       }
       owner_.last_publish_ = now;
     }
-  private:
+
+private:
     Cycle * previous_{nullptr};
     ControlTiming & owner_;
     Row row_;

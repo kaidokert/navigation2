@@ -7,18 +7,17 @@ The robot's real stack is neither addressed nor modified. Not a driving benchmar
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
+from geometry_msgs.msg import PoseStamped, TransformStamped, TwistStamped
+from lifecycle_msgs.msg import Transition
+from lifecycle_msgs.srv import ChangeState
+from nav2_msgs.action import FollowPath
+from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 import rclpy
 from rclpy.action import ActionClient
-from rclpy.qos import QoSProfile, DurabilityPolicy
-from geometry_msgs.msg import PoseStamped, TransformStamped, TwistStamped
-from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from nav2_msgs.action import FollowPath
-from lifecycle_msgs.srv import ChangeState
-from lifecycle_msgs.msg import Transition
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
@@ -39,7 +38,8 @@ def main():
     node.create_subscription(String, '/controller_server/control_timing',
                              lambda msg: timing.append(json.loads(msg.data)), 10)
     node.create_subscription(TwistStamped, '/dry_run/cmd_vel',
-                             lambda msg: commands.append([msg.twist.linear.x, msg.twist.angular.z]), 10)
+                             lambda msg: commands.append(
+                                 [msg.twist.linear.x, msg.twist.angular.z]), 10)
 
     def inputs():
         stamp = node.get_clock().now().to_msg()

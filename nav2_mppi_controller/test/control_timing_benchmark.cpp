@@ -4,9 +4,9 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
-#include <xtensor/xrandom.hpp>
 #include <iostream>
 #include <vector>
+#include <xtensor/xrandom.hpp>
 #include "utils/utils.hpp"
 #include "nav2_util/control_timing.hpp"
 
