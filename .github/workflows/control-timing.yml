@@ -27,7 +27,6 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           colcon build --executor sequential --packages-select nav2_critics_msgs nav2_util \
             nav2_costmap_2d nav2_controller nav2_mppi_controller \
-            --allow-overriding nav2_util nav2_costmap_2d nav2_controller nav2_mppi_controller \
             --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Run stationary timing tests
         shell: bash
