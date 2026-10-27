@@ -296,17 +296,15 @@ void Optimizer::optimize(bool diag)
 
 bool Optimizer::fallback(bool fail)
 {
-  static size_t counter = 0;
-
   if (!fail) {
-    counter = 0;
+    retry_attempt_counter_ = 0;
     return false;
   }
 
   reset(false /*Don't reset zone-based speed limits after fallback*/);
 
-  if (++counter > settings_.retry_attempt_limit) {
-    counter = 0;
+  if (++retry_attempt_counter_ > settings_.retry_attempt_limit) {
+    retry_attempt_counter_ = 0;
     throw nav2_core::NoValidControl("Optimizer fail to compute path");
   }
 
@@ -328,6 +326,7 @@ void Optimizer::prepare(
   costs_.fill(0.0f);
   goal_ = goal;
 
+  retry_attempt_counter_ = 0;
   critics_data_.fail_flag = false;
   critics_data_.goal_checker = goal_checker;
   critics_data_.motion_model = motion_model_;

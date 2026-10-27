@@ -708,8 +708,6 @@ public:
     motion_model_ = std::make_shared<mppi::DiffDriveMotionModel>();
     noise_generator_.initialize(settings_, false, "FollowPath", parameters);
     reset();
-    // Production fallback uses a function-static retry counter: isolate tests.
-    fallback(false);
     geometry_msgs::msg::PoseStamped pose;
     pose.header.frame_id = "map";
     pose.pose.orientation.w = 1.0;
@@ -720,7 +718,6 @@ public:
     geometry_msgs::msg::Twist speed;
     prepare(pose, speed, path, path.poses.back().pose, nullptr);
   }
-  ~RetryObserver() {fallback(false);}
   mppi::CriticData & data() {return critics_data_;}
   bool retry() {return fallback(critics_data_.fail_flag);}
 };
@@ -732,11 +729,14 @@ TEST(OptimizerTests, FallbackRetryClearsFailFlagAndScoresRetryBatch)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("retry_lifecycle_node");
   ParametersHandler parameters(node);
   RetryObserver optimizer(&parameters);
+  RetryObserver peer_optimizer(&parameters);
 
   BatchManager manager;
   auto & data = optimizer.data();
+  auto & peer_data = peer_optimizer.data();
 
-  // Case 1: Transient blocked batch followed by feasible retry batch must score twice.
+  // Case 1: Transient blocked batch followed by feasible retry batch must score twice,
+  // and must not consume a peer optimizer instance's retry budget.
   manager.outcome->blocked = true;
   manager.evalTrajectoriesScores(data);
   ASSERT_EQ(manager.outcome->calls, 1);
@@ -744,9 +744,13 @@ TEST(OptimizerTests, FallbackRetryClearsFailFlagAndScoresRetryBatch)
   ASSERT_TRUE(optimizer.retry());
   EXPECT_FALSE(data.fail_flag);
   EXPECT_FLOAT_EQ(data.costs(0), 0.0f);
+  manager.evalTrajectoriesScores(peer_data);
+  ASSERT_TRUE(peer_data.fail_flag);
+  EXPECT_TRUE(peer_optimizer.retry());
+  EXPECT_FALSE(peer_data.fail_flag);
   manager.outcome->blocked = false;
   manager.evalTrajectoriesScores(data);
-  EXPECT_EQ(manager.outcome->calls, 2);
+  EXPECT_EQ(manager.outcome->calls, 3);
   EXPECT_FALSE(data.fail_flag);
   EXPECT_FLOAT_EQ(data.costs(0), 7.0f);
   EXPECT_FALSE(optimizer.retry());
@@ -754,11 +758,11 @@ TEST(OptimizerTests, FallbackRetryClearsFailFlagAndScoresRetryBatch)
   // Case 2: Persistent blocked batch still exhausts retry_attempt_limit and throws NoValidControl.
   manager.outcome->blocked = true;
   manager.evalTrajectoriesScores(data);
-  ASSERT_EQ(manager.outcome->calls, 3);
+  ASSERT_EQ(manager.outcome->calls, 4);
   ASSERT_TRUE(data.fail_flag);
   ASSERT_TRUE(optimizer.retry());
   manager.evalTrajectoriesScores(data);
-  EXPECT_EQ(manager.outcome->calls, 4);
+  EXPECT_EQ(manager.outcome->calls, 5);
   EXPECT_TRUE(data.fail_flag);
   EXPECT_THROW(optimizer.retry(), nav2_core::NoValidControl);
 }
