@@ -220,6 +220,7 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
       path_handler_.setGoalTolerance(pose_tol.position.x);
     }
   }
+  path_handler_.setGoalChecker(goal_checker);
   geometry_msgs::msg::Pose goal = path_handler_.getTransformedGoal(robot_pose.header.stamp).pose;
 
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
