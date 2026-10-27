@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 #include <ctime>
 #include <cstdio>
 #include <cstring>
@@ -42,8 +43,8 @@ inline void nameTimingThread(const char * name)
   char previous[16]{};
   pthread_getname_np(pthread_self(), previous, sizeof(previous));
   if (short_name != previous && pthread_setname_np(pthread_self(), short_name.c_str()) == 0) {
-    std::fprintf(stderr, "[nav-thread] name=%s tid=%ld\n",
-      short_name.c_str(), static_cast<long>(timingThreadId()));
+    std::fprintf(stderr, "[nav-thread] name=%s tid=%s\n",
+      short_name.c_str(), std::to_string(timingThreadId()).c_str());
   }
 #else
   (void)name;
@@ -101,7 +102,8 @@ public:
   class Cycle
   {
   public:
-    explicit Cycle(ControlTiming & owner) : owner_(owner)
+    explicit Cycle(ControlTiming & owner)
+    : owner_(owner)
     {
       previous_ = currentCycle();
       currentCycle() = this;
@@ -160,7 +162,9 @@ private:
     size_t scheduler_misses{0};
     int64_t tid{0};
   };
-  void add(const Row & row, int64_t tid, const std::string & outcome, bool missed, bool scheduler_missed)
+  void add(
+    const Row & row, int64_t tid, const std::string & outcome,
+    bool missed, bool scheduler_missed)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     ++window_.count;
@@ -200,7 +204,7 @@ private:
         << ",\"scheduler_misses\":" << snapshot->scheduler_misses
         << ",\"deadline_misses\":" << snapshot->misses
         << ",\"deadline_miss_fraction\":"
-        << (snapshot->count ? double(snapshot->misses) / snapshot->count : 0.0)
+        << (snapshot->count ? static_cast<double>(snapshot->misses) / snapshot->count : 0.0)
         << ",\"metrics_seconds\":{";
     for (size_t f = 0; f < fields; ++f) {
       std::vector<double> values;

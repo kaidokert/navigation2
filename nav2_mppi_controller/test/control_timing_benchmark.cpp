@@ -3,6 +3,8 @@
 // Isolated stationary synthetic-state test: never publishes motor commands.
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <xtensor/xrandom.hpp>
 #include <iostream>
 #include <vector>
 #include "utils/utils.hpp"
@@ -15,6 +17,7 @@ TEST(ControlTimingBenchmark, AlternatingEnabledDisabledRealMPPI)
   auto costmap = getDummyCostmapRos(settings);
   costmap->setRobotFootprint(getDummySquareFootprint(0.01));
   std::vector<double> measurements[2];
+  std::vector<std::array<double, 2>> reference_commands;
   for (int block = 0; block < 4; ++block) {
     const bool enabled = (block == 1 || block == 2);  // ABBA order
     rclcpp::NodeOptions options;
@@ -28,6 +31,7 @@ TEST(ControlTimingBenchmark, AlternatingEnabledDisabledRealMPPI)
     options.parameter_overrides(params);
     auto node = getDummyNode(options);
     auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+    xt::random::seed(42);
     auto controller = getDummyController(node, tf, costmap);
     nav2_util::ControlTiming timing;
     timing.configure(node, "~/control_timing", .05);
@@ -44,7 +48,13 @@ TEST(ControlTimingBenchmark, AlternatingEnabledDisabledRealMPPI)
       const auto start = nav2_util::ControlTiming::Clock::now();
       {
         nav2_util::ControlTiming::Cycle cycle(timing);
-        EXPECT_NO_THROW(controller->computeVelocityCommands(pose, velocity, {}));
+        auto command = controller->computeVelocityCommands(pose, velocity, {});
+        if (block == 0) {
+          reference_commands.push_back({command.twist.linear.x, command.twist.angular.z});
+        } else {
+          EXPECT_DOUBLE_EQ(command.twist.linear.x, reference_commands[i][0]);
+          EXPECT_DOUBLE_EQ(command.twist.angular.z, reference_commands[i][1]);
+        }
         cycle.outcome("completed");
       }
       // Include aggregation/serialization when timer fires, as real overhead.
