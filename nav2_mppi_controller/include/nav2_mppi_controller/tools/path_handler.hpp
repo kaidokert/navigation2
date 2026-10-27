@@ -277,6 +277,7 @@ protected:
   double terminal_yaw_runway_max_tgp_length_{0.15};   // m — max remaining real TGP for runway
   double terminal_yaw_runway_max_goal_dist_{0.16};    // m — max goal dist for yaw runway
   double terminal_yaw_runway_min_yaw_error_{0.18};    // rad — min yaw err to extend runway
+  static constexpr double kTerminalRunwayGoalYawToleranceScale = 0.72;
   int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
   // <=0 DISABLES escape (default: off until the oscillation latch is implemented;
   // review 2026-09-25).
@@ -284,6 +285,10 @@ protected:
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
   mutable unsigned int exhausted_along_track_cycles_{0u};
+  mutable bool has_last_exhausted_check_pose_{false};
+  mutable double last_exhausted_check_x_{0.0};
+  mutable double last_exhausted_check_y_{0.0};
+  mutable double last_exhausted_check_yaw_{0.0};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
   bool terminal_stub_aligned_{false};
