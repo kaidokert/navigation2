@@ -14,6 +14,7 @@
 
 #include <memory>
 #include "nav2_util/node_thread.hpp"
+#include "nav2_util/control_timing.hpp"
 
 namespace nav2_util
 {
@@ -26,6 +27,7 @@ NodeThread::NodeThread(
   thread_ = std::make_unique<std::thread>(
     [&]()
     {
+      nameTimingThread(node_->get_name());
       executor_->add_node(node_);
       executor_->spin();
       executor_->remove_node(node_);
@@ -33,10 +35,16 @@ NodeThread::NodeThread(
 }
 
 NodeThread::NodeThread(rclcpp::executors::SingleThreadedExecutor::SharedPtr executor)
+: NodeThread(executor, "nav-executor")
+{}
+
+NodeThread::NodeThread(
+  rclcpp::executors::SingleThreadedExecutor::SharedPtr executor, const std::string & name)
 : executor_(executor)
 {
   thread_ = std::make_unique<std::thread>(
-    [&]() {
+    [this, name]() {
+      nameTimingThread(name.c_str());
       executor_->spin();
     });
 }

@@ -56,6 +56,8 @@ using namespace std::chrono_literals;
 using std::placeholders::_1;
 using rcl_interfaces::msg::ParameterType;
 
+#include "nav2_util/control_timing.hpp"
+
 namespace nav2_costmap_2d
 {
 Costmap2DROS::Costmap2DROS(const std::string & name, const bool & use_sim_time)
@@ -267,7 +269,7 @@ Costmap2DROS::on_configure(const rclcpp_lifecycle::State & /*state*/)
 
   executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
   executor_->add_callback_group(callback_group_, get_node_base_interface());
-  executor_thread_ = std::make_unique<nav2_util::NodeThread>(executor_);
+  executor_thread_ = std::make_unique<nav2_util::NodeThread>(executor_, "nav-map-exec");
   return nav2_util::CallbackReturn::SUCCESS;
 }
 
@@ -508,6 +510,7 @@ Costmap2DROS::getOrientedFootprint(std::vector<geometry_msgs::msg::Point> & orie
 void
 Costmap2DROS::mapUpdateLoop(double frequency)
 {
+  nav2_util::nameTimingThread("nav-map-update");
   RCLCPP_DEBUG(get_logger(), "mapUpdateLoop frequency: %lf", frequency);
 
   // the user might not want to run the loop every cycle

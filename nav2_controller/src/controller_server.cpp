@@ -133,6 +133,8 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   get_parameter("use_realtime_priority", use_realtime_priority_);
 
   costmap_ros_->configure();
+  timing_.configure(shared_from_this(), "~/control_timing", 1.0 / controller_frequency_);
+
   // Launch a thread to run the costmap node
   costmap_thread_ = std::make_unique<nav2_util::NodeThread>(costmap_ros_);
 
@@ -332,6 +334,7 @@ ControllerServer::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
 nav2_util::CallbackReturn
 ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
 {
+  timing_.cleanup();
   RCLCPP_INFO(get_logger(), "Cleaning up");
 
   // Cleanup the helper classes
@@ -500,8 +503,12 @@ void ControllerServer::computeControl()
     }
 
     last_valid_cmd_time_ = now();
+    nav2_util::nameTimingThread("nav-control");
+    timing_.resetPublicationInterval();
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
+      nav2_util::ControlTiming::Cycle timing_cycle(timing_);
+      auto stage_start = nav2_util::ControlTiming::Clock::now();
       auto start_time = this->now();
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
@@ -510,6 +517,7 @@ void ControllerServer::computeControl()
       }
 
       if (action_server_->is_cancel_requested()) {
+        timing_cycle.outcome("cancelled");
         if (controllers_[current_controller_]->cancel()) {
           RCLCPP_INFO(get_logger(), "Cancellation was successful. Stopping the robot.");
           action_server_->terminate_all();
@@ -521,6 +529,7 @@ void ControllerServer::computeControl()
         }
       }
 
+      stage_start = nav2_util::ControlTiming::Clock::now();
       // Don't compute a trajectory until costmap is valid (after clear costmap)
       rclcpp::Rate r(100);
       auto waiting_start = now();
@@ -531,17 +540,26 @@ void ControllerServer::computeControl()
         r.sleep();
       }
 
+      timing_cycle.stage(3, stage_start);
+      stage_start = nav2_util::ControlTiming::Clock::now();
       updateGlobalPath();
+      timing_cycle.stage(10, stage_start);
 
+      stage_start = nav2_util::ControlTiming::Clock::now();
       computeAndPublishVelocity();
+      timing_cycle.stage(9, stage_start);
+      timing_cycle.published();
+      timing_cycle.outcome("completed");
 
       if (isGoalReached()) {
         RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
 
+      timing_cycle.endMeasurement();
       auto cycle_duration = this->now() - start_time;
       if (!loop_rate.sleep()) {
+        timing_cycle.missed(true);
         RCLCPP_WARN(
           get_logger(),
           "Control loop missed its desired rate of %.4f Hz. Current loop rate is %.4f Hz.",
