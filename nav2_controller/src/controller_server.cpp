@@ -547,18 +547,17 @@ void ControllerServer::computeControl()
       updateGlobalPath();
       timing_cycle.stage(nav2_util::ControlTiming::Stage::GlobalPathUpdate, stage_start);
 
-      stage_start = nav2_util::ControlTiming::Clock::now();
-      computeAndPublishVelocity();
-      timing_cycle.stage(nav2_util::ControlTiming::Stage::ComputePublish, stage_start);
-      timing_cycle.published();
-      const bool goal_reached = isGoalReached();
-      timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
-
-      if (goal_reached) {
+      if (isGoalReached()) {
+        timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
         RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
 
+      stage_start = nav2_util::ControlTiming::Clock::now();
+      computeAndPublishVelocity();
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::ComputePublish, stage_start);
+      timing_cycle.published();
+      timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
       timing_cycle.endMeasurement();
       auto cycle_duration = this->now() - start_time;
       if (!loop_rate.sleep()) {
@@ -833,9 +832,12 @@ bool ControllerServer::isGoalReached()
 
   geometry_msgs::msg::PoseStamped transformed_end_pose;
   rclcpp::Duration tolerance(rclcpp::Duration::from_seconds(costmap_ros_->getTransformTolerance()));
-  nav_2d_utils::transformPose(
+  if (!nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
-    end_pose_, transformed_end_pose, tolerance);
+    end_pose_, transformed_end_pose, tolerance))
+  {
+    throw nav2_core::ControllerTFError("Failed to transform end pose to global frame");
+  }
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,

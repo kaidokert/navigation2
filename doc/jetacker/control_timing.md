@@ -142,3 +142,17 @@ Post-review validation also checks mixed-budget windows, inactive/cancellation/e
 classification, exact window-level counts, finite budgets and publication intervals.
 The MCAP smoke decoded five timing messages, including the cancelled cycle and idle
 window. A networked container was rejected before ROS initialization.
+
+
+## Core package baseline
+
+The production image has apt Nav2 1.3.13. The instrumented nav2_util,
+nav2_costmap_2d and nav2_controller packages therefore use upstream tag 1.3.13
+as their baseline, retaining the deployed goal-check-before-command ordering,
+TF error handling and costmap fixes. MPPI and Smac remain on the jetacker fork.
+The robot Docker build rejects a different apt core release. This core-source
+alignment avoids replacing the deployed 1.3.13 libraries with the fork's older
+1.3.11 implementation; it is not a new controller tuning experiment.
+
+Evidence at e9f64a6e predates this alignment. Repeat image, dry-run and overhead
+checks on the aligned source before treating this revision as validated.
