@@ -59,11 +59,30 @@ void PathHandler::initialize(
     getParam(goal_checker_xy_tolerance_, "terminal_stub_goal_xy_tolerance", 0.25);
     getParam(handoff_yaw_relax_per_cycle_, "handoff_yaw_relax_per_cycle", 0.005);
     getParam(handoff_yaw_relax_cap_, "handoff_yaw_relax_cap", 0.8);
+    getParam(exhausted_cusp_xy_tolerance_, "exhausted_cusp_xy_tolerance", 0.30);
+    getParam(exhausted_cusp_yaw_tolerance_, "exhausted_cusp_yaw_tolerance", 0.65);
+    getParam(cusp_along_track_threshold_, "cusp_along_track_threshold", 0.015);
+    getParam(exhausted_along_track_threshold_, "exhausted_along_track_threshold", 0.03);
+    getParam(exhausted_along_track_hold_cycles_, "exhausted_along_track_hold_cycles", 15);
+    getParam(
+      terminal_yaw_runway_max_tgp_length_, "terminal_yaw_runway_max_tgp_length", 0.15);
+    getParam(
+      terminal_yaw_runway_max_goal_dist_, "terminal_yaw_runway_max_goal_dist", 0.16);
+    getParam(
+      terminal_yaw_runway_min_yaw_error_, "terminal_yaw_runway_min_yaw_error", 0.18);
     // <=0 disables the escape policy (default: disabled pending oscillation latch)
     getParam(handoff_escape_after_cycles_, "handoff_escape_after_cycles", 0);
     handoff_yaw_relax_per_cycle_ = std::max(handoff_yaw_relax_per_cycle_, 0.0);
     handoff_yaw_relax_cap_ = std::max(
       handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
+    exhausted_cusp_xy_tolerance_ = std::max(exhausted_cusp_xy_tolerance_, 0.0);
+    exhausted_cusp_yaw_tolerance_ = std::max(exhausted_cusp_yaw_tolerance_, 0.0);
+    cusp_along_track_threshold_ = std::max(cusp_along_track_threshold_, 0.0);
+    exhausted_along_track_threshold_ = std::max(exhausted_along_track_threshold_, 0.0);
+    exhausted_along_track_hold_cycles_ = std::max(exhausted_along_track_hold_cycles_, 0);
+    terminal_yaw_runway_max_tgp_length_ = std::max(terminal_yaw_runway_max_tgp_length_, 0.0);
+    terminal_yaw_runway_max_goal_dist_ = std::max(terminal_yaw_runway_max_goal_dist_, 0.0);
+    terminal_yaw_runway_min_yaw_error_ = std::max(terminal_yaw_runway_min_yaw_error_, 0.0);
     if (min_inversion_horizon_ < 0.0) {
       RCLCPP_WARN(logger_,
         "min_inversion_horizon (%.3f) is negative, disabling ghost extension",
@@ -105,11 +124,13 @@ PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
       return euclidean_distance(global_pose, ps);
     });
 
-  // When a post-cusp handoff has only 2 poses ([cusp_pose, goal_pose]), retain
-  // the cusp pose when it is within prune_distance_ and inside the costmap bounds
-  // so the 2-pose post-cusp segment does not collapse to a 1-pose path.
-  if (two_pose_post_cusp_segment_ &&
-    global_plan_up_to_inversion_.poses.size() == 2 &&
+  // When a post-cusp handoff has only 2 poses ([cusp_pose, goal_pose]), or on
+  // the terminal segment when path inversion is enforced, retain the penultimate
+  // pose when it is within prune_distance_ and inside the costmap bounds so the
+  // terminal segment never collapses to a 1-pose (REAL=0.0000m) path.
+  if ((two_pose_post_cusp_segment_ ||
+    (enforce_path_inversion_ && inversion_locale_ == 0u)) &&
+    global_plan_up_to_inversion_.poses.size() >= 2 &&
     closest_point == global_plan_up_to_inversion_.poses.end() - 1)
   {
     auto prev_point = global_plan_up_to_inversion_.poses.end() - 2;
@@ -210,8 +231,11 @@ nav_msgs::msg::Path PathHandler::transformPath(
       }
       two_pose_post_cusp_segment_ =
         retain_cusp_pose && (global_plan_up_to_inversion_.poses.size() == 2u);
+      handoff_blocked_cycles_ = 0u;
+      exhausted_along_track_cycles_ = 0u;
       current_segment_length_ = static_cast<double>(
         utils::pathLength(global_plan_up_to_inversion_));
+      updateCurrentSegmentDirection();
       absorbTerminalGoalSnapMicroStub();
       {
         const auto & cusp_pose = global_plan_up_to_inversion_.poses.back();
@@ -350,15 +374,46 @@ bool PathHandler::shouldUseGhostPath(
   double & cusp_dist,
   double & heading) const
 {
-  if (!enforce_path_inversion_ || min_inversion_horizon_ <= 0.0 || inversion_locale_ == 0u) {
-    return false;
-  }
-
-  if (transformed_plan.poses.empty() || tgp_length >= min_inversion_horizon_) {
+  if (!enforce_path_inversion_ || min_inversion_horizon_ <= 0.0 ||
+    transformed_plan.poses.empty() || tgp_length >= min_inversion_horizon_)
+  {
     return false;
   }
 
   cusp_dist = getCuspDistance(global_pose);
+
+  if (inversion_locale_ == 0u) {
+    // Terminal segment yaw-alignment runway: once the robot has reached the
+    // final poses (<= terminal_yaw_runway_max_tgp_length_) of the terminal real
+    // path inside the XY goal region (cusp_dist <= terminal_yaw_runway_max_goal_dist_)
+    // but still has an unaligned heading relative to the final goal pose,
+    // extend a short ghost runway along the goal tangent so PathFollowCritic
+    // and PathAlignCritic pull the Ackermann chassis into goal yaw tolerance
+    // without cutting the approach curve early.
+    if (transformed_plan.poses.size() < 2u ||
+      global_plan_up_to_inversion_.poses.empty() ||
+      tgp_length > terminal_yaw_runway_max_tgp_length_ ||
+      cusp_dist > terminal_yaw_runway_max_goal_dist_)
+    {
+      return false;
+    }
+    const double plan_goal_yaw =
+      tf2::getYaw(global_plan_up_to_inversion_.poses.back().pose.orientation);
+    const double robot_yaw = tf2::getYaw(global_pose.pose.orientation);
+    const double goal_yaw_err = std::fabs(
+      angles::shortest_angular_distance(robot_yaw, plan_goal_yaw));
+    const double min_yaw_err = has_active_goal_checker_yaw_tolerance_ ?
+      std::min(terminal_yaw_runway_min_yaw_error_, active_goal_checker_yaw_tolerance_ * 0.72) :
+      terminal_yaw_runway_min_yaw_error_;
+    if (goal_yaw_err > min_yaw_err) {
+      const double costmap_goal_yaw =
+        tf2::getYaw(transformed_plan.poses.back().pose.orientation);
+      heading = current_segment_is_reverse_ ?
+        angles::normalize_angle(costmap_goal_yaw + M_PI) : costmap_goal_yaw;
+      return true;
+    }
+    return false;
+  }
 
   double heading_variance = 0.0;
   double seed_arc_length = 0.0;
@@ -388,22 +443,21 @@ bool PathHandler::estimateGhostHeading(
   if (transformed_plan.poses.size() == 1) {
     double pose_yaw = tf2::getYaw(transformed_plan.poses[0].pose.orientation);
 
-    // Peek at the active segment plan to detect reverse travel direction.
-    // Use global_plan_up_to_inversion_ which is pruned near the robot each tick,
-    // so its first points reflect the local travel direction. global_plan_ is NOT
-    // pruned each tick and may retain points from the segment start, giving a stale
-    // direction on long curved segments (>90° arcs).
-    if (global_plan_up_to_inversion_.poses.size() >= 2) {
+    bool is_reverse_segment = current_segment_is_reverse_;
+    if (!is_reverse_segment && global_plan_up_to_inversion_.poses.size() >= 2) {
       const auto & p0 = global_plan_up_to_inversion_.poses[0].pose.position;
       const auto & p1 = global_plan_up_to_inversion_.poses[1].pose.position;
       double travel_dir = std::atan2(p1.y - p0.y, p1.x - p0.x);
       if (std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2) {
-        pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
-        RCLCPP_INFO(logger_,
-          "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
-          tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
-          pose_yaw * 180.0 / M_PI);
+        is_reverse_segment = true;
       }
+    }
+    if (is_reverse_segment) {
+      pose_yaw = angles::normalize_angle(pose_yaw + M_PI);
+      RCLCPP_INFO(logger_,
+        "[GHOST_FLIP] Single-point reverse detected: pose=%.0fdeg -> travel=%.0fdeg",
+        tf2::getYaw(transformed_plan.poses[0].pose.orientation) * 180.0 / M_PI,
+        pose_yaw * 180.0 / M_PI);
     }
 
     heading = pose_yaw;
@@ -500,7 +554,7 @@ size_t PathHandler::appendGhostPath(
   // is nose + pi) and whenever terminal_stub_aligned_ has stamped the final goal
   // orientation onto the cusp pose.
   const double endpoint_yaw = tf2::getYaw(next_pose.pose.orientation);
-  if (!terminal_stub_aligned_ &&
+  if (!terminal_stub_aligned_ && inversion_locale_ != 0u &&
     std::fabs(angles::shortest_angular_distance(endpoint_yaw, heading)) <= M_PI_2)
   {
     next_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(heading);
@@ -586,6 +640,8 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
   terminal_stub_aligned_ = false;
   two_pose_post_cusp_segment_ = false;
   has_cusp_original_orientation_ = false;
+  handoff_blocked_cycles_ = 0u;
+  exhausted_along_track_cycles_ = 0u;
   if (enforce_path_inversion_) {
     inversion_locale_ = utils::removePosesAfterFirstInversion(global_plan_up_to_inversion_);
     if (inversion_locale_ > 0u &&
@@ -597,7 +653,33 @@ void PathHandler::setPath(const nav_msgs::msg::Path & plan)
     }
     current_segment_length_ = static_cast<double>(
       utils::pathLength(global_plan_up_to_inversion_));
+    updateCurrentSegmentDirection();
     absorbTerminalGoalSnapMicroStub();
+  } else {
+    updateCurrentSegmentDirection();
+  }
+}
+
+void PathHandler::updateCurrentSegmentDirection()
+{
+  current_segment_is_reverse_ = false;
+  const auto & poses = global_plan_up_to_inversion_.poses;
+  if (poses.size() < 2u) {
+    return;
+  }
+  for (size_t i = poses.size() - 1u; i >= 1u; --i) {
+    const auto & p0 = poses[i - 1u].pose.position;
+    const auto & p1 = poses[i].pose.position;
+    const double dx = p1.x - p0.x;
+    const double dy = p1.y - p0.y;
+    if (std::hypot(dx, dy) < 1e-4) {
+      continue;
+    }
+    const double travel_dir = std::atan2(dy, dx);
+    const double pose_yaw = tf2::getYaw(poses[i - 1u].pose.orientation);
+    current_segment_is_reverse_ =
+      std::fabs(angles::shortest_angular_distance(pose_yaw, travel_dir)) > M_PI_2;
+    return;
   }
 }
 
@@ -605,6 +687,8 @@ void PathHandler::setGoalChecker(nav2_core::GoalChecker * goal_checker)
 {
   bool has_tol = false;
   double xy_tol = 0.0;
+  bool has_yaw_tol = false;
+  double yaw_tol = 0.0;
   if (goal_checker != nullptr) {
     geometry_msgs::msg::Pose pose_tol;
     geometry_msgs::msg::Twist vel_tol;
@@ -614,8 +698,15 @@ void PathHandler::setGoalChecker(nav2_core::GoalChecker * goal_checker)
         has_tol = true;
         xy_tol = cand;
       }
+      const double cand_yaw = std::fabs(tf2::getYaw(pose_tol.orientation));
+      if (std::isfinite(cand_yaw) && cand_yaw > 0.0) {
+        has_yaw_tol = true;
+        yaw_tol = cand_yaw;
+      }
     }
   }
+  has_active_goal_checker_yaw_tolerance_ = has_yaw_tol;
+  active_goal_checker_yaw_tolerance_ = yaw_tol;
   if (has_tol != has_active_goal_checker_xy_tolerance_ ||
     (has_tol && std::fabs(xy_tol - active_goal_checker_xy_tolerance_) > 1e-9))
   {
@@ -735,8 +826,14 @@ bool PathHandler::isWithinInversionTolerances(
   // Relax yaw tolerance for micro-cusps: segments shorter than the threshold
   // are planner artifacts, not meaningful maneuvers. Demanding precise yaw
   // alignment on a 4cm segment overconstrains the Ackermann controller.
+  // For intermediate short segments (15-30 cm), require the segment to be
+  // consumed down to <= 2 poses before unlocking the micro-cusp yaw gate so
+  // the controller does not discard the second half of a 26-29 cm positioning
+  // leg as soon as it enters the 15 cm Euclidean cusp radius.
   const bool is_micro_cusp =
-    current_segment_length_ < micro_cusp_length_threshold_;
+    (current_segment_length_ < micro_cusp_length_threshold_) &&
+    (current_segment_length_ <= static_cast<double>(inversion_xy_tolerance_) ||
+    global_plan_up_to_inversion_.poses.size() <= 1u);
   const double effective_yaw_tol = is_micro_cusp ?
     inversion_yaw_tolerance_ * micro_cusp_yaw_scale_ :
     inversion_yaw_tolerance_;
@@ -756,10 +853,57 @@ bool PathHandler::isWithinInversionTolerances(
       effective_yaw_tol +
       handoff_yaw_relax_per_cycle_ * static_cast<double>(handoff_blocked_cycles_)));
 
-  bool result = distance <= inversion_xy_tolerance_ &&
-    std::fabs(angle_distance) <= relaxed_yaw_tol;
+  // When the pre-cusp segment has been completely consumed by prunePlan()
+  // (<= 1 pose remaining in global_plan_up_to_inversion_) and is not a
+  // terminal-stub-aligned goal pose, the robot has reached the cusp along-track
+  // and only has a synthetic ghost stub left. Relax the handoff gates so a
+  // laterally offset robot (17-27 cm) hands off to the next real segment
+  // instead of oscillating in REAL=0.0000m ghost limbo.
+  const bool is_segment_exhausted =
+    (global_plan_up_to_inversion_.poses.size() <= 1u) && !terminal_stub_aligned_;
+  const double active_xy_tol = is_segment_exhausted ?
+    std::max(static_cast<double>(inversion_xy_tolerance_), exhausted_cusp_xy_tolerance_) :
+    static_cast<double>(inversion_xy_tolerance_);
+  const double active_yaw_tol = is_segment_exhausted ?
+    std::max(relaxed_yaw_tol, exhausted_cusp_yaw_tolerance_) :
+    relaxed_yaw_tol;
 
-  if (!result && distance <= inversion_xy_tolerance_) {
+  // Prevent premature along-track handoff on straight/gentle approaches: when
+  // the current segment still has multiple unconsumed poses and is longer than
+  // inversion_xy_tolerance_, require the along-track remaining distance to the
+  // cusp to be <= cusp_along_track_threshold_ before unlocking the handoff gate
+  // (or <= exhausted_along_track_threshold_ on exhausted segments for up to
+  // exhausted_along_track_hold_cycles_ cycles). Otherwise a straight approach
+  // (where yaw error is already ~0 at 15 cm distance) hands off 15 cm early
+  // and shifts the post-cusp minimum-radius arc by 15 cm.
+  const double cusp_yaw = tf2::getYaw(last_pose.pose.orientation);
+  const double travel_yaw = current_segment_is_reverse_ ?
+    angles::normalize_angle(cusp_yaw + M_PI) : cusp_yaw;
+  const double along_track_remaining =
+    (last_pose.pose.position.x - robot_pose.pose.position.x) * std::cos(travel_yaw) +
+    (last_pose.pose.position.y - robot_pose.pose.position.y) * std::sin(travel_yaw);
+  if (is_segment_exhausted && distance <= active_xy_tol &&
+    along_track_remaining > exhausted_along_track_threshold_)
+  {
+    ++exhausted_along_track_cycles_;
+  } else {
+    exhausted_along_track_cycles_ = 0u;
+  }
+  const bool premature_along_track =
+    (current_segment_length_ > static_cast<double>(inversion_xy_tolerance_)) &&
+    ((!is_segment_exhausted && along_track_remaining > cusp_along_track_threshold_) ||
+    (is_segment_exhausted && along_track_remaining > exhausted_along_track_threshold_ &&
+    exhausted_along_track_cycles_ <=
+    static_cast<unsigned int>(std::max(exhausted_along_track_hold_cycles_, 0))));
+
+  const bool standard_result = !premature_along_track &&
+    distance <= inversion_xy_tolerance_ &&
+    std::fabs(angle_distance) <= relaxed_yaw_tol;
+  bool result = !premature_along_track &&
+    distance <= active_xy_tol &&
+    std::fabs(angle_distance) <= active_yaw_tol;
+
+  if (!result && distance <= active_xy_tol && std::fabs(angle_distance) > active_yaw_tol) {
     ++handoff_blocked_cycles_;
     // clock_ is only set by initialize(); guard so the tolerance check stays
     // callable on a bare PathHandler (unit tests construct it without a node —
@@ -768,19 +912,24 @@ bool PathHandler::isWithinInversionTolerances(
       RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
         "[HANDOFF_BLOCKED] xy=%.4fm(<%.2f) yaw=%.3frad(need<%.2f%s) "
         "seg_len=%.3fm blocked=%u",
-        distance, inversion_xy_tolerance_,
-        std::fabs(angle_distance), relaxed_yaw_tol,
-        is_micro_cusp ? " MICRO" : "",
+        distance, active_xy_tol,
+        std::fabs(angle_distance), active_yaw_tol,
+        is_micro_cusp ? " MICRO" : (is_segment_exhausted ? " EXHAUSTED" : ""),
         current_segment_length_, handoff_blocked_cycles_);
     }
-  } else {
+  } else if (result || distance > active_xy_tol) {
     // Unlocked, or left the xy tolerance: relaxation must not bank across
     // separate approaches.
     handoff_blocked_cycles_ = 0u;
-    if (result && is_micro_cusp) {
+    if (result && is_segment_exhausted && !standard_result) {
+      RCLCPP_INFO(logger_,
+        "[HANDOFF_EXHAUSTED] xy=%.4fm(tol=%.2f) yaw=%.3frad(tol=%.2f) seg_len=%.3fm",
+        distance, active_xy_tol, std::fabs(angle_distance), active_yaw_tol,
+        current_segment_length_);
+    } else if (result && is_micro_cusp) {
       RCLCPP_INFO(logger_,
         "[HANDOFF_MICRO] xy=%.4fm yaw=%.3frad(tol=%.2f) seg_len=%.3fm",
-        distance, std::fabs(angle_distance), relaxed_yaw_tol,
+        distance, std::fabs(angle_distance), active_yaw_tol,
         current_segment_length_);
     }
   }

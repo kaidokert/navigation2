@@ -826,12 +826,17 @@ TEST(PathHandlerTests, TerminalGoalSnapMicroStubIsAbsorbedOnReverse90)
   ASSERT_EQ(handler.getInvertedPath().poses.size(), 4u);
   EXPECT_NEAR(tf2::getYaw(handler.getInvertedPath().poses.back().pose.orientation), -M_PI_2, 1e-4);
 
-  // Even when the robot reaches the cusp within inversion tolerances, the
-  // aligned terminal micro-stub must NOT trigger a forward gear handoff.
+  // Even when the robot reaches the cusp within inversion tolerances, or is
+  // laterally offset by 0.22m on a 1-pose exhausted segment, the aligned
+  // terminal micro-stub must NOT trigger a forward gear handoff.
   auto robot_at_cusp = makeYawPose(0.782, 0.582, -M_PI_2, "odom");
   auto transformed = handler.transformPath(robot_at_cusp);
   EXPECT_EQ(handler.getInversionLocale(), 4u);
   EXPECT_GE(transformed.poses.size(), 2u);
+  auto robot_exhausted_lateral = makeYawPose(0.562, 0.582, -M_PI_2, "odom");
+  auto transformed_exhausted = handler.transformPath(robot_exhausted_lateral);
+  EXPECT_EQ(handler.getInversionLocale(), 4u)
+    << "terminal_stub_aligned_ must never hand off even when pre-cusp segment is exhausted";
 
   // Forward approach + 4cm reverse micro-stub (yaw_diff = 0.12 rad <= 0.175 rad)
   // must also preserve aligned goal yaw on appended ghost poses rather than
@@ -971,4 +976,152 @@ TEST(PathHandlerTests, SinglePosePostCuspSegmentRetainsTwoPosesAfterHandoff)
   handler.setPath(sparse_path);
   auto sparse_transformed = handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
   EXPECT_EQ(sparse_transformed.poses.size(), 1u);
+}
+
+TEST(PathHandlerTests, SinglePointReverseGhostHeadingAfterTransformPathPrune)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("single_pt_rev_prune_node");
+  node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.exhausted_cusp_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
+  node->declare_parameter("dummy.ghost_min_seed_points", rclcpp::ParameterValue(2));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler param_handler(node);
+
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &param_handler);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // Pre-cusp reverse segment: robot backs along -Y (0.50, 0.45 -> 0.50, 0.25)
+  // while nose points +Y (+M_PI_2), followed by a forward leg along +Y.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.50, 0.45, M_PI_2));
+  path.poses.push_back(makeYawPose(0.50, 0.35, M_PI_2));
+  path.poses.push_back(makeYawPose(0.50, 0.25, M_PI_2));  // reverse cusp at y=0.25
+  path.poses.push_back(makeYawPose(0.50, 0.35, M_PI_2));  // forward leg along +Y
+  path.poses.push_back(makeYawPose(0.50, 0.55, M_PI_2));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+
+  // Place robot laterally offset at (0.68, 0.24) so closest_point is the final
+  // pre-cusp pose (0.50, 0.25) -> prunePlan reduces global_plan_up_to_inversion_
+  // to 1 pose, while cusp_dist = 0.18m > 0.15m prevents handoff.
+  auto robot_pose = makeYawPose(0.68, 0.24, M_PI_2, "odom");
+  auto transformed = handler.transformPath(robot_pose);
+  ASSERT_EQ(handler.getInvertedPath().poses.size(), 1u);
+  ASSERT_GT(transformed.poses.size(), 1u);
+
+  // Ghost points must extend in the REVERSE travel direction (-Y, y < 0.25),
+  // NOT along the nose direction (+Y, y > 0.25).
+  EXPECT_LT(transformed.poses.back().pose.position.y, 0.25)
+    << "Single-point reverse segment after prunePlan must extend ghost along -Y (reverse travel)";
+  EXPECT_NEAR(tf2::getYaw(transformed.poses.back().pose.orientation), M_PI_2, 1e-4);
+}
+
+TEST(PathHandlerTests, ExhaustedSegmentLateralCuspMissHandsOffAndGuardsEarlyAlongTrack)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("exhausted_handoff_node");
+  node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.27));
+  node->declare_parameter("dummy.exhausted_cusp_xy_tolerance", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.exhausted_cusp_yaw_tolerance", rclcpp::ParameterValue(0.65));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.30));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler param_handler(node);
+
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &param_handler);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // Forward segment along +X (x=0.20 -> x=0.50, y=0.20, yaw=0.0), then reverse leg along -X.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.20, 0.20, 0.0));
+  path.poses.push_back(makeYawPose(0.30, 0.20, 0.0));
+  path.poses.push_back(makeYawPose(0.40, 0.20, 0.0));
+  path.poses.push_back(makeYawPose(0.50, 0.20, 0.0));  // cusp at (0.50, 0.20)
+  path.poses.push_back(makeYawPose(0.40, 0.25, 0.1));  // reverse leg
+  path.poses.push_back(makeYawPose(0.30, 0.35, 0.3));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 4u);
+
+  // 1. Unexhausted straight approach 14cm before cusp (x=0.36, y=0.20, yaw=0.0):
+  // Euclidean dist = 0.14m <= 0.15m and yaw_err = 0.0, but poses.size() >= 2 and
+  // along_track_remaining = 0.14m > 0.015m -> must NOT hand off early.
+  auto early_pose = makeYawPose(0.36, 0.20, 0.0, "odom");
+  auto early_transformed = handler.transformPath(early_pose);
+  EXPECT_EQ(handler.getInversionLocale(), 4u)
+    << "Straight approach 14cm before cusp must not hand off early";
+
+  // 2. Exhausted segment abeam of cusp at 22cm lateral offset (x=0.51, y=0.42, yaw=0.45):
+  // closest_point is the cusp pose (0.50, 0.20), so prunePlan reduces the pre-cusp
+  // segment to 1 pose (exhausted). Euclidean dist = 0.2202m <= 0.30m and yaw = 0.45 <= 0.65
+  // -> must hand off immediately to the reverse segment!
+  auto abeam_pose = makeYawPose(0.51, 0.42, 0.45, "odom");
+  auto handed_off = handler.transformPath(abeam_pose);
+  EXPECT_EQ(handler.getInversionLocale(), 0u)
+    << "Exhausted segment at 22cm lateral offset must hand off to post-cusp segment";
+  EXPECT_GE(handed_off.poses.size(), 2u);
+
+  // 3. Exhausted segment with along_track_remaining > exhausted_along_track_threshold_ (0.03m):
+  // Reset path and place robot at (0.46, 0.40, yaw=0.45) where closest_point is (0.50, 0.20)
+  // (1 pose exhausted) and along_track_remaining = 0.04m > 0.03m. It holds for
+  // exhausted_along_track_hold_cycles_ (15) cycles, then unlocks on cycle 16.
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 4u);
+  auto exhausted_early_pose = makeYawPose(0.46, 0.40, 0.45, "odom");
+  for (int i = 0; i < 15; ++i) {
+    handler.transformPath(exhausted_early_pose);
+    EXPECT_EQ(handler.getInversionLocale(), 4u) << "Held at cycle " << i;
+  }
+  handler.transformPath(exhausted_early_pose);
+  EXPECT_EQ(handler.getInversionLocale(), 0u)
+    << "Exhausted along-track hold must unlock after exhausted_along_track_hold_cycles_";
+}
+
+TEST(PathHandlerTests, TerminalSegmentTwoPoseRetentionAndYawRunway)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("term_runway_node");
+  node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.35));
+  node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
+  node->declare_parameter("dummy.ghost_point_spacing", rclcpp::ParameterValue(0.05));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler param_handler(node);
+
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &param_handler);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // Single-segment forward path ending at (0.50, 0.50, yaw=0.0).
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.30, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.45, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 0u);
+
+  // Robot is at the goal XY (0.50, 0.50) with 0.35 rad yaw error (> 0.18 rad):
+  // 1) 2-pose retention keeps [(0.45, 0.50), (0.50, 0.50)] so real path never collapses to 1 pose.
+  // 2) Terminal yaw runway appends ghost poses along +X (x > 0.50) to pull yaw into alignment.
+  auto unaligned_robot = makeYawPose(0.50, 0.50, 0.35, "odom");
+  auto runway_plan = handler.transformPath(unaligned_robot);
+  ASSERT_GT(runway_plan.poses.size(), 2u);
+  EXPECT_GT(runway_plan.poses.back().pose.position.x, 0.50);
+
+  // Once the robot is aligned (yaw=0.05 rad <= 0.18 rad), the ghost runway stops extending,
+  // leaving the 2 retained real poses ending at x=0.50.
+  auto aligned_robot = makeYawPose(0.50, 0.50, 0.05, "odom");
+  auto aligned_plan = handler.transformPath(aligned_robot);
+  EXPECT_EQ(aligned_plan.poses.size(), 2u);
+  EXPECT_NEAR(aligned_plan.poses.back().pose.position.x, 0.50, 1e-4);
 }
