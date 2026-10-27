@@ -1427,6 +1427,9 @@ TEST(PathHandlerTests, RecordedConsumedReverseCuspRequestsReplanOnlyWhenEnabled)
   for (bool enabled : {false, true}) {
     auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("overrun_recorded");
     node->declare_parameter("dummy.enforce_path_inversion", true);
+    // This reduction truncates a real intermediate cusp after its first outgoing
+    // edge. It is not a final goal; isolate the historical overrun policy here.
+    node->declare_parameter("dummy.terminal_stub_max_length", 0.0);
     node->declare_parameter("dummy.replan_on_cusp_overrun", enabled);
     node->declare_parameter("dummy.inversion_xy_tolerance", 0.0676);
     node->declare_parameter("dummy.inversion_yaw_tolerance", 0.3);
