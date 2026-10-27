@@ -274,6 +274,7 @@ protected:
   CriticManager critic_manager_;
   NoiseGenerator noise_generator_;
   int diag_tick_{0};
+  size_t retry_attempt_counter_{0};
 
   models::OptimizerSettings settings_;
 

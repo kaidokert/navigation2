@@ -659,3 +659,173 @@ TEST(OptimizerTests, integrateStateVelocitiesTests)
     EXPECT_NEAR(traj.y(1, i), y, 1e-6);
   }
 }
+
+namespace
+{
+
+class BatchOutcomeCritic : public mppi::critics::CriticFunction
+{
+public:
+  BatchOutcomeCritic() {enabled_ = true;}
+  void initialize() override {}
+  void score(mppi::CriticData & data) override
+  {
+    ++calls;
+    data.costs.fill(blocked ? 1000.0f : 7.0f);
+    if (blocked) {
+      data.fail_flag = true;
+    }
+    // A feasible critic does not clear a failure owned by the retry lifecycle.
+  }
+  bool blocked{false};
+  int calls{0};
+};
+
+class BatchManager : public mppi::CriticManager
+{
+public:
+  BatchManager()
+  {
+    auto critic = std::make_unique<BatchOutcomeCritic>();
+    outcome = critic.get();
+    critics_.push_back(std::move(critic));
+    critic_names_.push_back("BatchOutcomeCritic");
+  }
+  BatchOutcomeCritic * outcome;
+};
+
+class RetryObserver : public mppi::Optimizer
+{
+public:
+  explicit RetryObserver(mppi::ParametersHandler * parameters)
+  {
+    settings_.batch_size = 2;
+    settings_.time_steps = 3;
+    settings_.model_dt = 0.05f;
+    settings_.retry_attempt_limit = 1;
+    settings_.sampling_std.vx = 0.1f;
+    settings_.sampling_std.wz = 0.1f;
+    motion_model_ = std::make_shared<mppi::DiffDriveMotionModel>();
+    noise_generator_.initialize(settings_, false, "FollowPath", parameters);
+    reset();
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "map";
+    pose.pose.orientation.w = 1.0;
+    nav_msgs::msg::Path path;
+    path.header = pose.header;
+    path.poses = {pose, pose};
+    path.poses.back().pose.position.x = 1.0;
+    geometry_msgs::msg::Twist speed;
+    prepare(pose, speed, path, path.poses.back().pose, nullptr);
+  }
+  mppi::CriticData & data() {return critics_data_;}
+  bool retry() {return fallback(critics_data_.fail_flag);}
+};
+
+}  // namespace
+
+TEST(OptimizerTests, FallbackRetryClearsFailFlagAndScoresRetryBatch)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("retry_lifecycle_node");
+  ParametersHandler parameters(node);
+  RetryObserver optimizer(&parameters);
+  RetryObserver peer_optimizer(&parameters);
+
+  BatchManager manager;
+  auto & data = optimizer.data();
+  auto & peer_data = peer_optimizer.data();
+
+  // Case 1: Transient blocked batch followed by feasible retry batch must score twice,
+  // and must not consume a peer optimizer instance's retry budget.
+  manager.outcome->blocked = true;
+  manager.evalTrajectoriesScores(data);
+  ASSERT_EQ(manager.outcome->calls, 1);
+  ASSERT_TRUE(data.fail_flag);
+  ASSERT_TRUE(optimizer.retry());
+  EXPECT_FALSE(data.fail_flag);
+  EXPECT_FLOAT_EQ(data.costs(0), 0.0f);
+  manager.evalTrajectoriesScores(peer_data);
+  ASSERT_TRUE(peer_data.fail_flag);
+  EXPECT_TRUE(peer_optimizer.retry());
+  EXPECT_FALSE(peer_data.fail_flag);
+  manager.outcome->blocked = false;
+  manager.evalTrajectoriesScores(data);
+  EXPECT_EQ(manager.outcome->calls, 3);
+  EXPECT_FALSE(data.fail_flag);
+  EXPECT_FLOAT_EQ(data.costs(0), 7.0f);
+  EXPECT_FALSE(optimizer.retry());
+
+  // Case 2: Persistent blocked batch still exhausts retry_attempt_limit and throws NoValidControl.
+  manager.outcome->blocked = true;
+  manager.evalTrajectoriesScores(data);
+  ASSERT_EQ(manager.outcome->calls, 4);
+  ASSERT_TRUE(data.fail_flag);
+  ASSERT_TRUE(optimizer.retry());
+  manager.evalTrajectoriesScores(data);
+  EXPECT_EQ(manager.outcome->calls, 5);
+  EXPECT_TRUE(data.fail_flag);
+  EXPECT_THROW(optimizer.retry(), nav2_core::NoValidControl);
+}
+
+TEST(OptimizerTests, EvalControlRecoversViaFallbackRetryWhenWarmStartCollides)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("eval_control_retry_node");
+  node->declare_parameter("controller_frequency", rclcpp::ParameterValue(10.0));
+  node->declare_parameter("mppic.batch_size", rclcpp::ParameterValue(4));
+  node->declare_parameter("mppic.time_steps", rclcpp::ParameterValue(10));
+  node->declare_parameter("mppic.model_dt", rclcpp::ParameterValue(0.1));
+  node->declare_parameter("mppic.retry_attempt_limit", rclcpp::ParameterValue(1));
+  node->declare_parameter("mppic.gamma", rclcpp::ParameterValue(0.0));
+  node->declare_parameter("mppic.vx_std", rclcpp::ParameterValue(0.001));
+  node->declare_parameter("mppic.vy_std", rclcpp::ParameterValue(0.001));
+  node->declare_parameter("mppic.wz_std", rclcpp::ParameterValue(0.001));
+  node->declare_parameter(
+    "mppic.critics",
+    rclcpp::ParameterValue(std::vector<std::string>{"ObstaclesCritic"}));
+  node->declare_parameter("mppic.ObstaclesCritic.consider_footprint", rclcpp::ParameterValue(true));
+
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "retry_costmap", "", "retry_costmap", true);
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->set_parameter(rclcpp::Parameter("footprint", std::string(
+      "[[0.170,0.151],[0.170,-0.151],[-0.156,-0.151],[-0.156,0.151]]")));
+  rclcpp_lifecycle::State lstate;
+  ASSERT_EQ(costmap_ros->on_configure(lstate), nav2_util::CallbackReturn::SUCCESS);
+  costmap_ros->pause();
+  costmap_ros->getLayeredCostmap()->resizeMap(200, 200, 0.05, -2.0, -2.0);
+  auto * grid = costmap_ros->getCostmap();
+  std::fill(grid->getCharMap(), grid->getCharMap() + 40000, 0);
+
+  // Place a lethal obstacle at x = 0.23 m so a warm-started 0.5 m/s rollout collides on pass 1,
+  // while the fallback-reset 0.0 m/s rollout at the origin (0, 0) is collision-free on pass 2.
+  unsigned int mx = 0u, my = 0u;
+  ASSERT_TRUE(grid->worldToMap(0.23, 0.0, mx, my));
+  grid->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  ParametersHandler param_handler(node);
+  OptimizerTester optimizer_tester;
+  optimizer_tester.initialize(node, "mppic", costmap_ros, &param_handler);
+  optimizer_tester.fallbackWrapper(false);
+
+  auto & seq = optimizer_tester.grabControlSequence();
+  seq.vx.fill(0.5f);
+  seq.wz.fill(0.0f);
+
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.frame_id = "map";
+  pose.pose.orientation.w = 1.0;
+  geometry_msgs::msg::Twist speed;
+  nav_msgs::msg::Path plan;
+  plan.header = pose.header;
+  plan.poses = {pose, pose};
+  plan.poses.back().pose.position.x = 1.0;
+
+  geometry_msgs::msg::TwistStamped cmd;
+  EXPECT_NO_THROW({
+    cmd = optimizer_tester.evalControl(pose, speed, plan, plan.poses.back().pose, nullptr);
+  });
+  EXPECT_NEAR(cmd.twist.linear.x, 0.0, 1e-2);
+
+  optimizer_tester.shutdown();
+  costmap_ros->on_cleanup(lstate);
+}
