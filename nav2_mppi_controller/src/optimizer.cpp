@@ -310,6 +310,8 @@ bool Optimizer::fallback(bool fail)
     throw nav2_core::NoValidControl("Optimizer fail to compute path");
   }
 
+  // A permitted retry must score its fresh batch, not retain the failed batch flag.
+  critics_data_.fail_flag = false;
   return true;
 }
 

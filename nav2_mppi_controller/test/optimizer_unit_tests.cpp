@@ -659,3 +659,106 @@ TEST(OptimizerTests, integrateStateVelocitiesTests)
     EXPECT_NEAR(traj.y(1, i), y, 1e-6);
   }
 }
+
+namespace
+{
+
+class BatchOutcomeCritic : public mppi::critics::CriticFunction
+{
+public:
+  BatchOutcomeCritic() {enabled_ = true;}
+  void initialize() override {}
+  void score(mppi::CriticData & data) override
+  {
+    ++calls;
+    data.costs.fill(blocked ? 1000.0f : 7.0f);
+    if (blocked) {
+      data.fail_flag = true;
+    }
+    // A feasible critic does not clear a failure owned by the retry lifecycle.
+  }
+  bool blocked{false};
+  int calls{0};
+};
+
+class BatchManager : public mppi::CriticManager
+{
+public:
+  BatchManager()
+  {
+    auto critic = std::make_unique<BatchOutcomeCritic>();
+    outcome = critic.get();
+    critics_.push_back(std::move(critic));
+    critic_names_.push_back("BatchOutcomeCritic");
+  }
+  BatchOutcomeCritic * outcome;
+};
+
+class RetryObserver : public mppi::Optimizer
+{
+public:
+  explicit RetryObserver(mppi::ParametersHandler * parameters)
+  {
+    settings_.batch_size = 2;
+    settings_.time_steps = 3;
+    settings_.model_dt = 0.05f;
+    settings_.retry_attempt_limit = 1;
+    settings_.sampling_std.vx = 0.1f;
+    settings_.sampling_std.wz = 0.1f;
+    motion_model_ = std::make_shared<mppi::DiffDriveMotionModel>();
+    noise_generator_.initialize(settings_, false, "FollowPath", parameters);
+    reset();
+    // Production fallback uses a function-static retry counter: isolate tests.
+    fallback(false);
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "map";
+    pose.pose.orientation.w = 1.0;
+    nav_msgs::msg::Path path;
+    path.header = pose.header;
+    path.poses = {pose, pose};
+    path.poses.back().pose.position.x = 1.0;
+    geometry_msgs::msg::Twist speed;
+    prepare(pose, speed, path, path.poses.back().pose, nullptr);
+  }
+  ~RetryObserver() {fallback(false);}
+  mppi::CriticData & data() {return critics_data_;}
+  bool retry() {return fallback(critics_data_.fail_flag);}
+};
+
+}  // namespace
+
+TEST(OptimizerTests, FallbackRetryClearsFailFlagAndScoresRetryBatch)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("retry_lifecycle_node");
+  ParametersHandler parameters(node);
+  RetryObserver optimizer(&parameters);
+
+  BatchManager manager;
+  auto & data = optimizer.data();
+
+  // Case 1: Transient blocked batch followed by feasible retry batch must score twice.
+  manager.outcome->blocked = true;
+  manager.evalTrajectoriesScores(data);
+  ASSERT_EQ(manager.outcome->calls, 1);
+  ASSERT_TRUE(data.fail_flag);
+  ASSERT_TRUE(optimizer.retry());
+  EXPECT_FALSE(data.fail_flag);
+  EXPECT_FLOAT_EQ(data.costs(0), 0.0f);
+  manager.outcome->blocked = false;
+  manager.evalTrajectoriesScores(data);
+  EXPECT_EQ(manager.outcome->calls, 2);
+  EXPECT_FALSE(data.fail_flag);
+  EXPECT_FLOAT_EQ(data.costs(0), 7.0f);
+  EXPECT_FALSE(optimizer.retry());
+
+  // Case 2: Persistent blocked batch still exhausts retry_attempt_limit and throws NoValidControl.
+  manager.outcome->blocked = true;
+  manager.evalTrajectoriesScores(data);
+  ASSERT_EQ(manager.outcome->calls, 3);
+  ASSERT_TRUE(data.fail_flag);
+  ASSERT_TRUE(optimizer.retry());
+  manager.evalTrajectoriesScores(data);
+  EXPECT_EQ(manager.outcome->calls, 4);
+  EXPECT_TRUE(data.fail_flag);
+  EXPECT_THROW(optimizer.retry(), nav2_core::NoValidControl);
+}
