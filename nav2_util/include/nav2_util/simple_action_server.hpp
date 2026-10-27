@@ -133,7 +133,7 @@ public:
     if (spin_thread_) {
       executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
       executor_->add_callback_group(callback_group_, node_base_interface_);
-      executor_thread_ = std::make_unique<nav2_util::NodeThread>(executor_);
+      executor_thread_ = std::make_unique<nav2_util::NodeThread>(executor_, "nav-action-exec");
     }
   }
 

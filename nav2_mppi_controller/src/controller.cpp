@@ -85,28 +85,40 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
   auto start = std::chrono::system_clock::now();
 #endif
 
+  auto stage_start = nav2_util::ControlTiming::Clock::now();
   std::lock_guard<std::mutex> param_lock(*parameters_handler_->getLock());
+  nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::ParameterLockWait,
+      stage_start);
+  stage_start = nav2_util::ControlTiming::Clock::now();
   path_handler_.setGoalChecker(goal_checker);
   geometry_msgs::msg::Pose goal = path_handler_.getTransformedGoal(robot_pose.header.stamp).pose;
 
   nav_msgs::msg::Path transformed_plan = path_handler_.transformPath(robot_pose);
 
+  nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::PathTf, stage_start);
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
+  stage_start = nav2_util::ControlTiming::Clock::now();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*(costmap->getMutex()));
 
+  nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::CostmapLockWait,
+      stage_start);
+  stage_start = nav2_util::ControlTiming::Clock::now();
   geometry_msgs::msg::TwistStamped cmd =
     optimizer_.evalControl(robot_pose, robot_speed, transformed_plan, goal, goal_checker);
 
+  nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::Optimizer, stage_start);
 #ifdef BENCHMARK_TESTING
   auto end = std::chrono::system_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
   RCLCPP_INFO(logger_, "Control loop execution time: %ld [ms]", duration);
 #endif
 
+  stage_start = nav2_util::ControlTiming::Clock::now();
   if (visualize_) {
     visualize(std::move(transformed_plan), cmd.header.stamp);
+    nav2_util::ControlTiming::stageCurrent(
+      nav2_util::ControlTiming::Stage::Visualization, stage_start);
   }
-
   return cmd;
 }
 

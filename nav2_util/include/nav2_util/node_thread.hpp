@@ -16,6 +16,7 @@
 #define NAV2_UTIL__NODE_THREAD_HPP_
 
 #include <memory>
+#include <string>
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -41,6 +42,10 @@ public:
    */
   explicit NodeThread(
     rclcpp::executors::SingleThreadedExecutor::SharedPtr executor);
+
+  NodeThread(
+    rclcpp::executors::SingleThreadedExecutor::SharedPtr executor,
+    const std::string & name);
 
   /**
    * @brief A background thread to process node callbacks constructor

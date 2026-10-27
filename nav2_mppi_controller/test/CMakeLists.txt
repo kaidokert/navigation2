@@ -1,4 +1,5 @@
 set(TEST_NAMES
+  control_timing_benchmark
   final_output_collision_tests
   optimizer_smoke_test
   controller_state_transition_test

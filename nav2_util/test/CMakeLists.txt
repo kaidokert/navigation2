@@ -1,3 +1,6 @@
+ament_add_gtest(test_control_timing test_control_timing.cpp)
+target_link_libraries(test_control_timing ${library_name} ${std_msgs_TARGETS})
+
 ament_add_gtest(test_execution_timer test_execution_timer.cpp)
 target_link_libraries(test_execution_timer ${library_name})
 
