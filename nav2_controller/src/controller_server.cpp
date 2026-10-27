@@ -503,8 +503,9 @@ void ControllerServer::computeControl()
     }
 
     last_valid_cmd_time_ = now();
-    nav2_util::nameTimingThread("nav-control");
+    nav2_util::nameTimingThread("nav-control", timing_.enabled());
     timing_.resetPublicationInterval();
+    timing_.setBudget(1.0 / controller_frequency_);
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
       nav2_util::ControlTiming::Cycle timing_cycle(timing_);
@@ -512,13 +513,14 @@ void ControllerServer::computeControl()
       auto start_time = this->now();
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
+        timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Inactive);
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
         return;
       }
 
       if (action_server_->is_cancel_requested()) {
-        timing_cycle.outcome("cancelled");
         if (controllers_[current_controller_]->cancel()) {
+          timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Cancelled);
           RCLCPP_INFO(get_logger(), "Cancellation was successful. Stopping the robot.");
           action_server_->terminate_all();
           publishZeroVelocity();
@@ -540,18 +542,19 @@ void ControllerServer::computeControl()
         r.sleep();
       }
 
-      timing_cycle.stage(3, stage_start);
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::CostmapReadyWait, stage_start);
       stage_start = nav2_util::ControlTiming::Clock::now();
       updateGlobalPath();
-      timing_cycle.stage(10, stage_start);
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::GlobalPathUpdate, stage_start);
 
       stage_start = nav2_util::ControlTiming::Clock::now();
       computeAndPublishVelocity();
-      timing_cycle.stage(9, stage_start);
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::ComputePublish, stage_start);
       timing_cycle.published();
-      timing_cycle.outcome("completed");
+      const bool goal_reached = isGoalReached();
+      timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
 
-      if (isGoalReached()) {
+      if (goal_reached) {
         RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
@@ -744,6 +747,7 @@ void ControllerServer::updateGlobalPath()
   if (action_server_->is_preempt_requested()) {
     RCLCPP_INFO(get_logger(), "Passing new path to controller.");
     auto goal = action_server_->accept_pending_goal();
+    timing_.resetPublicationInterval();
     std::string current_controller;
     if (findControllerId(goal->controller_id, current_controller)) {
       current_controller_ = current_controller;

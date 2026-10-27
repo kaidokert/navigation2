@@ -1,0 +1,155 @@
+{
+  "platform": "Rockchip ARM64 robot; isolated Docker, no hardware devices/network/host IPC",
+  "benchmark": {
+    "order": "ABBA, repeated 3 times",
+    "samples_per_arm_per_repeat": 200,
+    "warmup_per_block": 10,
+    "cycles_per_block": 110,
+    "requested_period_ms": 50,
+    "batch_size": 1000,
+    "time_steps": 41,
+    "motion_model": "Ackermann",
+    "critics": [
+      "PathFollowCritic",
+      "PathAlignCritic",
+      "ObstaclesCritic"
+    ],
+    "footprint_mode": "robot rectangle, hard footprint checking",
+    "fixture": "stationary synthetic free costmap; not a driving performance benchmark",
+    "aggregation_verified": "at least 3 received one-second summaries in each enabled block",
+    "commands": "exact equality to disabled reference for each corresponding call",
+    "repeats": [
+      {
+        "repeat": 1,
+        "arms": [
+          {
+            "enabled": 0.0,
+            "samples": 200.0,
+            "p50": 0.0155328,
+            "p95": 0.0163863,
+            "p99": 0.0167693,
+            "max": 0.0171887
+          },
+          {
+            "enabled": 1.0,
+            "samples": 200.0,
+            "p50": 0.0155921,
+            "p95": 0.0169203,
+            "p99": 0.0171295,
+            "max": 0.0173523
+          }
+        ],
+        "median_difference_ms": 0.05929999999999998,
+        "median_difference_percent": 0.3817727647301261
+      },
+      {
+        "repeat": 2,
+        "arms": [
+          {
+            "enabled": 0.0,
+            "samples": 200.0,
+            "p50": 0.0154757,
+            "p95": 0.0165333,
+            "p99": 0.0168407,
+            "max": 0.01773
+          },
+          {
+            "enabled": 1.0,
+            "samples": 200.0,
+            "p50": 0.0156244,
+            "p95": 0.0167138,
+            "p99": 0.0169833,
+            "max": 0.0171779
+          }
+        ],
+        "median_difference_ms": 0.1486999999999999,
+        "median_difference_percent": 0.9608612211402301
+      },
+      {
+        "repeat": 3,
+        "arms": [
+          {
+            "enabled": 0.0,
+            "samples": 200.0,
+            "p50": 0.0155854,
+            "p95": 0.0166056,
+            "p99": 0.0169297,
+            "max": 0.0173342
+          },
+          {
+            "enabled": 1.0,
+            "samples": 200.0,
+            "p50": 0.0156711,
+            "p95": 0.0167343,
+            "p99": 0.0169673,
+            "max": 0.018435
+          }
+        ],
+        "median_difference_ms": 0.08570000000000105,
+        "median_difference_percent": 0.5498735996509518
+      }
+    ]
+  },
+  "dry_run": {
+    "action_status": 5,
+    "recorded_commands": 58,
+    "windows": 5,
+    "samples": 58,
+    "completed": 57,
+    "cancelled": 1,
+    "exceptions": 0,
+    "deadline_misses": 57,
+    "scheduler_misses": 57,
+    "terminal_zero_verified": true,
+    "idle_window_verified": true,
+    "native_stage_samples_verified": [
+      "optimizer",
+      "path_tf",
+      "costmap_lock_wait",
+      "thread_cpu"
+    ],
+    "configuration": "robot shared params plus robot overlay; synthetic scan and stationary TF/odom replace real sensors",
+    "inactive": 0,
+    "mcap_roundtrip": {
+      "decoded_timing_messages": 5,
+      "captured_command_messages": 59,
+      "idle_and_cancel_verified": true
+    }
+  },
+  "evidence_on_robot": "/home/kaido/code/nav2-timing-build/evidence",
+  "thread_mapping": [
+    {
+      "name": "nav-map-exec",
+      "namespace_tid": 95
+    },
+    {
+      "name": "local_costmap",
+      "namespace_tid": 96
+    },
+    {
+      "name": "nav-action-exec",
+      "namespace_tid": 97
+    },
+    {
+      "name": "nav-map-update",
+      "namespace_tid": 98
+    },
+    {
+      "name": "nav-control",
+      "namespace_tid": 99
+    }
+  ],
+  "production_cpp_md5": {
+    "nav2_util/include/nav2_util/control_timing.hpp": "d7d9494f4cb4fcabb8cb45e17e473081",
+    "nav2_util/src/control_timing.cpp": "dfec93523fa0e42d9b82c5c9f9149688",
+    "nav2_controller/src/controller_server.cpp": "5ffdb71abfbab87088c54580ed4051c6",
+    "nav2_mppi_controller/src/controller.cpp": "8bd8e65798ff33399d45b1e3039ad109"
+  },
+  "review_regressions": {
+    "collector_tests": 2,
+    "fallback_tests": 3,
+    "mixed_budget_window_verified": true,
+    "inactive_outcome_verified": true,
+    "networked_container_rejected_before_ros_init": true
+  }
+}

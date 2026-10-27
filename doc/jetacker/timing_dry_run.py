@@ -7,6 +7,7 @@ The robot's real stack is neither addressed nor modified. Not a driving benchmar
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import time
 
@@ -26,6 +27,10 @@ from tf2_ros import TransformBroadcaster
 def main():
     if os.environ.get('ROS_DOMAIN_ID') != '176' or not Path('/.dockerenv').exists():
         raise SystemExit('Requires isolated Docker test container and ROS_DOMAIN_ID=176')
+    if any(name != 'lo' for _, name in socket.if_nameindex()):
+        raise SystemExit('Requires --network none; non-loopback network interface found')
+    if any(Path('/dev').glob('ttyACM*')) or any(Path('/dev').glob('i2c-*')):
+        raise SystemExit('Hardware devices must not be exposed to this test')
     # The launch wrapper supplies ROS parameters and launches controller_server.
     rclpy.init()
     node = rclpy.create_node('timing_stationary_fixture')
@@ -111,7 +116,7 @@ def main():
     handle = wait(client.send_goal_async(goal))
     if not handle.accepted:
         raise RuntimeError('Synthetic goal rejected')
-    end = time.monotonic() + 6
+    end = time.monotonic() + 3
     while time.monotonic() < end:
         rclpy.spin_once(node, timeout_sec=.02)
     wait(handle.cancel_goal_async())
@@ -122,6 +127,8 @@ def main():
     output = {'fixture': 'synthetic stationary, no hardware', 'action_status': result.status,
               'command_count': len(commands), 'windows': timing}
     Path(sys.argv[1]).write_text(json.dumps(output, indent=2) + '\n')
+    assert result.status == 5, 'Synthetic goal did not cancel cleanly'
+    assert commands[-1] == [0.0, 0.0], 'No terminal zero command'
     assert len(commands) > 20, 'No sustained controller output'
     assert any(w['completed'] > 5 for w in timing), 'No completed cycle telemetry'
     for field in ('optimizer', 'path_tf', 'costmap_lock_wait', 'thread_cpu'):
@@ -130,7 +137,8 @@ def main():
     request = ChangeState.Request()
     request.transition.id = Transition.TRANSITION_DEACTIVATE
     wait(lifecycle.call_async(request))
-    print(json.dumps({'result': 'PASS', 'windows': len(timing), 'commands': len(commands)}))
+    print(json.dumps({'result': 'PASS', 'windows': len(timing),
+                      'commands': output['command_count']}))
     node.destroy_node()
     rclpy.shutdown()
 

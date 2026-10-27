@@ -4,6 +4,9 @@
 #define NAV2_UTIL__CONTROL_TIMING_HPP_
 
 #include <algorithm>
+#include <atomic>
+#include <iomanip>
+#include <stdexcept>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -36,18 +39,21 @@ inline int64_t timingThreadId()
   return 0;
 #endif
 }
-inline void nameTimingThread(const char * name)
+inline void nameTimingThread(const char * name, bool log_id = true)
 {
 #ifdef __linux__
   const std::string short_name = std::string(name).substr(0, 15);
   char previous[16]{};
   pthread_getname_np(pthread_self(), previous, sizeof(previous));
   if (short_name != previous && pthread_setname_np(pthread_self(), short_name.c_str()) == 0) {
-    std::fprintf(stderr, "[nav-thread] name=%s tid=%s\n",
+    if (log_id) {
+      std::fprintf(stderr, "[nav-thread] name=%s tid=%s\n",
       short_name.c_str(), std::to_string(timingThreadId()).c_str());
+    }
   }
 #else
   (void)name;
+  (void)log_id;
 #endif
 }
 
@@ -58,7 +64,13 @@ class ControlTiming
 public:
   using Clock = std::chrono::steady_clock;
   static constexpr size_t capacity = 1024;
-  static constexpr size_t fields = 11;
+  enum class Stage : size_t
+  {
+    Elapsed, ThreadCpu, PublicationInterval, CostmapReadyWait, PathTf, CostmapLockWait,
+    Optimizer, Visualization, ParameterLockWait, ComputePublish, GlobalPathUpdate, Count
+  };
+  enum class Outcome {Exception, Completed, Cancelled, Inactive};
+  static constexpr size_t fields = static_cast<size_t>(Stage::Count);
   using Row = std::array<double, fields>;
   static double seconds(Clock::duration d)
   {return std::chrono::duration<double>(d).count();}
@@ -76,19 +88,27 @@ public:
       node->declare_parameter("timing_enabled", false);
     }
     enabled_ = node->get_parameter("timing_enabled").as_bool();
-    budget_ = budget;
+    setBudget(budget);
     if (!enabled_) {return;}
     publisher_ = rclcpp::create_publisher<std_msgs::msg::String>(
       node, topic, rclcpp::QoS(4).reliable());
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      window_ = Window{};
+      window_ = std::make_unique<Window>();
+      spare_ = std::make_unique<Window>();
       last_publish_ = Clock::time_point{};
     }
     window_start_ = Clock::now();
     timer_ = node->create_wall_timer(std::chrono::seconds(1), [this]() {publish();});
   }
   bool enabled() const {return enabled_;}
+  void setBudget(double budget)
+  {
+    if (!std::isfinite(budget) || budget <= 0) {
+      throw std::invalid_argument("Timing budget must be finite and positive");
+    }
+    budget_.store(budget);
+  }
   void cleanup()
   {
     timer_.reset(); publisher_.reset(); enabled_ = false;
@@ -97,7 +117,7 @@ public:
   class Cycle;
   // Defined in nav2_util_core: shared across controller and plugin DSOs.
   static Cycle * & currentCycle();
-  static void stageCurrent(size_t index, Clock::time_point start);
+  static void stageCurrent(Stage index, Clock::time_point start);
 
   class Cycle
   {
@@ -110,6 +130,7 @@ public:
       row_.fill(-1.0);
       if (owner_.enabled_) {
         start_ = Clock::now(); cpu_ = cpuSeconds(); tid_ = timingThreadId();
+        cycle_budget_ = owner_.budget_.load();
       }
     }
     ~Cycle() {finish(); currentCycle() = previous_;}
@@ -118,7 +139,7 @@ public:
       if (!owner_.enabled_ || finished_) {return;}
       finished_ = true;
       endMeasurement();
-      owner_.add(row_, tid_, outcome_, row_[0] > owner_.budget_, missed_);
+      owner_.add(row_, tid_, outcome_, cycle_budget_, missed_);
     }
     void endMeasurement()
     {
@@ -127,9 +148,9 @@ public:
         row_[1] = cpuSeconds() - cpu_;
       }
     }
-    void stage(size_t index, Clock::time_point start)
-    {if (owner_.enabled_) {row_.at(index) = seconds(Clock::now() - start);}}
-    void outcome(const char * value) {outcome_ = value;}
+    void stage(Stage index, Clock::time_point start)
+    {if (owner_.enabled_) {row_.at(static_cast<size_t>(index)) = seconds(Clock::now() - start);}}
+    void outcome(Outcome value) {outcome_ = value;}
     void missed(bool value) {missed_ = value;}
     void published()
     {
@@ -149,7 +170,8 @@ private:
     Clock::time_point start_{};
     double cpu_{0};
     int64_t tid_{0};
-    const char * outcome_{"exception"};
+    Outcome outcome_{Outcome::Exception};
+    double cycle_budget_{0};
     bool missed_{false};
     bool finished_{false};
   };
@@ -158,41 +180,57 @@ private:
 private:
   struct Window
   {
-    std::array<Row, capacity> rows{};
-    size_t count{0}, stored{0}, misses{0}, completed{0}, cancelled{0}, exceptions{0};
-    size_t scheduler_misses{0};
-    int64_t tid{0};
+    // Rows beyond stored are never read; reusing a window resets counters only.
+    std::array<Row, capacity> rows;
+    size_t count, stored, misses, completed, cancelled, exceptions, inactive;
+    size_t scheduler_misses;
+    int64_t tid;
+    double budget_min, budget_max;
+    Window() {reset();}
+    void reset()
+    {
+      count = stored = misses = completed = cancelled = exceptions = inactive = 0;
+      scheduler_misses = 0; tid = 0; budget_min = budget_max = 0;
+    }
   };
   void add(
-    const Row & row, int64_t tid, const std::string & outcome,
-    bool missed, bool scheduler_missed)
+    const Row & row, int64_t tid, Outcome outcome,
+    double budget, bool scheduler_missed)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    ++window_.count;
-    if (window_.stored < capacity) {window_.rows[window_.stored++] = row;}
-    window_.misses += missed;
-    window_.scheduler_misses += scheduler_missed;
-    window_.completed += outcome == "completed";
-    window_.cancelled += outcome == "cancelled";
-    window_.exceptions += outcome == "exception";
-    window_.tid = tid;
+    auto & w = *window_;
+    if (w.count == 0) {w.budget_min = w.budget_max = budget;}
+    w.budget_min = std::min(w.budget_min, budget);
+    w.budget_max = std::max(w.budget_max, budget);
+    ++w.count;
+    if (w.stored < capacity) {w.rows[w.stored++] = row;}
+    w.misses += row[0] > budget;
+    w.scheduler_misses += scheduler_missed;
+    w.completed += outcome == Outcome::Completed;
+    w.cancelled += outcome == Outcome::Cancelled;
+    w.exceptions += outcome == Outcome::Exception;
+    w.inactive += outcome == Outcome::Inactive;
+    w.tid = tid;
   }
   void publish()
   {
-    auto snapshot = std::make_unique<Window>();
+    auto snapshot = std::move(spare_);
     const auto now = Clock::now();
     double duration;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      std::swap(*snapshot, window_);
+      snapshot.swap(window_);  // O(1): no rows copied while blocking the producer.
       duration = seconds(now - window_start_); window_start_ = now;
+    }
+    if (snapshot->count == 0) {
+      snapshot->budget_min = snapshot->budget_max = budget_.load();
     }
     static constexpr const char * names[fields] = {
       "elapsed", "thread_cpu", "publication_interval", "costmap_ready_wait",
       "path_tf", "costmap_lock_wait", "optimizer", "visualization",
       "parameter_lock_wait", "compute_publish", "global_path_update"};
     std::ostringstream out;
-    out.precision(9);
+    out << std::fixed << std::setprecision(9);
     out << "{\"schema\":1,\"window_seconds\":" << duration
         << ",\"monotonic_seconds\":" << seconds(now.time_since_epoch())
         << ",\"thread_id\":" << snapshot->tid
@@ -201,7 +239,14 @@ private:
         << ",\"completed\":" << snapshot->completed
         << ",\"cancelled\":" << snapshot->cancelled
         << ",\"exceptions\":" << snapshot->exceptions
-        << ",\"deadline_budget_seconds\":" << budget_
+        << ",\"inactive\":" << snapshot->inactive
+        << ",\"deadline_budget_min_seconds\":" << snapshot->budget_min
+        << ",\"deadline_budget_max_seconds\":" << snapshot->budget_max
+        << ",\"deadline_budget_seconds\":";
+    if (snapshot->budget_min == snapshot->budget_max) {out << snapshot->budget_min;} else {
+      out << "null";
+    }
+    out
         << ",\"scheduler_misses\":" << snapshot->scheduler_misses
         << ",\"deadline_misses\":" << snapshot->misses
         << ",\"deadline_miss_fraction\":"
@@ -228,11 +273,13 @@ private:
     out << "}}";
     std_msgs::msg::String message;
     message.data = out.str(); publisher_->publish(message);
+    snapshot->reset();
+    spare_ = std::move(snapshot);
   }
   bool enabled_{false};
-  double budget_{0};
+  std::atomic<double> budget_{0};
   std::mutex mutex_;
-  Window window_;
+  std::unique_ptr<Window> window_, spare_;
   Clock::time_point window_start_{}, last_publish_{};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
   rclcpp::TimerBase::SharedPtr timer_;

@@ -8,7 +8,7 @@ ControlTiming::Cycle * & ControlTiming::currentCycle()
   static thread_local Cycle * cycle = nullptr;
   return cycle;
 }
-void ControlTiming::stageCurrent(size_t index, Clock::time_point start)
+void ControlTiming::stageCurrent(Stage index, Clock::time_point start)
 {
   if (currentCycle()) {currentCycle()->stage(index, start);}
 }
