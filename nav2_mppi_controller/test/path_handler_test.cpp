@@ -18,6 +18,7 @@
 #include "gtest/gtest.h"
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_mppi_controller/tools/path_handler.hpp"
+#include "nav2_mppi_controller/tools/utils.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "tf2_ros/transform_broadcaster.h"
@@ -1199,6 +1200,11 @@ TEST(PathHandlerTests, RecordedCurvedReverseSetupRetainedAndLateralArrivalAllowe
   path.poses.push_back(makeYawPose(0.612471266, 0.395591253, -0.523598671));
   handler.setPath(path);
   ASSERT_EQ(handler.getInversionLocale(), 3u);
+  // Inversion locale is the first OUTGOING pose; it is excluded from this
+  // segment. Including it would incorrectly measure a 0.173 m setup.
+  ASSERT_EQ(handler.getInvertedPath().poses.size(), 3u);
+  ASSERT_NEAR(utils::pathLength(handler.getInvertedPath()), 0.115046, 1e-5);
+  ASSERT_LT(utils::pathLength(handler.getInvertedPath()), 0.15);
   handler.transformPath(makeYawPose(0.5, 0.5, 0.0, "odom"));
   EXPECT_EQ(handler.getInversionLocale(), 3u);
   ASSERT_GE(handler.getInvertedPath().poses.size(), 2u);
