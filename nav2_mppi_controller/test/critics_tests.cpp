@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <array>
 #include <chrono>
 #include <thread>
 
@@ -738,8 +739,15 @@ TEST(CriticTests, PathAlignCritic)
   goal.position.x = 0.9;
   generated_trajectories.x = 0.66 * xt::ones<float>({1000, 30});
   critic.score(data);
-  // 0.66 * 1000 * 10 weight * 6 num pts eval / 6 normalization term
-  EXPECT_NEAR(xt::sum(costs, immediate)(), 6600.0, 1e-2);
+  // The stationary rollout starts 0.66 m along the first edge's tangent.
+  // Its origin projection is capped at that edge's endpoint (0.10 m), so it
+  // remains 0.56 m away instead of jumping to a remote reference vertex.
+  EXPECT_NEAR(xt::sum(costs, immediate)(), 5600.0, 1e-2);
+  generated_trajectories.x.fill(0.0f);
+  costs.fill(0.0f);
+  critic.score(data);
+  EXPECT_FLOAT_EQ(xt::sum(costs, immediate)(), 0.0f);
+  generated_trajectories.x.fill(0.66f);
 
   // provide state pose and path far enough to enable, with data to pass condition
   // but path is blocked in collision
@@ -1086,5 +1094,122 @@ TEST(CriticTests, PathAlignIncludesReachedEndpoint)
       EXPECT_NEAR(costs(0), 0.0f, 1e-5);
       grid->setCost(mx, my, nav2_costmap_2d::FREE_SPACE);
     }
+  }
+}
+
+
+TEST(CriticTests, PathAlignPhaseOriginPreservesExactCurveRanking)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("phase_alignment");
+  node->declare_parameter("critic.trajectory_point_step", 4);
+  node->declare_parameter("critic.offset_from_furthest", 2);
+  node->declare_parameter("critic.cost_weight", 28.0);
+  node->declare_parameter("critic.use_path_orientations", true);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "phase_costmap", "", "phase_costmap", true);
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(400, 400, 0.01, -2.0, -2.0);
+  ParametersHandler parameters(node);
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &parameters);
+
+  constexpr double radius = 0.561;
+  constexpr double speed = 0.15;
+  constexpr double dt = 0.05;
+  constexpr double edge_angle = 0.13962634015954636;  // Eight degrees.
+  const std::array<double, 6> fractions = {0.0, 0.25, 0.5, 0.75, 0.9, 1.0};
+  // The zero/negative phases are controls: the exact curve already wins there.
+  // Positive phases reproduce the wrong 90%/75% curvature winners from EXP-066.
+  for (int gear : {-1, 1}) {
+    for (double phase : {-0.5, -0.25, 0.0, 0.25, 0.5}) {
+      for (bool duplicate_origin : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "gear=" << gear << " phase=" << phase <<
+          " duplicate_origin=" << duplicate_origin);
+        const size_t duplicate = duplicate_origin ? 1u : 0u;
+        models::State state;
+        state.reset(fractions.size(), 41);
+        const double initial_yaw = gear * phase * edge_angle;
+        state.pose.pose.position.x = radius * std::sin(initial_yaw);
+        state.pose.pose.position.y = radius * (1.0 - std::cos(initial_yaw));
+        models::Trajectories trajectories;
+        trajectories.reset(fractions.size(), 41);
+        models::Path path;
+        path.reset(15 + duplicate);
+        for (size_t i = 0; i < 15 + duplicate; ++i) {
+          const size_t unique_index = i >= duplicate ? i - duplicate : 0u;
+          const double yaw = gear * static_cast<double>(unique_index) * edge_angle;
+          path.x(i) = radius * std::sin(yaw);
+          path.y(i) = radius * (1.0 - std::cos(yaw));
+          path.yaws(i) = yaw;
+        }
+        for (size_t row = 0; row < fractions.size(); ++row) {
+          double x = state.pose.pose.position.x;
+          double y = state.pose.pose.position.y;
+          double yaw = initial_yaw;
+          const double curvature = fractions[row] / radius;
+          for (size_t j = 0; j < 41; ++j) {
+            const double distance = gear * speed * dt;
+            const double angle = distance * curvature;
+            if (curvature == 0.0) {
+              x += distance * std::cos(yaw);
+              y += distance * std::sin(yaw);
+            } else {
+              x += (std::sin(yaw + angle) - std::sin(yaw)) / curvature;
+              y += (std::cos(yaw) - std::cos(yaw + angle)) / curvature;
+            }
+            yaw += angle;
+            trajectories.x(row, j) = x;
+            trajectories.y(row, j) = y;
+            trajectories.yaws(row, j) = yaw;
+          }
+        }
+        geometry_msgs::msg::Pose goal;
+        goal.position.x = 1.5;
+        goal.position.y = 1.5;
+        xt::xtensor<float, 1> costs = xt::zeros<float>({fractions.size()});
+        float model_dt = dt;
+        CriticData data = {state, trajectories, path, goal, costs, model_dt,
+          false, nullptr, nullptr, std::nullopt, std::nullopt};
+        // Same reached endpoint for every row/policy: four complete path edges.
+        data.furthest_reached_path_point = 4u + duplicate;
+        data.path_pts_valid = std::vector<bool>(15 + duplicate, true);
+        critic.score(data);
+        for (size_t row = 0; row + 1 < fractions.size(); ++row) {
+          EXPECT_LT(costs(5), costs(row)) << "exact=" << costs(5) <<
+            " fraction=" << fractions[row] << " cost=" << costs(row);
+        }
+      }
+    }
+  }
+}
+
+TEST(CriticTests, PathAlignDegenerateOriginRemainsFinite)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("degenerate_alignment");
+  node->declare_parameter("critic.trajectory_point_step", 4);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "degenerate_costmap", "", "degenerate_costmap", true);
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  ParametersHandler parameters(node);
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &parameters);
+  models::State state;
+  state.reset(1, 41);
+  models::Trajectories trajectories;
+  trajectories.reset(1, 41);
+  models::Path path;
+  path.reset(3);  // All edges have zero length; projection must not divide by zero.
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 2.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({1});
+  float dt = 0.05;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.furthest_reached_path_point = 2u;
+  for (bool valid : {true, false}) {
+    data.path_pts_valid = std::vector<bool>(3, valid);
+    costs.fill(0.0f);
+    critic.score(data);
+    EXPECT_FLOAT_EQ(costs(0), 0.0f);
   }
 }
