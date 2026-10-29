@@ -228,6 +228,12 @@ protected:
    */
   void absorbTerminalGoalSnapMicroStub();
 
+  /**
+   * @brief Update current_segment_is_reverse_ from the active segment's poses
+   * before pruning reduces it to a single pose.
+   */
+  void updateCurrentSegmentDirection();
+
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -253,7 +259,9 @@ protected:
   double terminal_stub_max_yaw_diff_{0.175};
   double goal_checker_xy_tolerance_{0.25};
   double active_goal_checker_xy_tolerance_{0.0};
+  double active_goal_checker_yaw_tolerance_{0.0};
   bool has_active_goal_checker_xy_tolerance_{false};
+  bool has_active_goal_checker_yaw_tolerance_{false};
   geometry_msgs::msg::Quaternion cusp_original_orientation_{};
   bool has_cusp_original_orientation_{false};
   // Cusp handoff deadlock escape (Layers 1+2, notes/cusp_handoff_fix_plan.md).
@@ -261,12 +269,26 @@ protected:
   // policy is deterministic and unit-testable without a clock.
   double handoff_yaw_relax_per_cycle_{0.005};   // rad of extra yaw tol per blocked cycle
   double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
+  double exhausted_cusp_xy_tolerance_{0.0};     // m — xy gate when segment consumed (<=0 off)
+  double exhausted_cusp_yaw_tolerance_{0.65};   // rad — yaw gate when segment consumed
+  double cusp_along_track_threshold_{0.015};    // m — min remaining along-track before handoff
+  double exhausted_along_track_threshold_{0.03};  // m — along-track hold on exhausted segment
+  int exhausted_along_track_hold_cycles_{15};   // cycles to hold exhausted along-track gate
+  double terminal_yaw_runway_max_tgp_length_{0.15};   // m — max remaining real TGP for runway
+  double terminal_yaw_runway_max_goal_dist_{0.16};    // m — max goal dist for yaw runway
+  double terminal_yaw_runway_min_yaw_error_{0.18};    // rad — min yaw err to extend runway
+  static constexpr double kTerminalRunwayGoalYawToleranceScale = 0.72;
   int handoff_escape_after_cycles_{0};          // blocked cycles before escape ghost engages;
   // <=0 DISABLES escape (default: off until the oscillation latch is implemented;
   // review 2026-09-25).
   // mutable: the check is const to callers, but consecutive-blocked tracking is
   // internal state. Same single-threaded controller model as the members below.
   mutable unsigned int handoff_blocked_cycles_{0u};
+  mutable unsigned int exhausted_along_track_cycles_{0u};
+  mutable bool has_last_exhausted_check_pose_{false};
+  mutable double last_exhausted_check_x_{0.0};
+  mutable double last_exhausted_check_y_{0.0};
+  mutable double last_exhausted_check_yaw_{0.0};
   // Stranded handoff (#102): the segment before the cusp is fully consumed (no real path left)
   // while the robot is still within this radius of the cusp but outside inversion_xy_tolerance.
   // After stranded_handoff_cycles consecutive cycles, hand off anyway. <= 0 disables.
@@ -277,6 +299,7 @@ protected:
   unsigned int inversion_locale_{0u};
   bool terminal_stub_aligned_{false};
   bool two_pose_post_cusp_segment_{false};
+  bool current_segment_is_reverse_{false};
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
   // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
