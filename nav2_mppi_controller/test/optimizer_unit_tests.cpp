@@ -40,6 +40,11 @@ public:
   OptimizerTester()
   : Optimizer() {}
 
+  int finalGuardFallbackBudget() const
+  {
+    return final_guard_fallback_candidates_;
+  }
+
   void testSetDiffModel()
   {
     EXPECT_EQ(motion_model_.get(), nullptr);
@@ -225,7 +230,85 @@ public:
   {
     return integrateStateVelocities(traj, state);
   }
+
+  void expectFinalBankCostsMatchFreshEvaluation()
+  {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "map";
+    pose.pose.orientation.w = 1.0;
+    nav_msgs::msg::Path path;
+    path.header = pose.header;
+    path.poses = {pose, pose};
+    path.poses.back().pose.position.x = 1.0;
+    prepare(pose, geometry_msgs::msg::Twist{}, path, path.poses.back().pose, nullptr);
+    optimize();
+    const auto final_costs = costs_;
+    // Independently score precisely the final bank, without another noise draw
+    // or control update. Gamma is zero, so this must be the complete objective.
+    costs_.fill(0.0f);
+    critic_manager_.evalTrajectoriesScores(critics_data_);
+    ASSERT_GT(xt::amin(costs_)(), 1.0f);  // Ensure the real critic actually ran.
+    EXPECT_LT(xt::amax(xt::abs(final_costs - costs_))(), 1e-5f);
+  }
 };
+
+TEST(OptimizerTests, EachIterationScoresItsCurrentBankWithoutEarlierCosts)
+{
+  // One iteration is the unchanged control; three exercises repeated recentering.
+  for (const int iterations : {1, 3}) {
+    SCOPED_TRACE(iterations);
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("bank_cost_node");
+    node->declare_parameter("controller_frequency", rclcpp::ParameterValue(20.0));
+    node->declare_parameter("mppic.batch_size", rclcpp::ParameterValue(32));
+    node->declare_parameter("mppic.time_steps", rclcpp::ParameterValue(10));
+    node->declare_parameter("mppic.iteration_count", rclcpp::ParameterValue(iterations));
+    node->declare_parameter("mppic.gamma", rclcpp::ParameterValue(0.0));
+    node->declare_parameter("mppic.regenerate_noises", rclcpp::ParameterValue(false));
+    node->declare_parameter(
+      "mppic.critics", rclcpp::ParameterValue(std::vector<std::string>{"GoalCritic"}));
+    node->declare_parameter("mppic.GoalCritic.threshold_to_consider", rclcpp::ParameterValue(2.0));
+    auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+      "bank_costmap", "", "bank_costmap", true);
+    rclcpp_lifecycle::State lifecycle_state;
+    ASSERT_EQ(costmap->on_configure(lifecycle_state), nav2_util::CallbackReturn::SUCCESS);
+    costmap->pause();
+    ParametersHandler parameters(node);
+    OptimizerTester optimizer;
+    optimizer.initialize(node, "mppic", costmap, &parameters);
+    optimizer.expectFinalBankCostsMatchFreshEvaluation();
+    optimizer.shutdown();
+    costmap->on_cleanup(lifecycle_state);
+  }
+}
+
+TEST(OptimizerTests, FinalGuardFallbackBudgetRejectsMutationAndPreservesReadback)
+{
+  for (const bool predeclared : {false, true}) {
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("fallback_parameter_test");
+    node->declare_parameter("controller_frequency", rclcpp::ParameterValue(30.0));
+    const int initial = predeclared ? 8 : 0;
+    const std::string name = "mppic.final_guard_fallback_candidates";
+    if (predeclared) {
+      // Exercise the callback fallback when no read-only descriptor exists.
+      node->declare_parameter(name, rclcpp::ParameterValue(initial));
+    }
+    auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+      "dummy_costmap", "", "dummy_costmap", true);
+    ParametersHandler parameters(node);
+    rclcpp_lifecycle::State state;
+    costmap->on_configure(state);
+    OptimizerTester optimizer;
+    optimizer.initialize(node, "mppic", costmap, &parameters);
+    parameters.start();
+
+    EXPECT_EQ(optimizer.finalGuardFallbackBudget(), initial);
+    const auto result = node->set_parameter(rclcpp::Parameter(name, predeclared ? 0 : 8));
+    EXPECT_FALSE(result.successful);
+    EXPECT_EQ(node->get_parameter(name).as_int(), initial);
+    EXPECT_EQ(optimizer.finalGuardFallbackBudget(), initial);
+    optimizer.shutdown();
+  }
+}
 
 TEST(OptimizerTests, BasicInitializedFunctions)
 {
