@@ -202,7 +202,8 @@ TEST(AStarTest, test_a_star_se2)
 
   // check path is the right size and collision free
   EXPECT_GT(num_it, 2000);
-  EXPECT_NEAR(path.size(), 77u, 2u);
+  // Denser edge/connector checks select a different collision-free route.
+  EXPECT_NEAR(path.size(), 73u, 2u);
   for (unsigned int i = 0; i != path.size(); i++) {
     EXPECT_EQ(costmapA->getCost(path[i].x, path[i].y), 0);
   }
@@ -342,7 +343,9 @@ TEST(AStarTest, test_a_star_lattice)
   EXPECT_TRUE(a_star.createPath(path, num_it, tolerance, dummy_cancel_checker));
 
   // check path is the right size and collision free
-  EXPECT_EQ(num_it, 22);
+  // Containing-cell lookup replaces the former half-cell rounding; the
+  // deterministic expansion count changes, with clearance and connectivity below unchanged.
+  EXPECT_EQ(num_it, 26);
   EXPECT_GT(path.size(), 45u);
   for (unsigned int i = 0; i != path.size(); i++) {
     EXPECT_EQ(costmapA->getCost(path[i].x, path[i].y), 0);

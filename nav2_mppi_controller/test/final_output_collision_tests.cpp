@@ -35,6 +35,7 @@ public:
     costmap_ros_ = cm;
     costmap_ = cm->getCostmap();
     settings_.time_steps = steps;
+    settings_.iteration_count = 1;
     settings_.model_dt = 0.1f;
     settings_.shift_control_sequence = shift;
     auto & c = settings_.constraints;
@@ -59,7 +60,23 @@ public:
   }
   bool clear() {return controlSequenceCollisionFree();}
   auto emit() {return getValidatedControlFromSequenceAsTwist(builtin_interfaces::msg::Time{});}
+  auto filteredEmit() {return filterAndValidateControl(builtin_interfaces::msg::Time{});}
+  void bank(const std::vector<mppi::models::Control> & controls, const std::vector<float> & costs)
+  {
+    ASSERT_EQ(controls.size(), costs.size());
+    state_.reset(controls.size(), settings_.time_steps);
+    costs_ = xt::zeros<float>({controls.size()});
+    for (size_t row = 0; row < controls.size(); ++row) {
+      costs_(row) = costs[row];
+      for (size_t j = 0; j < settings_.time_steps; ++j) {
+        state_.cvx(row, j) = controls[row].vx;
+        state_.cvy(row, j) = controls[row].vy;
+        state_.cwz(row, j) = controls[row].wz;
+      }
+    }
+  }
   void smooth() {mppi::utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);}
+  using Optimizer::final_guard_fallback_candidates_;
   using Optimizer::control_sequence_;
   using Optimizer::control_history_;
   using Optimizer::motion_model_;
@@ -124,6 +141,150 @@ TEST_F(FinalOutputTest, ClearCurvesCanAverageIntoCollidingStraight)
   EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
 }
 
+TEST_F(FinalOutputTest, FinalGuardFallbackIsDisabledByDefault)
+{
+  opt.state_.speed.linear.x = 0.3;
+  obstacle(0.8, 0.0);
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  opt.bank({{0.3f, 0.0f, 0.6f}, {0.3f, 0.0f, -0.6f}}, {1.0f, 2.0f});
+  opt.sequence(0.3f);
+  EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+  EXPECT_FLOAT_EQ(opt.control_history_.back().vx, 0.0f);
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackDoesNotUseBankWithoutOptimization)
+{
+  opt.state_.speed.linear.x = 0.3;
+  obstacle(0.8, 0.0);
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  opt.final_guard_fallback_candidates_ = 2;
+  opt.settings_.iteration_count = 0;
+  opt.bank({{0.3f, 0.0f, 0.6f}}, {1.0f});
+  opt.sequence(0.3f);
+  EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+  EXPECT_FLOAT_EQ(opt.control_history_.back().vx, 0.0f);
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackIssuesLowestCostValidatedCurve)
+{
+  opt.state_.speed.linear.x = 0.3;
+  obstacle(0.8, 0.0);
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  opt.final_guard_fallback_candidates_ = 2;
+  opt.bank({{0.3f, 0.0f, -0.6f}, {0.3f, 0.0f, 0.6f}}, {2.0f, 1.0f});
+  opt.sequence(0.3f);
+  const auto control = opt.filteredEmit();
+  EXPECT_GT(control.twist.linear.x, 0.0);
+  EXPECT_GT(control.twist.angular.z, 0.0);
+  EXPECT_TRUE(opt.clear());
+  EXPECT_FLOAT_EQ(opt.control_history_.back().wz, control.twist.angular.z);
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackAllBlockedStillStops)
+{
+  opt.state_.speed.linear.x = 0.3;
+  obstacle(0.5, 0.0);
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  opt.final_guard_fallback_candidates_ = 2;
+  opt.bank({{0.3f, 0.0f, 0.0f}, {0.4f, 0.0f, 0.0f}}, {1.0f, 2.0f});
+  opt.sequence(0.3f);
+  EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+  for (const auto & control : opt.control_history_) {
+    EXPECT_FLOAT_EQ(control.vx, 0.0f);
+    EXPECT_FLOAT_EQ(control.wz, 0.0f);
+  }
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackNeverMasksInvalidMeanOrState)
+{
+  for (bool invalid_state : {false, true}) {
+    opt.configure(cm);
+    opt.final_guard_fallback_candidates_ = 2;
+    opt.bank({{0.3f, 0.0f, 0.6f}}, {1.0f});
+    opt.sequence(0.3f);
+    if (invalid_state) {
+      opt.state_.speed.angular.z = std::numeric_limits<double>::infinity();
+    } else {
+      opt.control_sequence_.vx(0) = std::numeric_limits<float>::quiet_NaN();
+    }
+    EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+    EXPECT_FLOAT_EQ(opt.control_history_.back().vx, 0.0f);
+  }
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackRespectsAttemptBudget)
+{
+  opt.state_.speed.linear.x = 0.3;
+  obstacle(0.8, 0.0);
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  opt.final_guard_fallback_candidates_ = 1;
+  opt.bank({{0.3f, 0.0f, 0.0f}, {0.3f, 0.0f, 0.6f}}, {1.0f, 2.0f});
+  opt.sequence(0.3f);
+  EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackTrialsShareOriginalHistoryAndIssuedOffset)
+{
+  obstacle(0.8, 0.0);
+  for (bool shift : {false, true}) {
+    opt.configure(cm, shift);
+    opt.state_.speed.linear.x = 0.3;
+    opt.control_history_ = {{{0.20f, 0.0f, -0.03f}, {0.23f, 0.0f, 0.01f},
+      {0.26f, 0.0f, -0.02f}, {0.29f, 0.0f, 0.03f}}};
+    FinalOutputOptimizer expected;
+    expected.configure(cm, shift);
+    expected.state_.speed = opt.state_.speed;
+    expected.control_history_ = opt.control_history_;
+    expected.sequence(0.3f, 0.6f);
+    const auto reference = expected.filteredEmit();
+    opt.final_guard_fallback_candidates_ = 2;
+    // First finite row still collides after filtering. The second must be
+    // filtered against the original history, not the mean or rejected row.
+    opt.bank({{0.3f, 0.0f, 0.0f}, {0.3f, 0.0f, 0.6f}}, {1.0f, 2.0f});
+    // Predicted velocities intentionally disagree: fallback must use controls.
+    opt.state_.vx.fill(-0.4f);
+    opt.state_.wz.fill(-1.0f);
+    opt.sequence(0.3f);
+    const auto actual = opt.filteredEmit();
+    EXPECT_FLOAT_EQ(actual.twist.linear.x, reference.twist.linear.x);
+    EXPECT_FLOAT_EQ(actual.twist.angular.z, reference.twist.angular.z);
+    for (size_t i = 0; i < opt.control_history_.size(); ++i) {
+      EXPECT_FLOAT_EQ(opt.control_history_[i].vx, expected.control_history_[i].vx);
+      EXPECT_FLOAT_EQ(opt.control_history_[i].vy, expected.control_history_[i].vy);
+      EXPECT_FLOAT_EQ(opt.control_history_[i].wz, expected.control_history_[i].wz);
+    }
+    for (size_t j = 0; j < opt.settings_.time_steps; ++j) {
+      EXPECT_FLOAT_EQ(opt.control_sequence_.vx(j), expected.control_sequence_.vx(j));
+      EXPECT_FLOAT_EQ(opt.control_sequence_.wz(j), expected.control_sequence_.wz(j));
+    }
+    const size_t issued = shift ? 1 : 0;
+    EXPECT_FLOAT_EQ(actual.twist.angular.z, opt.control_sequence_.wz(issued));
+  }
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackRechecksAckermannConeAndSkipsNonfiniteRows)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("fallback_ackermann");
+  node->declare_parameter("test.AckermannConstraints.min_turning_r", 0.561);
+  mppi::ParametersHandler handler(node);
+  opt.motion_model_ = std::make_shared<mppi::AckermannMotionModel>(&handler, "test");
+  opt.syncModel();
+  opt.state_.speed.linear.x = 0.3;
+  opt.control_history_.fill({0.3f, 0.0f, 0.0f});
+  obstacle(0.8, 0.0);
+  opt.final_guard_fallback_candidates_ = 1;
+  opt.bank({{0.3f, 0.0f, std::numeric_limits<float>::quiet_NaN()},
+      {0.3f, 0.0f, 0.0f}, {0.3f, 0.0f, 1.2f}},
+    {0.0f, std::numeric_limits<float>::infinity(), 1.0f});
+  opt.sequence(0.3f);
+  const auto control = opt.filteredEmit();
+  EXPECT_GT(control.twist.angular.z, 0.0);
+  EXPECT_LE(std::abs(control.twist.angular.z), std::abs(control.twist.linear.x) / 0.561 + 1e-6);
+  EXPECT_TRUE(opt.clear());
+}
+
 TEST_F(FinalOutputTest, SmoothingCanMakeSafeStoppedSequenceCollide)
 {
   obstacle(0.21, 0.0);
@@ -133,6 +294,31 @@ TEST_F(FinalOutputTest, SmoothingCanMakeSafeStoppedSequenceCollide)
   opt.smooth();
   ASSERT_GT(opt.control_sequence_.vx(0), 0.1f);
   EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+}
+
+TEST_F(FinalOutputTest, FinalGuardFallbackRejectsRowMadeUnsafeBySmoothing)
+{
+  obstacle(0.21, 0.0);
+  FinalOutputOptimizer candidate;
+  candidate.configure(cm);
+  candidate.sequence(0.0f);
+  ASSERT_TRUE(candidate.clear());  // The sampled row itself is collision-free.
+  candidate.control_history_.fill({0.5f, 0.0f, 0.0f});
+  candidate.smooth();
+  ASSERT_GT(candidate.control_sequence_.vx(0), 0.1f);
+  ASSERT_FALSE(candidate.clear());  // Issuing it after SG would not be safe.
+
+  opt.final_guard_fallback_candidates_ = 1;
+  opt.control_history_.fill({0.5f, 0.0f, 0.0f});
+  opt.bank({{0.0f, 0.0f, 0.0f}}, {1.0f});
+  opt.sequence(0.3f);  // A blocked mean forces the fallback attempt.
+  ASSERT_FALSE(opt.clear());
+  EXPECT_THROW(opt.filteredEmit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+  for (const auto & control : opt.control_history_) {
+    EXPECT_FLOAT_EQ(control.vx, 0.0f);
+    EXPECT_FLOAT_EQ(control.wz, 0.0f);
+  }
 }
 
 TEST_F(FinalOutputTest, ValidationStartsWithActualShiftedCommand)

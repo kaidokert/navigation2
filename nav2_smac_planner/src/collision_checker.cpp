@@ -13,6 +13,7 @@
 // limitations under the License. Reserved.
 
 #include "nav2_smac_planner/collision_checker.hpp"
+#include "nav2_smac_planner/utils.hpp"
 
 namespace nav2_smac_planner
 {
@@ -54,15 +55,7 @@ void GridCollisionChecker::setFootprint(
   const double & possible_collision_cost)
 {
   possible_collision_cost_ = static_cast<float>(possible_collision_cost);
-  if (possible_collision_cost_ <= 0.0f) {
-    RCLCPP_ERROR_THROTTLE(
-      logger_, *clock_, 1000,
-      "Inflation layer either not found or inflation is not set sufficiently for "
-      "optimized non-circular collision checking capabilities. It is HIGHLY recommended to set"
-      " the inflation radius to be at MINIMUM half of the robot's largest cross-section. See "
-      "github.com/ros-planning/navigation2/tree/main/nav2_smac_planner#potential-fields"
-      " for full instructions. This will substantially impact run-time performance.");
-  }
+  // Retain the argument for API compatibility; it cannot certify polygon clearance.
 
   footprint_is_radius_ = radius;
 
@@ -99,6 +92,10 @@ void GridCollisionChecker::setFootprint(
   }
 
   unoriented_footprint_ = footprint;
+  footprint_radius_ = 0.0;
+  for (const auto & point : footprint) {
+    footprint_radius_ = std::max(footprint_radius_, std::hypot(point.x, point.y));
+  }
 }
 
 bool GridCollisionChecker::inCollision(
@@ -116,15 +113,12 @@ bool GridCollisionChecker::inCollision(
 
   // Assumes setFootprint already set
   center_cost_ = static_cast<float>(costmap_->getCost(
-    static_cast<unsigned int>(x + 0.5f), static_cast<unsigned int>(y + 0.5f)));
+    static_cast<unsigned int>(x), static_cast<unsigned int>(y)));
 
   if (!footprint_is_radius_) {
-    // if footprint, then we check for the footprint's points, but first see
-    // if the robot is even potentially in an inscribed collision
-    if (center_cost_ < possible_collision_cost_ && possible_collision_cost_ > 0.0f) {
-      return false;
-    }
-
+    // A low center-cell inflation cost does not certify a rasterized polygon.
+    // Cell quantization can make its perimeter touch a lethal cell beyond the
+    // circumscribed-cost shortcut. Always evaluate the polygon after cheap rejection.
     // If its inscribed, in collision, or unknown in the middle,
     // no need to even check the footprint, its invalid
     if (center_cost_ == UNKNOWN && !traverse_unknown) {
@@ -138,10 +132,33 @@ bool GridCollisionChecker::inCollision(
     // if possible inscribed, need to check actual footprint pose.
     // Use precomputed oriented footprints are done on initialization,
     // offset by translation value to collision check
-    double wx, wy;
-    costmap_->mapToWorld(static_cast<double>(x), static_cast<double>(y), wx, wy);
+    // Hybrid/Lattice coordinates are continuous: check the pose that is
+    // actually published, not an integer cell centre displaced by up to half a cell.
+    const auto world_pose = getWorldCoords(x, y, costmap_);
+    const double wx = world_pose.position.x;
+    const double wy = world_pose.position.y;
     geometry_msgs::msg::Point new_pt;
-    const nav2_costmap_2d::Footprint & oriented_footprint = oriented_footprints_[angle_bin];
+    if (!std::isfinite(angle_bin) || angles_.empty()) {return true;}
+    float normalized_bin = std::fmod(angle_bin, static_cast<float>(angles_.size()));
+    if (normalized_bin < 0.0f) {normalized_bin += angles_.size();}
+    if (normalized_bin >= angles_.size()) {normalized_bin = 0.0f;}
+    const auto bin = static_cast<unsigned int>(normalized_bin);
+    nav2_costmap_2d::Footprint fractional_footprint;
+    if (normalized_bin != static_cast<float>(bin)) {
+      // Arc-interior and analytic samples have fractional headings. Flooring
+      // them to a cached orientation can hide a corner collision.
+      const double angle = normalized_bin * (2.0 * M_PI / angles_.size());
+      const double c = std::cos(angle), s = std::sin(angle);
+      fractional_footprint.reserve(unoriented_footprint_.size());
+      for (const auto & point : unoriented_footprint_) {
+        geometry_msgs::msg::Point rotated;
+        rotated.x = point.x * c - point.y * s;
+        rotated.y = point.x * s + point.y * c;
+        fractional_footprint.push_back(rotated);
+      }
+    }
+    const auto & oriented_footprint = fractional_footprint.empty() ?
+      oriented_footprints_[bin] : fractional_footprint;
     nav2_costmap_2d::Footprint current_footprint;
     current_footprint.reserve(oriented_footprint.size());
     for (unsigned int i = 0; i < oriented_footprint.size(); ++i) {
@@ -190,7 +207,7 @@ float GridCollisionChecker::getCost()
 
 bool GridCollisionChecker::outsideRange(const unsigned int & max, const float & value)
 {
-  return value < 0.0f || value > max;
+  return !std::isfinite(value) || value < 0.0f || value >= max;
 }
 
 }  // namespace nav2_smac_planner

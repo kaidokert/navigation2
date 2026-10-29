@@ -17,6 +17,7 @@
 
 #include <string>
 #include <vector>
+#include <array>
 #include <list>
 #include <memory>
 
@@ -28,6 +29,13 @@
 
 namespace nav2_smac_planner
 {
+
+/** @brief Dense collision-only check of an actual OMPL connector; does not alter graph nodes. */
+bool isAnalyticPathCollisionFree(
+  GridCollisionChecker & checker, const ompl::base::StateSpacePtr & state_space,
+  const std::array<double, 3> & from_pose, const std::array<double, 3> & to_pose,
+  double minimum_radius, bool traverse_unknown);
+
 
 template<typename NodeT>
 class AnalyticExpansion

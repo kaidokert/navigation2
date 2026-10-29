@@ -14,6 +14,7 @@
 
 #include "nav2_mppi_controller/optimizer.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -28,6 +29,7 @@
 #include <xtensor/xnoalias.hpp>
 
 #include "nav2_core/controller_exceptions.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
 
@@ -119,6 +121,35 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  // Experimental recovery heuristic. Runtime mutation is deliberately disabled:
+  // each trial must use an explicitly configured, bounded candidate budget.
+  const auto fallback_name = name_ + ".final_guard_fallback_candidates";
+  rcl_interfaces::msg::ParameterDescriptor descriptor;
+  descriptor.read_only = true;
+  descriptor.description = "Final guard fallback budget; requires controller restart";
+  nav2_util::declare_parameter_if_not_declared(
+    parent_.lock(), fallback_name, rclcpp::ParameterValue(0), descriptor);
+  getParam(
+    final_guard_fallback_candidates_, "final_guard_fallback_candidates", 0,
+    ParameterType::Static);
+  if (final_guard_fallback_candidates_ < 0 || final_guard_fallback_candidates_ > 8) {
+    throw std::invalid_argument("final_guard_fallback_candidates must be in [0, 8]");
+  }
+  // Also reject writes when the node predeclared this parameter without the
+  // read-only descriptor. Static storage alone would let ROS readback diverge.
+  final_guard_fallback_param_callback_ = parent_.lock()->add_on_set_parameters_callback(
+    [fallback_name](const std::vector<rclcpp::Parameter> & parameters) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = true;
+      for (const auto & parameter : parameters) {
+        if (parameter.get_name() == fallback_name) {
+          result.successful = false;
+          result.reason = "final_guard_fallback_candidates is read-only; restart the controller";
+          break;
+        }
+      }
+      return result;
+    });
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -228,18 +259,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
-  utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
-
-  // [F] POST-SG FILTER
-  if (diag && ts >= 5) {
-    RCLCPP_DEBUG(logger_,
-      "[MPPI] F.post-SG   ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
-      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
-      control_sequence_.vx(3), control_sequence_.vx(4),
-      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
-  }
-
-  auto control = getValidatedControlFromSequenceAsTwist(plan.header.stamp);
+  auto control = filterAndValidateControl(plan.header.stamp, diag);
 
   // [G] FINAL CMD_VEL
   if (diag) {
@@ -258,6 +278,9 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    // Recentring changes each row's controls and rollout. Costs from an earlier
+    // bank (including collision penalties) do not score this new trajectory.
+    costs_.fill(0.0f);
     generateNoisedTrajectories();
 
     // [B] BATCH STATS after noise+predict
@@ -590,21 +613,32 @@ bool Optimizer::controlSequenceFinite() const
   return true;
 }
 
-bool Optimizer::controlSequenceCollisionFree() const
+bool Optimizer::currentStateFinite() const
 {
-  // Adapted from PR #14's final filtered-sequence guard. It is unconditional
-  // here: scoring sampled rollouts is not proof that the emitted mean is clear.
-  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite()) {return false;}
   const auto & p = state_.pose.pose.position;
   const auto & q = state_.pose.pose.orientation;
+  const double norm_squared = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
   if (!finiteValue(p.x) || !finiteValue(p.y) || !finiteValue(q.x) || !finiteValue(q.y) ||
     !finiteValue(q.z) || !finiteValue(q.w) ||
-    q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1e-12 ||
+    !finiteValue(norm_squared) || norm_squared < 1e-12 ||
     !finiteValue(state_.speed.linear.x) || !finiteValue(state_.speed.angular.z) ||
     (isHolonomic() && !finiteValue(state_.speed.linear.y)))
   {
     return false;
   }
+  return true;
+}
+
+bool Optimizer::controlSequenceCollisionFree(bool * collision_rejection) const
+{
+  if (collision_rejection) {*collision_rejection = false;}
+  // Adapted from PR #14's final filtered-sequence guard. It is unconditional
+  // here: scoring sampled rollouts is not proof that the emitted mean is clear.
+  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite() || !currentStateFinite()) {
+    return false;
+  }
+  const auto & p = state_.pose.pose.position;
+  const auto & q = state_.pose.pose.orientation;
 
   const size_t n = settings_.time_steps;
   const size_t offset = settings_.shift_control_sequence ? 1 : 0;
@@ -639,27 +673,33 @@ bool Optimizer::controlSequenceCollisionFree() const
              x < costmap_->getOriginX() + costmap_->getSizeInCellsX() * costmap_->getResolution() &&
              y < costmap_->getOriginY() + costmap_->getSizeInCellsY() * costmap_->getResolution();
     };
+  const auto reject_collision = [&]() {
+      if (collision_rejection) {*collision_rejection = true;}
+      return false;
+    };
   const auto clear_pose = [&](double x, double y, double yaw) {
-      if (!in_bounds(x, y) || !finiteValue(yaw)) {return false;}
+      // Invalid forecasts are not a collision and must not enable fallback.
+      if (!finiteValue(x) || !finiteValue(y) || !finiteValue(yaw)) {return false;}
+      if (!in_bounds(x, y)) {return reject_collision();}
       unsigned int mx, my;
-      if (!costmap_->worldToMap(x, y, mx, my)) {return false;}
+      if (!costmap_->worldToMap(x, y, mx, my)) {return reject_collision();}
       const auto center_cost = costmap_->getCost(mx, my);
       if (center_cost >= (circle ? nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE :
         nav2_costmap_2d::LETHAL_OBSTACLE))
       {
-        return false;
+        return reject_collision();
       }
       if (circle) {
         // Inflation is optional and may be smaller than the body. Check every
         // cell intersecting the padded circular body, including its interior.
         if (!in_bounds(x - radius, y - radius) || !in_bounds(x + radius, y + radius)) {
-          return false;
+          return reject_collision();
         }
         unsigned int x0, y0, x1, y1;
         if (!costmap_->worldToMap(x - radius, y - radius, x0, y0) ||
           !costmap_->worldToMap(x + radius, y + radius, x1, y1))
         {
-          return false;
+          return reject_collision();
         }
         const double resolution = costmap_->getResolution();
         for (unsigned int cy = y0; cy <= y1; ++cy) {
@@ -671,7 +711,7 @@ bool Optimizer::controlSequenceCollisionFree() const
             if (dx * dx + dy * dy <= radius * radius &&
               costmap_->getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE)
             {
-              return false;
+              return reject_collision();
             }
           }
         }
@@ -680,16 +720,27 @@ bool Optimizer::controlSequenceCollisionFree() const
       const double c = std::cos(yaw), sn = std::sin(yaw);
       for (const auto & vertex : footprint) {
         if (!in_bounds(x + c * vertex.x - sn * vertex.y, y + sn * vertex.x + c * vertex.y)) {
-          return false;
+          return reject_collision();
         }
       }
       const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
-      return cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
+      if (!finiteValue(cost) || cost < 0) {return false;}
+      return cost < nav2_costmap_2d::LETHAL_OBSTACLE ? true : reject_collision();
     };
   // Never rely on forward prediction to notice an already-occupied footprint.
-  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {return false;}
+  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {
+    RCLCPP_WARN(
+      logger_, "[MPPI_FINAL_GUARD] stage=current x=%.6f y=%.6f yaw=%.6f",
+      p.x, p.y, tf2::getYaw(q));
+    return false;
+  }
   for (size_t j = 0; j <= n; ++j) {
     if (!clear_pose(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j))) {
+      RCLCPP_WARN(
+        logger_, "[MPPI_FINAL_GUARD] stage=forecast step=%zu x=%.6f y=%.6f yaw=%.6f"
+        " current=(%.6f,%.6f,%.6f) command=(%.6f,%.6f)",
+        j, trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j),
+        p.x, p.y, tf2::getYaw(q), control_sequence_.vx(offset), control_sequence_.wz(offset));
       return false;
     }
   }
@@ -697,23 +748,108 @@ bool Optimizer::controlSequenceCollisionFree() const
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwist(
-  const builtin_interfaces::msg::Time & stamp)
+  const builtin_interfaces::msg::Time & stamp,
+  const std::array<models::Control, 4> * pre_filter_history)
 {
   // Validate raw controls before clamping can turn NaN/Inf into a finite bound.
-  if (controlSequenceFinite()) {
+  if (controlSequenceFinite() && currentStateFinite()) {
     // Smoothing follows optimization and can invalidate the Ackermann cone.
     // No velocity or steering adjustment is permitted after this validation.
     applyControlSequenceConstraints();
-    if (controlSequenceCollisionFree()) {
+    bool collision_rejection = false;
+    if (controlSequenceCollisionFree(&collision_rejection)) {
       const auto control = getControlFromSequenceAsTwist(stamp);
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
     }
+    if (collision_rejection && pre_filter_history && final_guard_fallback_candidates_ > 0 &&
+      settings_.iteration_count > 0)
+    {
+      geometry_msgs::msg::TwistStamped control;
+      if (tryFinalGuardFallback(stamp, *pre_filter_history, control)) {
+        return control;
+      }
+    }
   }
   control_sequence_.reset(settings_.time_steps);
   control_history_.fill({0.0f, 0.0f, 0.0f});
   throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
+}
+
+geometry_msgs::msg::TwistStamped Optimizer::filterAndValidateControl(
+  const builtin_interfaces::msg::Time & stamp, bool diag)
+{
+  // Reject invalid means before the filter or constraints can conceal them.
+  // Calling the existing validator without history cannot activate fallback.
+  if (!controlSequenceFinite() || !currentStateFinite()) {
+    return getValidatedControlFromSequenceAsTwist(stamp);
+  }
+  const auto pre_filter_history = control_history_;
+  utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
+  if (diag && settings_.time_steps >= 5) {
+    RCLCPP_DEBUG(logger_,
+      "[MPPI] F.post-SG   ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
+      control_sequence_.vx(0), control_sequence_.vx(1), control_sequence_.vx(2),
+      control_sequence_.vx(3), control_sequence_.vx(4),
+      control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
+  }
+  return getValidatedControlFromSequenceAsTwist(stamp, &pre_filter_history);
+}
+
+bool Optimizer::tryFinalGuardFallback(
+  const builtin_interfaces::msg::Time & stamp,
+  const std::array<models::Control, 4> & pre_filter_history,
+  geometry_msgs::msg::TwistStamped & control)
+{
+  const size_t n = settings_.time_steps;
+  const size_t rows = costs_.size();
+  const size_t limit = static_cast<size_t>(std::clamp(final_guard_fallback_candidates_, 0, 8));
+  std::vector<size_t> candidates;
+  if (state_.cvx.shape()[0] == rows && state_.cvx.shape()[1] == n &&
+    state_.cvy.shape()[0] == rows && state_.cvy.shape()[1] == n &&
+    state_.cwz.shape()[0] == rows && state_.cwz.shape()[1] == n)
+  {
+    for (size_t row = 0; row < rows; ++row) {
+      bool finite = finiteValue(costs_(row));
+      for (size_t j = 0; finite && j < n; ++j) {
+        finite = finiteValue(state_.cvx(row, j)) && finiteValue(state_.cvy(row, j)) &&
+          finiteValue(state_.cwz(row, j));
+      }
+      if (finite) {candidates.push_back(row);}
+    }
+  }
+  std::partial_sort(
+    candidates.begin(), candidates.begin() + std::min(limit, candidates.size()), candidates.end(),
+    [&](size_t a, size_t b) {
+      return costs_(a) < costs_(b) || (costs_(a) == costs_(b) && a < b);
+    });
+  const size_t attempts = std::min(limit, candidates.size());
+  for (size_t attempt = 0; attempt < attempts; ++attempt) {
+    const size_t row = candidates[attempt];
+    // Each trial uses the same pre-mean-filter history. Failed trials never
+    // advance it, and never become the next invocation's warm sequence.
+    control_history_ = pre_filter_history;
+    control_sequence_.vx = xt::view(state_.cvx, row, xt::all());
+    control_sequence_.vy = xt::view(state_.cvy, row, xt::all());
+    control_sequence_.wz = xt::view(state_.cwz, row, xt::all());
+    utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
+    if (!controlSequenceFinite()) {continue;}
+    applyControlSequenceConstraints();
+    if (!controlSequenceCollisionFree()) {continue;}
+    control = getControlFromSequenceAsTwist(stamp);
+    control_history_.back() = {static_cast<float>(control.twist.linear.x),
+      static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
+    RCLCPP_WARN(
+      logger_, "[MPPI_FINAL_GUARD_FALLBACK] selected=%zu cost=%.9g attempts=%zu limit=%zu"
+      " command=(%.6f,%.6f,%.6f)", row, static_cast<double>(costs_(row)), attempt + 1, limit,
+      control.twist.linear.x, control.twist.linear.y, control.twist.angular.z);
+    return true;
+  }
+  RCLCPP_WARN(
+    logger_, "[MPPI_FINAL_GUARD_FALLBACK] selected=none attempts=%zu limit=%zu finite_rows=%zu",
+    attempts, limit, candidates.size());
+  return false;
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(

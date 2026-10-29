@@ -89,6 +89,8 @@ void PathAlignCritic::score(CriticData & data)
   // Don't apply when dynamic obstacles are blocking significant proportions of the local path
   utils::setPathCostsIfNotSet(data, costmap_ros_);
   std::vector<bool> & path_pts_valid = *data.path_pts_valid;
+  // Preserve occupancy gating over incoming segment origins; endpoint validity
+  // is also available below when scoring the complete reference.
   float invalid_ctr = 0.0f;
   for (size_t i = 0; i < path_segments_count; i++) {
     if (!path_pts_valid[i]) {invalid_ctr += 1.0f;}
@@ -107,11 +109,13 @@ void PathAlignCritic::score(CriticData & data)
   const size_t batch_size = data.trajectories.x.shape(0);
   auto && cost = xt::xtensor<float, 1>::from_shape({data.costs.shape(0)});
 
-  // Find integrated distance in the path
-  std::vector<float> path_integrated_distances(path_segments_count, 0.0f);
-  std::vector<utils::Pose2D> path(path_segments_count);
+  // N reached segments span N + 1 poses, including the reached endpoint.
+  // Omitting it turns a one-segment reference into a stationary point target.
+  const size_t reference_point_count = path_segments_count + 1;
+  std::vector<float> path_integrated_distances(reference_point_count, 0.0f);
+  std::vector<utils::Pose2D> path(reference_point_count);
   float dx = 0.0f, dy = 0.0f;
-  for (unsigned int i = 1; i != path_segments_count; i++) {
+  for (unsigned int i = 1; i != reference_point_count; i++) {
     auto & pose = path[i - 1];
     pose.x = data.path.x(i - 1);
     pose.y = data.path.y(i - 1);
@@ -123,10 +127,29 @@ void PathAlignCritic::score(CriticData & data)
   }
 
   // Finish populating the path vector
-  auto & final_pose = path[path_segments_count - 1];
-  final_pose.x = data.path.x(path_segments_count - 1);
-  final_pose.y = data.path.y(path_segments_count - 1);
-  final_pose.theta = data.path.yaws(path_segments_count - 1);
+  auto & final_pose = path[reference_point_count - 1];
+  final_pose.x = data.path.x(reference_point_count - 1);
+  final_pose.y = data.path.y(reference_point_count - 1);
+  final_pose.theta = data.path.yaws(reference_point_count - 1);
+
+  // Pruning anchors the reference at its closest vertex, not at the rollout's
+  // initial longitudinal position. Align the two distance origins locally.
+  // Use only the first nondegenerate edge: projecting onto the entire path can
+  // jump to a different branch when the path loops back near the robot.
+  float origin_tangent_x = 0.0f;
+  float origin_tangent_y = 0.0f;
+  float origin_edge_length = 0.0f;
+  for (size_t i = 1; i < reference_point_count; ++i) {
+    const float edge_x = path[i].x - path[i - 1].x;
+    const float edge_y = path[i].y - path[i - 1].y;
+    const float length = std::hypot(edge_x, edge_y);
+    if (length > 1e-6f) {
+      origin_tangent_x = edge_x / length;
+      origin_tangent_y = edge_y / length;
+      origin_edge_length = length;
+      break;
+    }
+  }
 
   float summed_path_dist = 0.0f, dyaw = 0.0f;
   unsigned int num_samples = 0u;
@@ -152,6 +175,15 @@ void PathAlignCritic::score(CriticData & data)
     path_pt = 0u;
     float Tx_m1 = T_x(t, 0);
     float Ty_m1 = T_y(t, 0);
+    if (origin_edge_length > 0.0f) {
+      const float initial_projection =
+        (Tx_m1 - path[0].x) * origin_tangent_x +
+        (Ty_m1 - path[0].y) * origin_tangent_y;
+      // A point behind the origin needs to travel to it before progressing
+      // along the reference. The existing matcher clamps negative distances
+      // to vertex zero. Forward projection cannot skip beyond the first edge.
+      traj_integrated_distance = std::min(initial_projection, origin_edge_length);
+    }
     for (size_t p = 1; p < traj_sampled_size; p++) {
       const float Tx = T_x(t, p);
       const float Ty = T_y(t, p);

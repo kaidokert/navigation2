@@ -864,7 +864,48 @@ void NodeHybrid::getNeighbors(
           motion_projections[i]._x,
           motion_projections[i]._y,
           motion_projections[i]._theta));
-      if (neighbor->isNodeValid(traverse_unknown, collision_checker)) {
+      // A clear destination does not imply a clear connecting primitive. Check
+      // the actual circular arc (or straight stroke), not its endpoint chord.
+      // Bound translation plus footprint rotation to one tenth of a cell per sample.
+      // This is an edge property: never cache it as destination-node validity.
+      const auto & primitive = motion_table.projections[i];
+      const double angle = primitive._theta * motion_table.bin_size;
+      const bool straight = std::abs(angle) < 1e-6;
+      const double radius = straight ? 0.0 : primitive._x / std::sin(angle);
+      const double length = straight ? std::hypot(primitive._x, primitive._y) :
+        std::abs(radius * angle);
+      // Subdivide old half-cell intervals so no previously checked pose is lost.
+      const double sample_count = 5.0 * std::ceil(
+        (length + collision_checker->getFootprintRadiusInCells() * std::abs(angle)) / 0.5);
+      if (!std::isfinite(sample_count) || sample_count < 0.0 || sample_count > 100000.0) {
+        neighbor->setPose(initial_node_coords);
+        continue;
+      }
+      const auto intervals = static_cast<unsigned int>(std::max(1.0, sample_count));
+      const auto & trig = motion_table.trig_values[static_cast<unsigned int>(pose.theta)];
+      // Reject occupied endpoints cheaply before paying for interior checks.
+      // isNodeValid stores its own endpoint cost; direct checker calls below
+      // cannot overwrite that node's traversal cost or validity cache.
+      bool edge_valid = neighbor->isNodeValid(traverse_unknown, collision_checker);
+      for (unsigned int step = 1; edge_valid && step < intervals; ++step) {
+        const double fraction = static_cast<double>(step) / intervals;
+        const double x = straight ? fraction * primitive._x : radius * std::sin(fraction * angle);
+        const double y = straight ? fraction * primitive._y :
+          radius * (1.0 - std::cos(fraction * angle));
+        float heading = pose.theta + fraction * primitive._theta;
+        if (heading < 0.0f) {heading += motion_table.num_angle_quantization_float;}
+        if (heading >= motion_table.num_angle_quantization_float) {
+          heading -= motion_table.num_angle_quantization_float;
+        }
+        if (collision_checker->inCollision(
+            pose.x + x * trig.first - y * trig.second,
+            pose.y + x * trig.second + y * trig.first, heading, traverse_unknown))
+        {
+          edge_valid = false;
+          break;
+        }
+      }
+      if (edge_valid) {
         neighbor->setMotionPrimitiveIndex(i, motion_projections[i]._turn_dir);
         neighbors.push_back(neighbor);
       } else {

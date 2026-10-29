@@ -98,6 +98,13 @@ public:
    */
   float getCost();
 
+  /** @brief Maximum distance from reference point to footprint, in map cells. */
+  double getFootprintRadiusInCells() const
+  {
+    return footprint_is_radius_ ? 0.0 : footprint_radius_ / costmap_->getResolution();
+  }
+
+
   /**
    * @brief Get the angles of the precomputed footprint orientations
    * @return the ordered vector of angles corresponding to footprints
@@ -127,6 +134,7 @@ protected:
   std::vector<nav2_costmap_2d::Footprint> oriented_footprints_;
   nav2_costmap_2d::Footprint unoriented_footprint_;
   float center_cost_;
+  double footprint_radius_{0.0};
   bool footprint_is_radius_{false};
   std::vector<float> angles_;
   float possible_collision_cost_{-1};
