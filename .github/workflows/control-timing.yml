@@ -33,7 +33,7 @@ jobs:
         run: |
           source install/setup.bash
           colcon test --packages-select nav2_util nav2_mppi_controller \
-            --ctest-args -R control_timing --output-on-failure
+            --ctest-args -R 'control_timing|optimizer_unit_tests' --output-on-failure
           colcon test-result --verbose
       - uses: actions/upload-artifact@v4
         if: always()
