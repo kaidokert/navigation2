@@ -99,6 +99,10 @@ void GridCollisionChecker::setFootprint(
   }
 
   unoriented_footprint_ = footprint;
+  footprint_radius_ = 0.0;
+  for (const auto & point : footprint) {
+    footprint_radius_ = std::max(footprint_radius_, std::hypot(point.x, point.y));
+  }
 }
 
 bool GridCollisionChecker::inCollision(
@@ -141,7 +145,27 @@ bool GridCollisionChecker::inCollision(
     double wx, wy;
     costmap_->mapToWorld(static_cast<double>(x), static_cast<double>(y), wx, wy);
     geometry_msgs::msg::Point new_pt;
-    const nav2_costmap_2d::Footprint & oriented_footprint = oriented_footprints_[angle_bin];
+    if (!std::isfinite(angle_bin) || angles_.empty()) {return true;}
+    float normalized_bin = std::fmod(angle_bin, static_cast<float>(angles_.size()));
+    if (normalized_bin < 0.0f) {normalized_bin += angles_.size();}
+    if (normalized_bin >= angles_.size()) {normalized_bin = 0.0f;}
+    const auto bin = static_cast<unsigned int>(normalized_bin);
+    nav2_costmap_2d::Footprint fractional_footprint;
+    if (normalized_bin != static_cast<float>(bin)) {
+      // Arc-interior and analytic samples have fractional headings. Flooring
+      // them to a cached orientation can hide a corner collision.
+      const double angle = normalized_bin * (2.0 * M_PI / angles_.size());
+      const double c = std::cos(angle), s = std::sin(angle);
+      fractional_footprint.reserve(unoriented_footprint_.size());
+      for (const auto & point : unoriented_footprint_) {
+        geometry_msgs::msg::Point rotated;
+        rotated.x = point.x * c - point.y * s;
+        rotated.y = point.x * s + point.y * c;
+        fractional_footprint.push_back(rotated);
+      }
+    }
+    const auto & oriented_footprint = fractional_footprint.empty() ?
+      oriented_footprints_[bin] : fractional_footprint;
     nav2_costmap_2d::Footprint current_footprint;
     current_footprint.reserve(oriented_footprint.size());
     for (unsigned int i = 0; i < oriented_footprint.size(); ++i) {

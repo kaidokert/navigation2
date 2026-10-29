@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "gtest/gtest.h"
 #include "rclcpp/rclcpp.hpp"
@@ -26,6 +27,7 @@
 #include "nav2_smac_planner/node_hybrid.hpp"
 #include "nav2_smac_planner/collision_checker.hpp"
 #include "nav2_smac_planner/types.hpp"
+#include "nav2_smac_planner/analytic_expansion.hpp"
 
 class RclCppFixture
 {
@@ -478,4 +480,139 @@ TEST(NodeHybridTest, basic_get_closest_angular_bin_test)
     unsigned int calculated_angular_bin = motion_table.getClosestAngularBin(test_theta);
     EXPECT_EQ(expected_angular_bin, calculated_angular_bin);
   }
+}
+
+TEST(NodeHybridTest, RecordedReverseArcChecksBetweenClearEndpoints)
+{
+  // Reduced from wp2fix022, global grid at sim 136.964 s, plan 137.695 s.
+  // 2 cm cells, 0.70 m reverse-right primitive, 156 -> 160 degrees.
+  // Retain the recorded blocking cell and map-cell phase, remove other cells.
+  using Hybrid = nav2_smac_planner::NodeHybrid;
+  nav2_costmap_2d::Costmap2D grid(100, 450, 0.02, 0.0, 0.0, 0);
+  grid.setCost(51, 382, nav2_costmap_2d::LETHAL_OBSTACLE);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("recorded_arc");
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
+  checker.setCostmap(&grid);
+  nav2_costmap_2d::Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+    {0.316, 0.191}, {0.316, -0.191}, {-0.09, -0.191}, {-0.09, 0.191}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = xy.first;
+    point.y = xy.second;
+    footprint.push_back(point);
+  }
+  checker.setFootprint(footprint, false, 0.0);
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 35.0;
+  info.allow_primitive_interpolation = false;
+  unsigned int width = 100, height = 450, headings = 180;
+  Hybrid::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, width, height, headings, info);
+  Hybrid start(Hybrid::getIndex(58, 368, 78, 100, 180));
+  start.setPose(Hybrid::Coordinates(58.4131996f, 368.6070141f, 78.0f));
+  const auto projected = Hybrid::motion_table.getProjections(&start);
+  ASSERT_EQ(projected[5]._turn_dir, nav2_smac_planner::TurnDirection::REV_RIGHT);
+  ASSERT_FALSE(checker.inCollision(start.pose.x, start.pose.y, start.pose.theta, false));
+  ASSERT_FALSE(checker.inCollision(
+      projected[5]._x, projected[5]._y, projected[5]._theta, false));
+  // The captured primitive's midpoint is blocked although both vertices are clear.
+  ASSERT_TRUE(checker.inCollision(59.537754f, 368.129669f, 79.0f, false));
+  const auto target = Hybrid::getIndex(
+    static_cast<unsigned int>(projected[5]._x),
+    static_cast<unsigned int>(projected[5]._y), 80, 100, 180);
+  auto admits_target = [&]() {
+      std::unordered_map<uint64_t, std::unique_ptr<Hybrid>> graph;
+      std::function<bool(const uint64_t &, Hybrid * &)> getter =
+        [&](const uint64_t & index, Hybrid * & neighbor) {
+          auto & entry = graph[index];
+          if (!entry) {entry = std::make_unique<Hybrid>(index);}
+          neighbor = entry.get();
+          return true;
+        };
+      Hybrid::NodeVector neighbors;
+      start.getNeighbors(getter, &checker, false, neighbors);
+      return std::any_of(neighbors.begin(), neighbors.end(),
+               [&](Hybrid * neighbor) {return neighbor->getIndex() == target;});
+    };
+  EXPECT_FALSE(admits_target());
+  const std::array<double, 3> from{start.pose.x, start.pose.y,
+    Hybrid::motion_table.getAngleFromBin(start.pose.theta)};
+  const std::array<double, 3> to{projected[5]._x, projected[5]._y,
+    Hybrid::motion_table.getAngleFromBin(projected[5]._theta)};
+  EXPECT_FALSE(nav2_smac_planner::isAnalyticPathCollisionFree(
+      checker, Hybrid::motion_table.state_space, from, to, 35.0, false));
+  // Same geometry without the recorded obstacle must remain traversable.
+  grid.setCost(51, 382, nav2_costmap_2d::FREE_SPACE);
+  EXPECT_TRUE(admits_target());
+  EXPECT_TRUE(nav2_smac_planner::isAnalyticPathCollisionFree(
+      checker, Hybrid::motion_table.state_space, from, to, 35.0, false));
+}
+
+TEST(NodeHybridTest, ClearPrimitiveSweepsPreserveDirectionsAndHeadingWrap)
+{
+  using Hybrid = nav2_smac_planner::NodeHybrid;
+  nav2_costmap_2d::Costmap2D grid(100, 100, 0.02, 0.0, 0.0, 0);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("clear_sweeps");
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
+  checker.setCostmap(&grid);
+  checker.setFootprint({}, true, 0.0);
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 35.1;  // Force motion table rebuild for interpolation.
+  info.allow_primitive_interpolation = true;
+  unsigned int width = 100, height = 100, headings = 180;
+  Hybrid::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, width, height, headings, info);
+  for (const float heading : {0.0f, 1.0f, 90.0f, 179.0f}) {
+    Hybrid start(0);
+    start.setPose(Hybrid::Coordinates(50.2f, 50.3f, heading));
+    std::unordered_map<uint64_t, std::unique_ptr<Hybrid>> graph;
+    std::function<bool(const uint64_t &, Hybrid * &)> getter =
+      [&](const uint64_t & index, Hybrid * & neighbor) {
+        auto & entry = graph[index];
+        if (!entry) {entry = std::make_unique<Hybrid>(index);}
+        neighbor = entry.get();
+        return true;
+      };
+    Hybrid::NodeVector neighbors;
+    start.getNeighbors(getter, &checker, false, neighbors);
+    EXPECT_EQ(neighbors.size(), Hybrid::motion_table.projections.size()) << heading;
+    for (auto * neighbor : neighbors) {
+      EXPECT_GE(neighbor->pose.theta, 0.0f);
+      EXPECT_LT(neighbor->pose.theta, 180.0f);
+      EXPECT_FLOAT_EQ(neighbor->getCost(), 0.0f);
+    }
+  }
+}
+
+TEST(NodeHybridTest, FractionalArcHeadingUsesActualFootprintOrientation)
+{
+  nav2_costmap_2d::Costmap2D grid(100, 100, 0.02, 0.0, 0.0, 0);
+  grid.setCost(69, 51, nav2_costmap_2d::LETHAL_OBSTACLE);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("fractional_sweep");
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
+  checker.setCostmap(&grid);
+  nav2_costmap_2d::Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+    {0.4, 0.005}, {0.4, -0.005}, {-0.05, -0.005}, {-0.05, 0.005}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = xy.first;
+    point.y = xy.second;
+    footprint.push_back(point);
+  }
+  checker.setFootprint(footprint, false, 0.0);
+  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 0.0f, false));
+  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, 0.5f, false));
+  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, 180.5f, false));
+  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, -179.5f, false));
+  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 180.0f, false));
+  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, -1e-8f, false));
+  grid.setCost(69, 51, nav2_costmap_2d::FREE_SPACE);
+  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 0.5f, false));
+  const auto radius = checker.getFootprintRadiusInCells();
+  checker.setFootprint({}, true, 0.0);
+  EXPECT_DOUBLE_EQ(checker.getFootprintRadiusInCells(), 0.0);
+  checker.setFootprint(footprint, false, 0.0);
+  EXPECT_DOUBLE_EQ(checker.getFootprintRadiusInCells(), radius);
 }

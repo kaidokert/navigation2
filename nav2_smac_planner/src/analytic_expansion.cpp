@@ -25,6 +25,41 @@
 namespace nav2_smac_planner
 {
 
+bool isAnalyticPathCollisionFree(
+  GridCollisionChecker & checker, const ompl::base::StateSpacePtr & state_space,
+  const std::array<double, 3> & from_pose, const std::array<double, 3> & to_pose,
+  double minimum_radius, bool traverse_unknown)
+{
+  if (!state_space || !std::isfinite(minimum_radius) || minimum_radius <= 0.0) {return false;}
+  for (unsigned int i = 0; i < 3; ++i) {
+    if (!std::isfinite(from_pose[i]) || !std::isfinite(to_pose[i])) {return false;}
+  }
+  ompl::base::ScopedState<> from(state_space), to(state_space), sample(state_space);
+  for (unsigned int i = 0; i < 3; ++i) {
+    from[i] = from_pose[i];
+    to[i] = to_pose[i];
+  }
+  const double length = state_space->distance(from(), to());
+  // Actual connector distance includes refined radii; minimum_radius bounds
+  // curvature conservatively. Limit footprint-point travel to half a cell.
+  const double sample_count = std::ceil(
+    length * (1.0 + checker.getFootprintRadiusInCells() / minimum_radius) / 0.5);
+  if (!std::isfinite(sample_count) || sample_count < 0.0 || sample_count > 100000.0) {return false;}
+  const auto intervals = static_cast<unsigned int>(std::max(1.0, sample_count));
+  const double bins_per_radian = checker.getPrecomputedAngles().size() / (2.0 * M_PI);
+  for (unsigned int i = 0; i <= intervals; ++i) {
+    state_space->interpolate(from(), to(), static_cast<double>(i) / intervals, sample());
+    const auto values = sample.reals();
+    double heading = std::fmod(values[2], 2.0 * M_PI);
+    if (heading < 0.0) {heading += 2.0 * M_PI;}
+    if (checker.inCollision(values[0], values[1], heading * bins_per_radian, traverse_unknown)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+
 template<typename NodeT>
 AnalyticExpansion<NodeT>::AnalyticExpansion(
   const MotionModel & motion_model,
@@ -131,6 +166,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
             return score;
           };
 
+        auto selected_state_space = node->motion_table.state_space;
         float best_score = scoringFn(analytic_nodes);
         float score = std::numeric_limits<float>::max();
         float min_turn_rad = node->motion_table.min_turning_radius;
@@ -148,9 +184,21 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           if (score <= best_score) {
             analytic_nodes = refined_analytic_nodes;
             best_score = score;
+            selected_state_space = state_space;
           }
         }
 
+        // Lattice edge validation must not be bypassed by an analytic shortcut.
+        // Check only the selected connector, retaining its published pose spacing.
+        if (!isAnalyticPathCollisionFree(
+            *_collision_checker, selected_state_space,
+            {node->pose.x, node->pose.y, node->motion_table.getAngleFromBin(node->pose.theta)},
+            {goal_node->pose.x, goal_node->pose.y,
+              goal_node->motion_table.getAngleFromBin(goal_node->pose.theta)},
+            node->motion_table.min_turning_radius, _traverse_unknown))
+        {
+          return NodePtr(nullptr);
+        }
         return setAnalyticPath(node, goal_node, analytic_nodes);
       }
     }
