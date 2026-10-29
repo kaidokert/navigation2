@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <chrono>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <string>
@@ -66,6 +67,7 @@ ControllerServer::ControllerServer(const rclcpp::NodeOptions & options)
   declare_parameter("use_realtime_priority", rclcpp::ParameterValue(false));
   declare_parameter("publish_zero_velocity", rclcpp::ParameterValue(true));
   declare_parameter("costmap_update_timeout", 0.30);  // 300ms
+  declare_parameter("emulated_compute_time_samples", rclcpp::ParameterValue(std::vector<double>{}));
 
   // The costmap node is used in the implementation of the controller
   costmap_ros_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
@@ -131,6 +133,12 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   get_parameter("speed_limit_topic", speed_limit_topic);
   get_parameter("failure_tolerance", failure_tolerance_);
   get_parameter("use_realtime_priority", use_realtime_priority_);
+  get_parameter("emulated_compute_time_samples", emulated_compute_time_samples_);
+  if (!validEmulatedComputeSamples(emulated_compute_time_samples_)) {
+    RCLCPP_ERROR(
+      get_logger(), "emulated_compute_time_samples must be finite and within [0, 1] s; disabled");
+    emulated_compute_time_samples_.clear();
+  }
 
   costmap_ros_->configure();
   timing_.configure(shared_from_this(), "~/control_timing", 1.0 / controller_frequency_);
@@ -507,10 +515,12 @@ void ControllerServer::computeControl()
     timing_.resetPublicationInterval();
     timing_.setBudget(1.0 / controller_frequency_);
     rclcpp::WallRate loop_rate(controller_frequency_);
+    const bool emulate_compute = emulatingComputeTime();
     while (rclcpp::ok()) {
       nav2_util::ControlTiming::Cycle timing_cycle(timing_);
       auto stage_start = nav2_util::ControlTiming::Clock::now();
       auto start_time = this->now();
+      cycle_start_ros_ = start_time;
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
         timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Inactive);
@@ -560,7 +570,19 @@ void ControllerServer::computeControl()
       timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
       timing_cycle.endMeasurement();
       auto cycle_duration = this->now() - start_time;
-      if (!loop_rate.sleep()) {
+      if (emulate_compute) {
+        const rclcpp::Time next_cycle =
+          start_time + rclcpp::Duration::from_seconds(1.0 / controller_frequency_);
+        if (this->now() < next_cycle) {
+          get_clock()->sleep_until(next_cycle);
+        } else {
+          timing_cycle.missed(true);
+          RCLCPP_WARN(
+            get_logger(),
+            "Control loop missed its desired rate of %.4f Hz. Current loop rate is %.4f Hz.",
+            controller_frequency_, 1 / cycle_duration.seconds());
+        }
+      } else if (!loop_rate.sleep()) {
         timing_cycle.missed(true);
         RCLCPP_WARN(
           get_logger(),
@@ -737,8 +759,37 @@ void ControllerServer::computeAndPublishVelocity()
     nav2_util::geometry_utils::calculate_path_length(current_path_, find_closest_pose_idx());
   action_server_->publish_feedback(feedback);
 
+  holdForEmulatedComputeTime();
   RCLCPP_DEBUG(get_logger(), "Publishing velocity at time %.2f", now().seconds());
   publishVelocity(cmd_vel_2d);
+}
+
+bool ControllerServer::validEmulatedComputeSamples(const std::vector<double> & samples)
+{
+  if (samples.empty() || samples.front() < 0.0) {
+    return true;  // the off forms
+  }
+  for (const double s : samples) {
+    if (!std::isfinite(s) || s < 0.0 || s > 1.0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ControllerServer::emulatingComputeTime() const
+{
+  return !emulated_compute_time_samples_.empty() && emulated_compute_time_samples_.front() >= 0.0;
+}
+
+void ControllerServer::holdForEmulatedComputeTime()
+{
+  if (!emulatingComputeTime()) {
+    return;
+  }
+  std::uniform_int_distribution<size_t> pick(0, emulated_compute_time_samples_.size() - 1);
+  const double hold = emulated_compute_time_samples_[pick(emulated_compute_rng_)];
+  get_clock()->sleep_until(cycle_start_ros_ + rclcpp::Duration::from_seconds(hold));
 }
 
 void ControllerServer::updateGlobalPath()
@@ -898,6 +949,17 @@ ControllerServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> param
         min_theta_velocity_threshold_ = parameter.as_double();
       } else if (name == "failure_tolerance") {
         failure_tolerance_ = parameter.as_double();
+      }
+    } else if (type == ParameterType::PARAMETER_DOUBLE_ARRAY) {
+      if (name == "emulated_compute_time_samples") {
+        const auto samples = parameter.as_double_array();
+        if (!validEmulatedComputeSamples(samples)) {
+          dynamic_params_lock_.unlock();
+          result.successful = false;
+          result.reason = "emulated_compute_time_samples must be finite and within [0, 1] s";
+          return result;
+        }
+        emulated_compute_time_samples_ = samples;
       }
     }
 

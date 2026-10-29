@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <random>
 
 #include "nav2_core/controller.hpp"
 #include "nav2_core/progress_checker.hpp"
@@ -272,6 +273,21 @@ protected:
   bool use_realtime_priority_;
   rclcpp::Duration costmap_update_timeout_;
 
+  // Emulated compute time, for running a slower robot's controller timing on a faster (sim) host.
+  // Empty or a negative first value = off ([-1.0] switches it off at runtime: a parameter file
+  // cannot carry an empty array). Otherwise each cycle holds its command until a duration drawn
+  // from these samples (s) has passed in ROS time since the cycle started, and the loop is paced
+  // in ROS time instead of wall time. [0.0] gives plain ROS-time pacing at controller_frequency.
+  // Samples must be finite and within [0, 1] s, written as floats (an integer YAML list fails the
+  // type check). While on, the ~/control_timing stage and elapsed figures (steady clock) include
+  // the hold in wall time, so their deadline misses are not meaningful; the missed-rate warning
+  // compares the ROS-time cycle length.
+  std::vector<double> emulated_compute_time_samples_;
+  std::mt19937 emulated_compute_rng_{0u};
+  rclcpp::Time cycle_start_ros_;
+  bool emulatingComputeTime() const;
+  static bool validEmulatedComputeSamples(const std::vector<double> & samples);
+
   // Whether we've published the single controller warning yet
   geometry_msgs::msg::PoseStamped end_pose_;
 
@@ -280,6 +296,11 @@ protected:
 
   // Current path container
   nav_msgs::msg::Path current_path_;
+
+  /**
+   * @brief Wait (ROS time) until the emulated compute time drawn for this cycle has passed
+   */
+  void holdForEmulatedComputeTime();
 
 private:
   /**
