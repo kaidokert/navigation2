@@ -61,6 +61,9 @@ void PathHandler::initialize(
     getParam(handoff_yaw_relax_cap_, "handoff_yaw_relax_cap", 0.8);
     // <=0 disables the escape policy (default: disabled pending oscillation latch)
     getParam(handoff_escape_after_cycles_, "handoff_escape_after_cycles", 0);
+    getParam(stranded_handoff_radius_, "stranded_handoff_radius", 0.0);
+    getParam(stranded_handoff_cycles_, "stranded_handoff_cycles", 20);
+    stranded_handoff_cycles_ = std::max(stranded_handoff_cycles_, 1);
     handoff_yaw_relax_per_cycle_ = std::max(handoff_yaw_relax_per_cycle_, 0.0);
     handoff_yaw_relax_cap_ = std::max(
       handoff_yaw_relax_cap_, static_cast<double>(inversion_yaw_tolerance_));
@@ -182,14 +185,47 @@ nav_msgs::msg::Path PathHandler::transformPath(
   const geometry_msgs::msg::PoseStamped & robot_pose)
 {
   // Find relevent bounds of path to use
-  geometry_msgs::msg::PoseStamped global_pose =
-    transformToGlobalPlanFrame(robot_pose);
+  geometry_msgs::msg::PoseStamped global_pose;
+  try {
+    global_pose = transformToGlobalPlanFrame(robot_pose);
+  } catch (...) {
+    stranded_cycles_ = 0u;  // a failed cycle breaks the consecutive stranded count
+    throw;
+  }
   auto [transformed_plan, lower_bound] = getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
   if (enforce_path_inversion_ && inversion_locale_ != 0u && !terminal_stub_aligned_) {
-    if (isWithinInversionTolerances(global_pose)) {
+    // Stranded handoff (#102): with the segment fully consumed and the robot beside the cusp but
+    // outside the xy gate, the tolerance check can never pass and MPPI rocks on a ghost stub.
+    // The cycle threshold is clamped here as well: dynamic parameter updates bypass initialize().
+    bool stranded_handoff = false;
+    if (stranded_handoff_radius_ > 0.0) {
+      const double cusp_d = getCuspDistance(global_pose);
+      // Measure the pruned segment itself, not transformed_plan: prune_distance or the costmap
+      // bounds can clip the local plan to one pose while part of the approach remains.
+      const bool consumed = utils::pathLength(global_plan_up_to_inversion_) < 1e-3;
+      if (consumed && cusp_d > inversion_xy_tolerance_ && cusp_d <= stranded_handoff_radius_) {
+        const int cycles = std::max(stranded_handoff_cycles_, 1);
+        const unsigned int needed = static_cast<unsigned int>(cycles);
+        if (++stranded_cycles_ >= needed) {
+          stranded_handoff = true;
+          RCLCPP_INFO(logger_,
+            "[HANDOFF_STRANDED] cusp=%.3fm (gate %.2f, radius %.2f) after %u cycles",
+            cusp_d, inversion_xy_tolerance_, stranded_handoff_radius_, stranded_cycles_);
+        }
+      } else {
+        stranded_cycles_ = 0u;
+      }
+    } else {
+      stranded_cycles_ = 0u;
+    }
+    if (stranded_handoff || isWithinInversionTolerances(global_pose)) {
+      stranded_cycles_ = 0u;
+      // A stranded handoff short-circuits the tolerance check, which would otherwise have reset the
+      // Layer 1 count; do it here so no relaxation carries into the next segment.
+      handoff_blocked_cycles_ = 0u;
       const size_t post_cusp_poses =
         global_plan_.poses.size() > static_cast<size_t>(inversion_locale_) ?
         global_plan_.poses.size() - static_cast<size_t>(inversion_locale_) : 0u;
@@ -235,6 +271,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
       transformed_plan = std::move(refreshed_plan);
       prunePlan(global_plan_up_to_inversion_, refreshed_bound);
     }
+  } else {
+    stranded_cycles_ = 0u;
   }
 
   const double real_tgp_length = static_cast<double>(utils::pathLength(transformed_plan));
@@ -582,6 +620,7 @@ double PathHandler::getMaxCostmapDist()
 void PathHandler::setPath(const nav_msgs::msg::Path & plan)
 {
   global_plan_ = plan;
+  stranded_cycles_ = 0u;
   global_plan_up_to_inversion_ = global_plan_;
   terminal_stub_aligned_ = false;
   two_pose_post_cusp_segment_ = false;
