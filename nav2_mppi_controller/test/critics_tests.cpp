@@ -1027,3 +1027,64 @@ TEST(CriticTests, ObstaclesCriticDoesNotTruncateAtGoal)
   EXPECT_GE(costs(0), 1000000.0f);
   EXPECT_TRUE(data.fail_flag);
 }
+
+TEST(CriticTests, PathAlignIncludesReachedEndpoint)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("endpoint_alignment");
+  node->declare_parameter("critic.trajectory_point_step", 1);
+  node->declare_parameter("critic.use_path_orientations", true);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "endpoint_costmap", "", "endpoint_costmap", true);
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto * grid = costmap_ros->getCostmap();
+  grid->resizeMap(300, 300, 0.01, 0.0, 0.0);
+  ParametersHandler parameters(node);
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &parameters);
+
+  for (const int direction : {-1, 1}) {
+    for (const size_t point_count : {2u, 3u}) {
+      models::State state;
+      state.reset(3, point_count);
+      models::Trajectories trajectories;
+      trajectories.reset(3, point_count);
+      models::Path path;
+      path.reset(point_count);
+      geometry_msgs::msg::Pose goal;
+      goal.position.x = 2.5;
+      goal.position.y = 2.5;
+      xt::xtensor<float, 1> costs = xt::zeros<float>({3});
+      float dt = 0.05;
+      CriticData data = {state, trajectories, path, goal, costs, dt,
+        false, nullptr, nullptr, std::nullopt, std::nullopt};
+      for (size_t i = 0; i < point_count; ++i) {
+        const float yaw = direction * static_cast<float>(i) * 0.13962634f;
+        path.x(i) = 1.0f + 0.561f * std::sin(yaw);
+        path.y(i) = 1.0f + 0.561f * (1.0f - std::cos(yaw));
+        path.yaws(i) = yaw;
+        for (size_t row = 0; row < 3; ++row) {
+          trajectories.x(row, i) = path.x(i);
+          trajectories.y(row, i) = path.y(i) + (row == 2 ? 0.04f : 0.0f);
+          trajectories.yaws(row, i) = row == 1 ? -yaw : yaw;
+        }
+      }
+      data.furthest_reached_path_point = point_count - 1;
+      critic.score(data);
+      EXPECT_NEAR(costs(0), 0.0f, 1e-5) << direction << ":" << point_count;
+      EXPECT_GT(costs(1), costs(0) + 0.1f);
+      EXPECT_GT(costs(2), costs(0) + 0.1f);
+
+      // The newly included endpoint must be checked, never assumed traversable.
+      unsigned int mx, my;
+      ASSERT_TRUE(grid->worldToMap(path.x(point_count - 1), path.y(point_count - 1), mx, my));
+      grid->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+      data.path_pts_valid.reset();
+      costs.fill(0.0f);
+      critic.score(data);
+      ASSERT_EQ(data.path_pts_valid->size(), point_count);
+      EXPECT_FALSE(data.path_pts_valid->back());
+      EXPECT_NEAR(costs(0), 0.0f, 1e-5);
+      grid->setCost(mx, my, nav2_costmap_2d::FREE_SPACE);
+    }
+  }
+}
