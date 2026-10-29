@@ -571,7 +571,8 @@ void ControllerServer::computeControl()
           [this]() {return now().nanoseconds();},
           [this]() {
             return !rclcpp::ok() || !action_server_ ||
-                   !action_server_->is_server_active() || action_server_->is_cancel_requested();
+                   !action_server_->is_server_active() || action_server_->is_cancel_requested() ||
+                   action_server_->is_preempt_requested();
           });
         // Keep wall pacing ready for hardware time or a controller whose
         // cancellation needs further iterations while the sim is paused.
