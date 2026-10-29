@@ -1122,6 +1122,56 @@ TEST(PathHandlerTests, ExhaustedSegmentLateralCuspMissHandsOffAndGuardsEarlyAlon
   }
 }
 
+TEST(PathHandlerTests, ShortSetupMustBeTraversedBeforeCuspHandoff)
+{
+  // #112: a fresh 11.5 cm setup fits entirely inside the 15 cm arrival
+  // radius. That does not mean the positioning stroke has been executed.
+  for (const double direction : {-1.0, 1.0}) {
+    PathHandlerWrapper handler;
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
+      direction < 0.0 ? "short_reverse_setup" : "short_forward_setup");
+    node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+    node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+    node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+    node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+    node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+    node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+    auto costmap_ros = makeConfiguredCostmapRos();
+    ParametersHandler parameters(node);
+    handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+    publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+    nav_msgs::msg::Path path;
+    path.header.frame_id = "map";
+    path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+    path.poses.push_back(makeYawPose(0.50 + direction * 0.0575, 0.50, 0.0));
+    path.poses.push_back(makeYawPose(0.50 + direction * 0.115, 0.50, 0.0));
+    path.poses.push_back(makeYawPose(0.50 + direction * 0.0575, 0.50, 0.0));
+    path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+    handler.setPath(path);
+    ASSERT_EQ(handler.getInversionLocale(), 3u);
+
+    for (int call = 0; call < 25; ++call) {
+      handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
+      ASSERT_EQ(handler.getInversionLocale(), 3u)
+        << "An unconsumed short setup cannot expire while stationary";
+    }
+
+    // Nearest-point pruning can leave just the cusp before actual arrival.
+    path.poses.erase(path.poses.begin() + 1);
+    handler.setPath(path);
+    ASSERT_EQ(handler.getInversionLocale(), 2u);
+    handler.transformPath(makeYawPose(0.50 + direction * 0.07, 0.50, 0.0, "odom"));
+    ASSERT_EQ(handler.getInvertedPath().poses.size(), 1u);
+    EXPECT_EQ(handler.getInversionLocale(), 2u);
+
+    // Positive control: the same short stroke hands off on real arrival,
+    // including a yaw error that legitimately uses the micro-cusp relaxation.
+    handler.transformPath(makeYawPose(0.50 + direction * 0.11, 0.50, 0.34, "odom"));
+    EXPECT_EQ(handler.getInversionLocale(), 0u);
+  }
+}
+
 TEST(PathHandlerTests, TerminalSegmentTwoPoseRetentionAndYawRunway)
 {
   class YawTestGoalChecker : public nav2_core::GoalChecker
