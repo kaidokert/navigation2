@@ -234,15 +234,29 @@ protected:
   /**
    * @brief Check the actual emitted control sequence using the measured state.
    */
-  bool controlSequenceCollisionFree() const;
+  bool controlSequenceCollisionFree(bool * collision_rejection = nullptr) const;
+
+  /**
+   * @brief Smooth once and retain the pre-filter history for guarded row trials.
+   */
+  geometry_msgs::msg::TwistStamped
+  filterAndValidateControl(const builtin_interfaces::msg::Time & stamp, bool diag = false);
 
   /**
    * @brief Apply final constraints and veto colliding output before conversion.
    */
   geometry_msgs::msg::TwistStamped
-  getValidatedControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
+  getValidatedControlFromSequenceAsTwist(
+    const builtin_interfaces::msg::Time & stamp,
+    const std::array<models::Control, 4> * pre_filter_history = nullptr);
 
   bool controlSequenceFinite() const;
+  bool currentStateFinite() const;
+
+  bool tryFinalGuardFallback(
+    const builtin_interfaces::msg::Time & stamp,
+    const std::array<models::Control, 4> & pre_filter_history,
+    geometry_msgs::msg::TwistStamped & control);
 
   /**
    * @brief Whether the motion model is holonomic
@@ -275,6 +289,9 @@ protected:
   NoiseGenerator noise_generator_;
   int diag_tick_{0};
   size_t retry_attempt_counter_{0};
+  int final_guard_fallback_candidates_{0};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    final_guard_fallback_param_callback_;
 
   models::OptimizerSettings settings_;
 
