@@ -132,6 +132,25 @@ void PathAlignCritic::score(CriticData & data)
   final_pose.y = data.path.y(reference_point_count - 1);
   final_pose.theta = data.path.yaws(reference_point_count - 1);
 
+  // Pruning anchors the reference at its closest vertex, not at the rollout's
+  // initial longitudinal position. Align the two distance origins locally.
+  // Use only the first nondegenerate edge: projecting onto the entire path can
+  // jump to a different branch when the path loops back near the robot.
+  float origin_tangent_x = 0.0f;
+  float origin_tangent_y = 0.0f;
+  float origin_edge_length = 0.0f;
+  for (size_t i = 1; i < reference_point_count; ++i) {
+    const float edge_x = path[i].x - path[i - 1].x;
+    const float edge_y = path[i].y - path[i - 1].y;
+    const float length = std::hypot(edge_x, edge_y);
+    if (length > 1e-6f) {
+      origin_tangent_x = edge_x / length;
+      origin_tangent_y = edge_y / length;
+      origin_edge_length = length;
+      break;
+    }
+  }
+
   float summed_path_dist = 0.0f, dyaw = 0.0f;
   unsigned int num_samples = 0u;
   unsigned int path_pt = 0u;
@@ -156,6 +175,15 @@ void PathAlignCritic::score(CriticData & data)
     path_pt = 0u;
     float Tx_m1 = T_x(t, 0);
     float Ty_m1 = T_y(t, 0);
+    if (origin_edge_length > 0.0f) {
+      const float initial_projection =
+        (Tx_m1 - path[0].x) * origin_tangent_x +
+        (Ty_m1 - path[0].y) * origin_tangent_y;
+      // A point behind the origin needs to travel to it before progressing
+      // along the reference. The existing matcher clamps negative distances
+      // to vertex zero. Forward projection cannot skip beyond the first edge.
+      traj_integrated_distance = std::min(initial_projection, origin_edge_length);
+    }
     for (size_t p = 1; p < traj_sampled_size; p++) {
       const float Tx = T_x(t, p);
       const float Ty = T_y(t, p);
