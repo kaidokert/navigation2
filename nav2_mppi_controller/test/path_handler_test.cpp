@@ -1221,6 +1221,56 @@ TEST(PathHandlerTests, RecordedCurvedReverseSetupRetainedAndLateralArrivalAllowe
   EXPECT_EQ(handler.getInversionLocale(), 0u);
 }
 
+TEST(PathHandlerTests, ReplannedShortReverseSetupRetainedAtSameCusp)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("replanned_short_setup");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  const auto cusp = makeYawPose(0.387133063, 0.519901466, -0.349065781);
+  const auto outgoing = makeYawPose(0.439266185, 0.495591238, -0.523598671);
+  const auto tail = makeYawPose(0.612471266, 0.395591253, -0.523598671);
+
+  // First receive and prune an older plan that ends at the same active cusp.
+  // The subsequent plan's short reverse setup must remain usable across the
+  // setPath() replan lifecycle, not only on a freshly constructed handler.
+  nav_msgs::msg::Path previous_path;
+  previous_path.header.frame_id = "map";
+  previous_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  previous_path.poses.push_back(makeYawPose(0.46, 0.50, 0.0));
+  previous_path.poses.push_back(cusp);
+  previous_path.poses.push_back(outgoing);
+  previous_path.poses.push_back(tail);
+  handler.setPath(previous_path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+  handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+
+  nav_msgs::msg::Path replanned_path;
+  replanned_path.header.frame_id = "map";
+  replanned_path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  replanned_path.poses.push_back(makeYawPose(0.442695904, 0.505013527, -0.174532890));
+  replanned_path.poses.push_back(cusp);
+  replanned_path.poses.push_back(outgoing);
+  replanned_path.poses.push_back(tail);
+  handler.setPath(replanned_path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+  ASSERT_NEAR(utils::pathLength(handler.getInvertedPath()), 0.115046, 1e-5);
+
+  handler.transformPath(makeYawPose(0.50, 0.50, 0.0, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 3u);
+  ASSERT_GE(handler.getInvertedPath().poses.size(), 2u);
+  EXPECT_LT(handler.getInvertedPath().poses[1].pose.position.x,
+    handler.getInvertedPath().poses[0].pose.position.x);
+}
+
 TEST(PathHandlerTests, TerminalSegmentTwoPoseRetentionAndYawRunway)
 {
   class YawTestGoalChecker : public nav2_core::GoalChecker
