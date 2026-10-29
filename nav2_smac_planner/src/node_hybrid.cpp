@@ -866,7 +866,7 @@ void NodeHybrid::getNeighbors(
           motion_projections[i]._theta));
       // A clear destination does not imply a clear connecting primitive. Check
       // the actual circular arc (or straight stroke), not its endpoint chord.
-      // Bound translation plus footprint rotation to half a cell per sample.
+      // Bound translation plus footprint rotation to one tenth of a cell per sample.
       // This is an edge property: never cache it as destination-node validity.
       const auto & primitive = motion_table.projections[i];
       const double angle = primitive._theta * motion_table.bin_size;
@@ -874,7 +874,8 @@ void NodeHybrid::getNeighbors(
       const double radius = straight ? 0.0 : primitive._x / std::sin(angle);
       const double length = straight ? std::hypot(primitive._x, primitive._y) :
         std::abs(radius * angle);
-      const double sample_count = std::ceil(
+      // Subdivide old half-cell intervals so no previously checked pose is lost.
+      const double sample_count = 5.0 * std::ceil(
         (length + collision_checker->getFootprintRadiusInCells() * std::abs(angle)) / 0.5);
       if (!std::isfinite(sample_count) || sample_count < 0.0 || sample_count > 100000.0) {
         neighbor->setPose(initial_node_coords);

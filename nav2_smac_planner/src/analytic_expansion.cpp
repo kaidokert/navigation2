@@ -41,8 +41,9 @@ bool isAnalyticPathCollisionFree(
   }
   const double length = state_space->distance(from(), to());
   // Actual connector distance includes refined radii; minimum_radius bounds
-  // curvature conservatively. Limit footprint-point travel to half a cell.
-  const double sample_count = std::ceil(
+  // curvature conservatively. Limit footprint-point travel to one tenth of a cell.
+  // Preserve the old sample positions and add four checks inside each interval.
+  const double sample_count = 5.0 * std::ceil(
     length * (1.0 + checker.getFootprintRadiusInCells() / minimum_radius) / 0.5);
   if (!std::isfinite(sample_count) || sample_count < 0.0 || sample_count > 100000.0) {return false;}
   const auto intervals = static_cast<unsigned int>(std::max(1.0, sample_count));

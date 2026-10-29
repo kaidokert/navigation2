@@ -558,6 +558,72 @@ TEST(NodeHybridTest, RecordedReverseArcChecksBetweenClearEndpoints)
       checker, Hybrid::motion_table.state_space, from, to, 35.0, false));
 }
 
+TEST(NodeHybridTest, RecordedCoarseGridStraightGraze)
+{
+  // wp2plan040: reverse straight stroke on the aligned 5 cm grid.
+  // Half-cell edge samples miss the recorded collision at fraction 13/15.
+  using Hybrid = nav2_smac_planner::NodeHybrid;
+  nav2_costmap_2d::Costmap2D grid(100, 200, 0.05, 0.0, 0.0, 0);
+  grid.setCost(66, 176, nav2_costmap_2d::LETHAL_OBSTACLE);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("recorded_straight_graze");
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
+  checker.setCostmap(&grid);
+  nav2_costmap_2d::Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+    {0.288, 0.163}, {0.288, -0.163}, {-0.062, -0.163}, {-0.062, 0.163}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = xy.first;
+    point.y = xy.second;
+    footprint.push_back(point);
+  }
+  checker.setFootprint(footprint, false, 0.0);
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 14.0;
+  info.allow_primitive_interpolation = false;
+  unsigned int width = 100, height = 200, headings = 180;
+  Hybrid::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, width, height, headings, info);
+  Hybrid start(Hybrid::getIndex(70, 176, 143, 100, 180));
+  start.setPose(Hybrid::Coordinates(70.814736f, 176.437522f, 143.0f));
+  const auto projected = Hybrid::motion_table.getProjections(&start);
+  ASSERT_EQ(projected[3]._turn_dir, nav2_smac_planner::TurnDirection::REVERSE);
+  ASSERT_FALSE(checker.inCollision(start.pose.x, start.pose.y, start.pose.theta, false));
+  ASSERT_FALSE(checker.inCollision(
+      projected[3]._x, projected[3]._y, projected[3]._theta, false));
+  // A late interior graze is blocked although endpoints and half-cell samples clear.
+  ASSERT_TRUE(checker.inCollision(70.46467f, 177.65835f, 143.0f, false));
+  const auto target = Hybrid::getIndex(
+    static_cast<unsigned int>(projected[3]._x),
+    static_cast<unsigned int>(projected[3]._y), 143, 100, 180);
+  auto admits_target = [&]() {
+      std::unordered_map<uint64_t, std::unique_ptr<Hybrid>> graph;
+      std::function<bool(const uint64_t &, Hybrid * &)> getter =
+        [&](const uint64_t & index, Hybrid * & neighbor) {
+          auto & entry = graph[index];
+          if (!entry) {entry = std::make_unique<Hybrid>(index);}
+          neighbor = entry.get();
+          return true;
+        };
+      Hybrid::NodeVector neighbors;
+      start.getNeighbors(getter, &checker, false, neighbors);
+      return std::any_of(neighbors.begin(), neighbors.end(),
+               [&](Hybrid * neighbor) {return neighbor->getIndex() == target;});
+    };
+  EXPECT_FALSE(admits_target());
+  const std::array<double, 3> from{start.pose.x, start.pose.y,
+    Hybrid::motion_table.getAngleFromBin(start.pose.theta)};
+  const std::array<double, 3> to{projected[3]._x, projected[3]._y,
+    Hybrid::motion_table.getAngleFromBin(projected[3]._theta)};
+  EXPECT_FALSE(nav2_smac_planner::isAnalyticPathCollisionFree(
+      checker, Hybrid::motion_table.state_space, from, to, 14.0, false));
+  // Same geometry without the recorded obstacle must remain traversable.
+  grid.setCost(66, 176, nav2_costmap_2d::FREE_SPACE);
+  EXPECT_TRUE(admits_target());
+  EXPECT_TRUE(nav2_smac_planner::isAnalyticPathCollisionFree(
+      checker, Hybrid::motion_table.state_space, from, to, 14.0, false));
+}
+
 TEST(NodeHybridTest, ClearPrimitiveSweepsPreserveDirectionsAndHeadingWrap)
 {
   using Hybrid = nav2_smac_planner::NodeHybrid;
