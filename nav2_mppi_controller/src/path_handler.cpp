@@ -892,10 +892,10 @@ bool PathHandler::isWithinInversionTolerances(
     tf2::getYaw(last_pose.pose.orientation));
 
   // Relax yaw tolerance for micro-cusps: segments shorter than the threshold
-  // are planner artifacts, not meaningful maneuvers. Demanding precise yaw
-  // alignment on a 4cm segment overconstrains the Ackermann controller.
+  // can need relaxed yaw alignment at arrival. Their length alone does not
+  // make them disposable: a fresh short reverse leg may be a positioning stroke.
   // For intermediate short segments (15-30 cm), require the segment to be
-  // consumed down to <= 2 poses before unlocking the micro-cusp yaw gate so
+  // consumed down to <= 1 pose before unlocking the micro-cusp yaw gate so
   // the controller does not discard the second half of a 26-29 cm positioning
   // leg as soon as it enters the 15 cm Euclidean cusp radius.
   const bool is_micro_cusp =
@@ -981,8 +981,10 @@ bool PathHandler::isWithinInversionTolerances(
     exhausted_along_track_cycles_ = 0u;
     has_last_exhausted_check_pose_ = false;
   }
+  // Protect unconsumed positioning strokes even when the entire segment fits
+  // inside the XY arrival radius. Otherwise a replan's short reverse setup can
+  // be handed off at its starting pose, before the optimizer ever sees it.
   const bool premature_along_track =
-    (current_segment_length_ > static_cast<double>(inversion_xy_tolerance_)) &&
     ((!is_segment_exhausted && along_track_remaining > cusp_along_track_threshold_) ||
     (is_segment_exhausted && !is_lateral_exhausted &&
     along_track_remaining > cusp_along_track_threshold_) ||
