@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <chrono>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <string>
@@ -133,6 +134,11 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   get_parameter("failure_tolerance", failure_tolerance_);
   get_parameter("use_realtime_priority", use_realtime_priority_);
   get_parameter("emulated_compute_time_samples", emulated_compute_time_samples_);
+  if (!validEmulatedComputeSamples(emulated_compute_time_samples_)) {
+    RCLCPP_ERROR(
+      get_logger(), "emulated_compute_time_samples must be finite and within [0, 1] s; disabled");
+    emulated_compute_time_samples_.clear();
+  }
 
   costmap_ros_->configure();
   timing_.configure(shared_from_this(), "~/control_timing", 1.0 / controller_frequency_);
@@ -571,6 +577,10 @@ void ControllerServer::computeControl()
           get_clock()->sleep_until(next_cycle);
         } else {
           timing_cycle.missed(true);
+          RCLCPP_WARN(
+            get_logger(),
+            "Control loop missed its desired rate of %.4f Hz. Current loop rate is %.4f Hz.",
+            controller_frequency_, 1 / cycle_duration.seconds());
         }
       } else if (!loop_rate.sleep()) {
         timing_cycle.missed(true);
@@ -754,6 +764,19 @@ void ControllerServer::computeAndPublishVelocity()
   publishVelocity(cmd_vel_2d);
 }
 
+bool ControllerServer::validEmulatedComputeSamples(const std::vector<double> & samples)
+{
+  if (samples.empty() || samples.front() < 0.0) {
+    return true;  // the off forms
+  }
+  for (const double s : samples) {
+    if (!std::isfinite(s) || s < 0.0 || s > 1.0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ControllerServer::emulatingComputeTime() const
 {
   return !emulated_compute_time_samples_.empty() && emulated_compute_time_samples_.front() >= 0.0;
@@ -929,7 +952,14 @@ ControllerServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> param
       }
     } else if (type == ParameterType::PARAMETER_DOUBLE_ARRAY) {
       if (name == "emulated_compute_time_samples") {
-        emulated_compute_time_samples_ = parameter.as_double_array();
+        const auto samples = parameter.as_double_array();
+        if (!validEmulatedComputeSamples(samples)) {
+          dynamic_params_lock_.unlock();
+          result.successful = false;
+          result.reason = "emulated_compute_time_samples must be finite and within [0, 1] s";
+          return result;
+        }
+        emulated_compute_time_samples_ = samples;
       }
     }
 
