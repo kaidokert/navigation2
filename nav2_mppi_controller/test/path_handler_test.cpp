@@ -1172,6 +1172,49 @@ TEST(PathHandlerTests, ShortSetupMustBeTraversedBeforeCuspHandoff)
   }
 }
 
+TEST(PathHandlerTests, RecordedCurvedReverseSetupRetainedAndLateralArrivalAllowed)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("recorded_short_setup");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // ros_dabbling_priv#112: first four poses of fdir032's 44.397 s /plan,
+  // rigidly translated/rotated to start at (0.5, 0.5, 0). This historical
+  // curve tests path semantics, not feasibility under today's robot limits.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.5, 0.5, 0.0));
+  path.poses.push_back(makeYawPose(0.442695904, 0.505013527, -0.174532890));
+  path.poses.push_back(makeYawPose(0.387133063, 0.519901466, -0.349065781));
+  path.poses.push_back(makeYawPose(0.439266185, 0.495591238, -0.523598671));
+  // Keep the outgoing leg nonterminal, as in the recording. Truncating at
+  // four poses would instead invoke the separate terminal-stub absorption.
+  path.poses.push_back(makeYawPose(0.612471266, 0.395591253, -0.523598671));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+  handler.transformPath(makeYawPose(0.5, 0.5, 0.0, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 3u);
+  ASSERT_GE(handler.getInvertedPath().poses.size(), 2u);
+  EXPECT_LT(handler.getInvertedPath().poses[1].pose.position.x,
+    handler.getInvertedPath().poses[0].pose.position.x);
+
+  // Positive contrast: an actually consumed short segment, abeam of the cusp
+  // with 3 cm lateral offset, must retain the established exhaustion escape.
+  const auto cusp = path.poses[2];
+  const double yaw = tf2::getYaw(cusp.pose.orientation);
+  handler.transformPath(makeYawPose(
+      cusp.pose.position.x + 0.03 * std::sin(yaw),
+      cusp.pose.position.y - 0.03 * std::cos(yaw), yaw, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 0u);
+}
+
 TEST(PathHandlerTests, TerminalSegmentTwoPoseRetentionAndYawRunway)
 {
   class YawTestGoalChecker : public nav2_core::GoalChecker
