@@ -39,22 +39,31 @@ RclCppFixture g_rclcppfixture;
 
 TEST(NodeHybridTest, changed_continuous_pose_invalidates_collision_cache)
 {
-  // Both poses occupy discretized x/y/heading index (21, 24, 0), but this
-  // revision's checker rounds the reference cell with x + 0.5. Its actual
-  // clear/blocked results must not be replaced by a cached result for the index.
-  nav2_costmap_2d::Costmap2D grid(60, 60, 0.02, 0.0, 0.0, 0);
-  grid.setCost(22, 24, nav2_costmap_2d::LETHAL_OBSTACLE);
+  // Same discretized index, different continuous footprints: one hits the
+  // recorded cell and the other clears it. Cached validity must follow the pose.
+  nav2_costmap_2d::Costmap2D grid(100, 450, 0.02, 0.0, 0.0, 0);
+  grid.setCost(61, 355, nav2_costmap_2d::LETHAL_OBSTACLE);
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("pose_cache_regression");
-  nav2_smac_planner::GridCollisionChecker checker(nullptr, 72, node);
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
   checker.setCostmap(&grid);
-  checker.setFootprint(nav2_costmap_2d::Footprint{}, true, 0.0);
+  nav2_costmap_2d::Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+    {0.316, 0.191}, {0.316, -0.191}, {-0.09, -0.191}, {-0.09, 0.191}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = xy.first;
+    point.y = xy.second;
+    footprint.push_back(point);
+  }
+  checker.setFootprint(footprint, false, 0.0);
   using Hybrid = nav2_smac_planner::NodeHybrid;
-  const Hybrid::Coordinates clear(21.05f, 24.05f, 0.0f);
-  const Hybrid::Coordinates blocked(21.75f, 24.05f, 0.0f);
+  const Hybrid::Coordinates clear(79.8f, 358.01f, 76.283357f);
+  const Hybrid::Coordinates blocked(79.1441f, 358.0372f, 76.283357f);
   ASSERT_EQ(static_cast<unsigned int>(clear.x), static_cast<unsigned int>(blocked.x));
+  ASSERT_EQ(static_cast<unsigned int>(clear.y), static_cast<unsigned int>(blocked.y));
   ASSERT_FALSE(checker.inCollision(clear.x, clear.y, clear.theta, false));
   ASSERT_TRUE(checker.inCollision(blocked.x, blocked.y, blocked.theta, false));
-  const auto index = Hybrid::getIndex(21u, 24u, 0u, 60u, 72u);
+  const auto index = Hybrid::getIndex(79u, 358u, 76u, 100u, 180u);
   Hybrid candidate(index);
   candidate.setPose(clear);
   ASSERT_TRUE(candidate.isNodeValid(false, &checker));
@@ -516,8 +525,8 @@ TEST(NodeHybridTest, RecordedReverseArcChecksBetweenClearEndpoints)
   ASSERT_FALSE(checker.inCollision(start.pose.x, start.pose.y, start.pose.theta, false));
   ASSERT_FALSE(checker.inCollision(
       projected[5]._x, projected[5]._y, projected[5]._theta, false));
-  // The captured primitive's midpoint is blocked although both vertices are clear.
-  ASSERT_TRUE(checker.inCollision(59.537754f, 368.129669f, 79.0f, false));
+  // Its actual arc at fraction 3/8 is blocked although both vertices are clear.
+  ASSERT_TRUE(checker.inCollision(59.2551f, 368.2453f, 78.75f, false));
   const auto target = Hybrid::getIndex(
     static_cast<unsigned int>(projected[5]._x),
     static_cast<unsigned int>(projected[5]._y), 80, 100, 180);
@@ -602,14 +611,14 @@ TEST(NodeHybridTest, FractionalArcHeadingUsesActualFootprintOrientation)
     footprint.push_back(point);
   }
   checker.setFootprint(footprint, false, 0.0);
-  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 0.0f, false));
-  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, 0.5f, false));
-  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, 180.5f, false));
-  EXPECT_TRUE(checker.inCollision(50.0f, 50.0f, -179.5f, false));
-  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 180.0f, false));
-  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, -1e-8f, false));
+  EXPECT_FALSE(checker.inCollision(50.5f, 50.5f, 0.0f, false));
+  EXPECT_TRUE(checker.inCollision(50.5f, 50.5f, 0.5f, false));
+  EXPECT_TRUE(checker.inCollision(50.5f, 50.5f, 180.5f, false));
+  EXPECT_TRUE(checker.inCollision(50.5f, 50.5f, -179.5f, false));
+  EXPECT_FALSE(checker.inCollision(50.5f, 50.5f, 180.0f, false));
+  EXPECT_FALSE(checker.inCollision(50.5f, 50.5f, -1e-8f, false));
   grid.setCost(69, 51, nav2_costmap_2d::FREE_SPACE);
-  EXPECT_FALSE(checker.inCollision(50.0f, 50.0f, 0.5f, false));
+  EXPECT_FALSE(checker.inCollision(50.5f, 50.5f, 0.5f, false));
   const auto radius = checker.getFootprintRadiusInCells();
   checker.setFootprint({}, true, 0.0);
   EXPECT_DOUBLE_EQ(checker.getFootprintRadiusInCells(), 0.0);
