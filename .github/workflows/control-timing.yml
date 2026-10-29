@@ -32,8 +32,8 @@ jobs:
         shell: bash
         run: |
           source install/setup.bash
-          colcon test --packages-select nav2_util nav2_mppi_controller \
-            --ctest-args -R control_timing --output-on-failure
+          colcon test --packages-select nav2_util nav2_controller nav2_mppi_controller \
+            --ctest-args -R 'control_timing|control_loop_clock' --output-on-failure
           colcon test-result --verbose
       - uses: actions/upload-artifact@v4
         if: always()
