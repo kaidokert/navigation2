@@ -40,6 +40,11 @@ public:
   OptimizerTester()
   : Optimizer() {}
 
+  int finalGuardFallbackBudget() const
+  {
+    return final_guard_fallback_candidates_;
+  }
+
   void testSetDiffModel()
   {
     EXPECT_EQ(motion_model_.get(), nullptr);
@@ -273,6 +278,35 @@ TEST(OptimizerTests, EachIterationScoresItsCurrentBankWithoutEarlierCosts)
     optimizer.expectFinalBankCostsMatchFreshEvaluation();
     optimizer.shutdown();
     costmap->on_cleanup(lifecycle_state);
+  }
+}
+
+TEST(OptimizerTests, FinalGuardFallbackBudgetRejectsMutationAndPreservesReadback)
+{
+  for (const bool predeclared : {false, true}) {
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("fallback_parameter_test");
+    node->declare_parameter("controller_frequency", rclcpp::ParameterValue(30.0));
+    const int initial = predeclared ? 8 : 0;
+    const std::string name = "mppic.final_guard_fallback_candidates";
+    if (predeclared) {
+      // Exercise the callback fallback when no read-only descriptor exists.
+      node->declare_parameter(name, rclcpp::ParameterValue(initial));
+    }
+    auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+      "dummy_costmap", "", "dummy_costmap", true);
+    ParametersHandler parameters(node);
+    rclcpp_lifecycle::State state;
+    costmap->on_configure(state);
+    OptimizerTester optimizer;
+    optimizer.initialize(node, "mppic", costmap, &parameters);
+    parameters.start();
+
+    EXPECT_EQ(optimizer.finalGuardFallbackBudget(), initial);
+    const auto result = node->set_parameter(rclcpp::Parameter(name, predeclared ? 0 : 8));
+    EXPECT_FALSE(result.successful);
+    EXPECT_EQ(node->get_parameter(name).as_int(), initial);
+    EXPECT_EQ(optimizer.finalGuardFallbackBudget(), initial);
+    optimizer.shutdown();
   }
 }
 
