@@ -509,7 +509,7 @@ void ControllerServer::computeControl()
     timing_.resetPublicationInterval();
     timing_.setBudget(1.0 / controller_frequency_);
     rclcpp::WallRate loop_rate(controller_frequency_);
-    const bool emulate_compute = !emulated_compute_time_samples_.empty();
+    const bool emulate_compute = emulatingComputeTime();
     while (rclcpp::ok()) {
       nav2_util::ControlTiming::Cycle timing_cycle(timing_);
       auto stage_start = nav2_util::ControlTiming::Clock::now();
@@ -754,9 +754,14 @@ void ControllerServer::computeAndPublishVelocity()
   publishVelocity(cmd_vel_2d);
 }
 
+bool ControllerServer::emulatingComputeTime() const
+{
+  return !emulated_compute_time_samples_.empty() && emulated_compute_time_samples_.front() >= 0.0;
+}
+
 void ControllerServer::holdForEmulatedComputeTime()
 {
-  if (emulated_compute_time_samples_.empty()) {
+  if (!emulatingComputeTime()) {
     return;
   }
   std::uniform_int_distribution<size_t> pick(0, emulated_compute_time_samples_.size() - 1);

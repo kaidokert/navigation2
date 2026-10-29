@@ -274,12 +274,14 @@ protected:
   rclcpp::Duration costmap_update_timeout_;
 
   // Emulated compute time, for running a slower robot's controller timing on a faster (sim) host.
-  // Empty = off. Otherwise each cycle holds its command until a duration drawn from these samples (s)
+  // Empty or a negative first value = off ([-1.0] switches it off at runtime: a parameter file
+  // cannot carry an empty array). Otherwise each cycle holds its command until a duration drawn from these samples (s)
   // has passed in ROS time since the cycle started, and the loop is paced in ROS time instead of wall
   // time. [0.0] gives plain ROS-time pacing at controller_frequency.
   std::vector<double> emulated_compute_time_samples_;
   std::mt19937 emulated_compute_rng_{0u};
   rclcpp::Time cycle_start_ros_;
+  bool emulatingComputeTime() const;
 
   // Whether we've published the single controller warning yet
   geometry_msgs::msg::PoseStamped end_pose_;
