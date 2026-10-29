@@ -13,6 +13,7 @@
 // limitations under the License. Reserved.
 
 #include "nav2_smac_planner/collision_checker.hpp"
+#include "nav2_smac_planner/utils.hpp"
 
 namespace nav2_smac_planner
 {
@@ -120,7 +121,7 @@ bool GridCollisionChecker::inCollision(
 
   // Assumes setFootprint already set
   center_cost_ = static_cast<float>(costmap_->getCost(
-    static_cast<unsigned int>(x + 0.5f), static_cast<unsigned int>(y + 0.5f)));
+    static_cast<unsigned int>(x), static_cast<unsigned int>(y)));
 
   if (!footprint_is_radius_) {
     // if footprint, then we check for the footprint's points, but first see
@@ -142,8 +143,11 @@ bool GridCollisionChecker::inCollision(
     // if possible inscribed, need to check actual footprint pose.
     // Use precomputed oriented footprints are done on initialization,
     // offset by translation value to collision check
-    double wx, wy;
-    costmap_->mapToWorld(static_cast<double>(x), static_cast<double>(y), wx, wy);
+    // Hybrid/Lattice coordinates are continuous: check the pose that is
+    // actually published, not an integer cell centre displaced by up to half a cell.
+    const auto world_pose = getWorldCoords(x, y, costmap_);
+    const double wx = world_pose.position.x;
+    const double wy = world_pose.position.y;
     geometry_msgs::msg::Point new_pt;
     if (!std::isfinite(angle_bin) || angles_.empty()) {return true;}
     float normalized_bin = std::fmod(angle_bin, static_cast<float>(angles_.size()));
@@ -214,7 +218,7 @@ float GridCollisionChecker::getCost()
 
 bool GridCollisionChecker::outsideRange(const unsigned int & max, const float & value)
 {
-  return value < 0.0f || value > max;
+  return !std::isfinite(value) || value < 0.0f || value >= max;
 }
 
 }  // namespace nav2_smac_planner
