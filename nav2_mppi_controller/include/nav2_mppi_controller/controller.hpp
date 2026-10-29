@@ -28,6 +28,8 @@
 #include "nav2_core/goal_checker.hpp"
 #include "rclcpp/rclcpp.hpp"
 
+#include "nav2_util/control_timing.hpp"
+
 namespace nav2_mppi_controller
 {
 

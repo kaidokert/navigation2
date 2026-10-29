@@ -133,6 +133,8 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & state)
   get_parameter("use_realtime_priority", use_realtime_priority_);
 
   costmap_ros_->configure();
+  timing_.configure(shared_from_this(), "~/control_timing", 1.0 / controller_frequency_);
+
   // Launch a thread to run the costmap node
   costmap_thread_ = std::make_unique<nav2_util::NodeThread>(costmap_ros_);
 
@@ -332,6 +334,7 @@ ControllerServer::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
 nav2_util::CallbackReturn
 ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
 {
+  timing_.cleanup();
   RCLCPP_INFO(get_logger(), "Cleaning up");
 
   // Cleanup the helper classes
@@ -500,17 +503,24 @@ void ControllerServer::computeControl()
     }
 
     last_valid_cmd_time_ = now();
+    nav2_util::nameTimingThread("nav-control", timing_.enabled());
+    timing_.resetPublicationInterval();
+    timing_.setBudget(1.0 / controller_frequency_);
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
+      nav2_util::ControlTiming::Cycle timing_cycle(timing_);
+      auto stage_start = nav2_util::ControlTiming::Clock::now();
       auto start_time = this->now();
 
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
+        timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Inactive);
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
         return;
       }
 
       if (action_server_->is_cancel_requested()) {
         if (controllers_[current_controller_]->cancel()) {
+          timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Cancelled);
           RCLCPP_INFO(get_logger(), "Cancellation was successful. Stopping the robot.");
           action_server_->terminate_all();
           publishZeroVelocity();
@@ -521,6 +531,7 @@ void ControllerServer::computeControl()
         }
       }
 
+      stage_start = nav2_util::ControlTiming::Clock::now();
       // Don't compute a trajectory until costmap is valid (after clear costmap)
       rclcpp::Rate r(100);
       auto waiting_start = now();
@@ -531,17 +542,26 @@ void ControllerServer::computeControl()
         r.sleep();
       }
 
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::CostmapReadyWait, stage_start);
+      stage_start = nav2_util::ControlTiming::Clock::now();
       updateGlobalPath();
-
-      computeAndPublishVelocity();
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::GlobalPathUpdate, stage_start);
 
       if (isGoalReached()) {
+        timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
         RCLCPP_INFO(get_logger(), "Reached the goal!");
         break;
       }
 
+      stage_start = nav2_util::ControlTiming::Clock::now();
+      computeAndPublishVelocity();
+      timing_cycle.stage(nav2_util::ControlTiming::Stage::ComputePublish, stage_start);
+      timing_cycle.published();
+      timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
+      timing_cycle.endMeasurement();
       auto cycle_duration = this->now() - start_time;
       if (!loop_rate.sleep()) {
+        timing_cycle.missed(true);
         RCLCPP_WARN(
           get_logger(),
           "Control loop missed its desired rate of %.4f Hz. Current loop rate is %.4f Hz.",
@@ -726,6 +746,7 @@ void ControllerServer::updateGlobalPath()
   if (action_server_->is_preempt_requested()) {
     RCLCPP_INFO(get_logger(), "Passing new path to controller.");
     auto goal = action_server_->accept_pending_goal();
+    timing_.resetPublicationInterval();
     std::string current_controller;
     if (findControllerId(goal->controller_id, current_controller)) {
       current_controller_ = current_controller;
@@ -811,9 +832,12 @@ bool ControllerServer::isGoalReached()
 
   geometry_msgs::msg::PoseStamped transformed_end_pose;
   rclcpp::Duration tolerance(rclcpp::Duration::from_seconds(costmap_ros_->getTransformTolerance()));
-  nav_2d_utils::transformPose(
+  if (!nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
-    end_pose_, transformed_end_pose, tolerance);
+    end_pose_, transformed_end_pose, tolerance))
+  {
+    throw nav2_core::ControllerTFError("Failed to transform end pose to global frame");
+  }
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,

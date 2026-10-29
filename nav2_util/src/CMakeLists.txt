@@ -1,4 +1,5 @@
 add_library(${library_name} SHARED
+  control_timing.cpp
   costmap.cpp
   node_utils.cpp
   lifecycle_service_client.cpp

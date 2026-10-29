@@ -269,7 +269,7 @@ protected:
   // policy is deterministic and unit-testable without a clock.
   double handoff_yaw_relax_per_cycle_{0.005};   // rad of extra yaw tol per blocked cycle
   double handoff_yaw_relax_cap_{0.8};           // ceiling for the relaxed yaw tolerance
-  double exhausted_cusp_xy_tolerance_{0.30};    // m — xy gate when segment consumed
+  double exhausted_cusp_xy_tolerance_{0.0};     // m — xy gate when segment consumed (<=0 off)
   double exhausted_cusp_yaw_tolerance_{0.65};   // rad — yaw gate when segment consumed
   double cusp_along_track_threshold_{0.015};    // m — min remaining along-track before handoff
   double exhausted_along_track_threshold_{0.03};  // m — along-track hold on exhausted segment
@@ -289,6 +289,12 @@ protected:
   mutable double last_exhausted_check_x_{0.0};
   mutable double last_exhausted_check_y_{0.0};
   mutable double last_exhausted_check_yaw_{0.0};
+  // Stranded handoff (#102): the segment before the cusp is fully consumed (no real path left)
+  // while the robot is still within this radius of the cusp but outside inversion_xy_tolerance.
+  // After stranded_handoff_cycles consecutive cycles, hand off anyway. <= 0 disables.
+  double stranded_handoff_radius_{0.0};
+  int stranded_handoff_cycles_{20};
+  unsigned int stranded_cycles_{0u};
   bool enforce_path_inversion_{false};
   unsigned int inversion_locale_{0u};
   bool terminal_stub_aligned_{false};

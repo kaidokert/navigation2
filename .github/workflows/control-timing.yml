@@ -1,0 +1,44 @@
+name: Control timing
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  timing:
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    env:
+      MAKEFLAGS: -j2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      ROS_DOMAIN_ID: 176
+      ROS_LOCALHOST_ONLY: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake libxtensor-dev libxsimd-dev \
+            ros-jazzy-navigation2 ros-jazzy-ament-cmake-gtest ros-jazzy-ament-cmake-pytest \
+            ros-jazzy-ament-lint-auto ros-jazzy-ament-lint-common ros-jazzy-test-msgs
+      - name: Build instrumentation and controller
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --executor sequential --packages-select nav2_critics_msgs nav2_util \
+            nav2_costmap_2d nav2_controller nav2_mppi_controller \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Run stationary timing tests
+        shell: bash
+        run: |
+          source install/setup.bash
+          colcon test --packages-select nav2_util nav2_mppi_controller \
+            --ctest-args -R control_timing --output-on-failure
+          colcon test-result --verbose
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: control-timing-results
+          path: |
+            build/*/test_results/
+            log/latest_test/

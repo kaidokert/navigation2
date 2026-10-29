@@ -1214,3 +1214,119 @@ private:
   ASSERT_GT(rev_runway_plan.poses.size(), 2u);
   EXPECT_LT(rev_runway_plan.poses.back().pose.position.x, 0.30);
 }
+
+// #102: the robot consumed the pre-cusp segment but finished 25 cm beside the cusp, outside
+// inversion_xy_tolerance. Without the stranded handoff the segment never hands off; with it, the
+// handoff fires after stranded_handoff_cycles consecutive consumed cycles inside the radius.
+TEST(PathHandlerTests, StrandedHandoffFiresOnlyInsideRadiusAfterCycles)
+{
+  auto make_handler = [](double radius, const std::string & node_name,
+    double prune_distance = 1.5) {
+      auto handler = std::make_unique<PathHandlerWrapper>();
+      auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(node_name);
+      node->declare_parameter("dummy.prune_distance", rclcpp::ParameterValue(prune_distance));
+      node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
+      node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+      node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+      node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+      node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.0));
+      node->declare_parameter("dummy.stranded_handoff_radius", rclcpp::ParameterValue(radius));
+      node->declare_parameter("dummy.stranded_handoff_cycles", rclcpp::ParameterValue(3));
+      auto costmap_ros = makeConfiguredCostmapRos();
+      auto param_handler = std::make_shared<ParametersHandler>(node);
+      auto tf_buffer = costmap_ros->getTfBuffer();
+      handler->initialize(node, "dummy", costmap_ros, tf_buffer, param_handler.get());
+      publishIdentityTf(node, costmap_ros->getTfBuffer());
+      nav_msgs::msg::Path path;
+      path.header.frame_id = "map";
+      for (int i = 0; i <= 8; ++i) {
+        // forward to the cusp (1.0, 0.5)
+        path.poses.push_back(makeYawPose(0.2 + 0.1 * i, 0.5, 0.0));
+      }
+      for (int i = 1; i <= 4; ++i) {
+        path.poses.push_back(makeYawPose(1.0 - 0.1 * i, 0.5, 0.0));  // reverse segment
+      }
+      handler->setPath(path);
+      return std::make_tuple(std::move(handler), node, costmap_ros, param_handler);
+    };
+
+  // Disabled (radius 0): stays stranded indefinitely.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.0, "stranded_off_node");
+    const unsigned int locale = handler->getInversionLocale();
+    ASSERT_EQ(locale, 9u);
+    for (int i = 0; i < 10; ++i) {
+      handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    }
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+  // Enabled, 25 cm beside the cusp: hands off on the 3rd consumed cycle, not before.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_on_node");
+    const unsigned int locale = handler->getInversionLocale();
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    EXPECT_EQ(handler->getInversionLocale(), 0u);  // reverse segment is the last one
+  }
+  // Enabled, but 40 cm from the cusp (outside the radius): no handoff.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_far_node");
+    const unsigned int locale = handler->getInversionLocale();
+    for (int i = 0; i < 10; ++i) {
+      handler->transformPath(makeYawPose(1.0, 0.90, 0.0, "odom"));
+    }
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+  // Enabled, inside the radius but the segment is not consumed (robot still approaching, about
+  // 0.2 m of real path left): no handoff.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_unconsumed_node");
+    const unsigned int locale = handler->getInversionLocale();
+    for (int i = 0; i < 10; ++i) {
+      handler->transformPath(makeYawPose(0.85, 0.75, 0.0, "odom"));
+    }
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+  // Enabled, local plan clipped to one pose by a short prune_distance while 0.1-0.2 m of the
+  // approach remains: not consumed, no handoff.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_clipped_node", 0.05);
+    const unsigned int locale = handler->getInversionLocale();
+    for (int i = 0; i < 10; ++i) {
+      handler->transformPath(makeYawPose(0.85, 0.75, 0.0, "odom"));
+    }
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+  // Enabled: a new plan (setPath) resets the count.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_setpath_node");
+    nav_msgs::msg::Path path;
+    path.header.frame_id = "map";
+    for (int i = 0; i <= 8; ++i) {
+      path.poses.push_back(makeYawPose(0.2 + 0.1 * i, 0.5, 0.0));
+    }
+    for (int i = 1; i <= 4; ++i) {
+      path.poses.push_back(makeYawPose(1.0 - 0.1 * i, 0.5, 0.0));
+    }
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->setPath(path);
+    const unsigned int locale = handler->getInversionLocale();
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+  // Enabled: the count must be consecutive. Leaving the radius resets it.
+  {
+    auto [handler, node, costmap_ros, ph] = make_handler(0.35, "stranded_reset_node");
+    const unsigned int locale = handler->getInversionLocale();
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.90, 0.0, "odom"));  // outside the radius: reset
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    handler->transformPath(makeYawPose(1.0, 0.75, 0.0, "odom"));
+    EXPECT_EQ(handler->getInversionLocale(), locale);
+  }
+}
