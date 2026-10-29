@@ -999,6 +999,16 @@ bool PathHandler::isWithinInversionTolerances(
     distance <= active_xy_tol &&
     std::fabs(angle_distance) <= active_yaw_tol;
 
+  if (premature_along_track && distance <= active_xy_tol &&
+    std::fabs(angle_distance) <= active_yaw_tol && clock_)
+  {
+    RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+      "[HANDOFF_ALONG_TRACK_BLOCKED] xy=%.4fm yaw=%.3frad "
+      "along=%.4fm cross=%.4fm seg_len=%.3fm exhausted=%d",
+      distance, std::fabs(angle_distance), along_track_remaining,
+      cross_track_offset, current_segment_length_, is_segment_exhausted);
+  }
+
   if (!result && distance <= active_xy_tol && std::fabs(angle_distance) > active_yaw_tol) {
     ++handoff_blocked_cycles_;
     // clock_ is only set by initialize(); guard so the tolerance check stays
