@@ -258,6 +258,9 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    // Recentring changes each row's controls and rollout. Costs from an earlier
+    // bank (including collision penalties) do not score this new trajectory.
+    costs_.fill(0.0f);
     generateNoisedTrajectories();
 
     // [B] BATCH STATS after noise+predict
@@ -687,9 +690,19 @@ bool Optimizer::controlSequenceCollisionFree() const
       return cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
     };
   // Never rely on forward prediction to notice an already-occupied footprint.
-  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {return false;}
+  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {
+    RCLCPP_WARN(
+      logger_, "[MPPI_FINAL_GUARD] stage=current x=%.6f y=%.6f yaw=%.6f",
+      p.x, p.y, tf2::getYaw(q));
+    return false;
+  }
   for (size_t j = 0; j <= n; ++j) {
     if (!clear_pose(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j))) {
+      RCLCPP_WARN(
+        logger_, "[MPPI_FINAL_GUARD] stage=forecast step=%zu x=%.6f y=%.6f yaw=%.6f"
+        " current=(%.6f,%.6f,%.6f) command=(%.6f,%.6f)",
+        j, trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j),
+        p.x, p.y, tf2::getYaw(q), control_sequence_.vx(offset), control_sequence_.wz(offset));
       return false;
     }
   }
