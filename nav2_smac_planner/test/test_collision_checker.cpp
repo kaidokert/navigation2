@@ -273,3 +273,33 @@ TEST(collision_footprint, continuous_reference_uses_containing_cell)
   EXPECT_TRUE(checker.inCollision(1.0f, 4.0f, 0.0f, false));
   EXPECT_TRUE(checker.inCollision(std::numeric_limits<float>::quiet_NaN(), 1.0f, 0.0f, false));
 }
+
+TEST(collision_footprint, recorded_inflation_shortcut_misses_polygon)
+{
+  // wp2plan042: center cost 122 is below the configured circumscribed cost 128,
+  // but the rasterized footprint intersects the recorded lethal cell.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("recorded_shortcut");
+  Costmap2D grid(100, 200, 0.05, -0.85, -9.2, 0);
+  grid.setCost(39, 142, 122);
+  grid.setCost(39, 135, LETHAL_OBSTACLE);
+  nav2_smac_planner::GridCollisionChecker checker(nullptr, 180, node);
+  checker.setCostmap(&grid);
+  Footprint footprint;
+  for (const auto & xy : std::vector<std::pair<double, double>>{
+    {0.288, 0.163}, {0.288, -0.163}, {-0.062, -0.163}, {-0.062, 0.163}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = xy.first;
+    point.y = xy.second;
+    footprint.push_back(point);
+  }
+  const float x = (1.1107204491 + 0.85) / 0.05;
+  const float y = (-2.0713005911 + 9.2) / 0.05;
+  checker.setFootprint(footprint, false, 0.0);
+  ASSERT_TRUE(checker.inCollision(x, y, 149.0f, false));
+  checker.setFootprint(footprint, false, 128.0);
+  EXPECT_TRUE(checker.inCollision(x, y, 149.0f, false));
+  grid.setCost(39, 135, FREE_SPACE);
+  EXPECT_FALSE(checker.inCollision(x, y, 149.0f, false));
+  EXPECT_FLOAT_EQ(checker.getCost(), 122.0f);
+}

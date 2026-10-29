@@ -55,15 +55,7 @@ void GridCollisionChecker::setFootprint(
   const double & possible_collision_cost)
 {
   possible_collision_cost_ = static_cast<float>(possible_collision_cost);
-  if (possible_collision_cost_ <= 0.0f) {
-    RCLCPP_ERROR_THROTTLE(
-      logger_, *clock_, 1000,
-      "Inflation layer either not found or inflation is not set sufficiently for "
-      "optimized non-circular collision checking capabilities. It is HIGHLY recommended to set"
-      " the inflation radius to be at MINIMUM half of the robot's largest cross-section. See "
-      "github.com/ros-planning/navigation2/tree/main/nav2_smac_planner#potential-fields"
-      " for full instructions. This will substantially impact run-time performance.");
-  }
+  // Retain the argument for API compatibility; it cannot certify polygon clearance.
 
   footprint_is_radius_ = radius;
 
@@ -124,12 +116,9 @@ bool GridCollisionChecker::inCollision(
     static_cast<unsigned int>(x), static_cast<unsigned int>(y)));
 
   if (!footprint_is_radius_) {
-    // if footprint, then we check for the footprint's points, but first see
-    // if the robot is even potentially in an inscribed collision
-    if (center_cost_ < possible_collision_cost_ && possible_collision_cost_ > 0.0f) {
-      return false;
-    }
-
+    // A low center-cell inflation cost does not certify a rasterized polygon.
+    // Cell quantization can make its perimeter touch a lethal cell beyond the
+    // circumscribed-cost shortcut. Always evaluate the polygon after cheap rejection.
     // If its inscribed, in collision, or unknown in the middle,
     // no need to even check the footprint, its invalid
     if (center_cost_ == UNKNOWN && !traverse_unknown) {
