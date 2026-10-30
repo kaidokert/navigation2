@@ -136,7 +136,8 @@ TEST(SmacFactors, reference_offset_checks_footprint_ahead_of_planned_point)
       for (float y = 35.0f; y <= 65.0f; y += 5.0f) {
         const bool a = shifted.inCollision(x, y, static_cast<float>(bin), false);
         const bool b = plain.inCollision(
-          x + offset * std::cos(angle), y + offset * std::sin(angle), static_cast<float>(bin), false);
+          x + offset * std::cos(angle), y + offset * std::sin(angle), static_cast<float>(bin),
+          false);
         EXPECT_EQ(a, b) << "bin " << bin << " x " << x << " y " << y;
         EXPECT_FLOAT_EQ(shifted.getCost(), plain.getCost());
         collisions += a ? 1 : 0;
