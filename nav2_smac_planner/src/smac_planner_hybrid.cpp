@@ -483,9 +483,9 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   // robot frame origin, which differ by up to 2 * rear_axle_offset after a turn)
   if (std::floor(mx_start) == std::floor(mx_goal) &&
     std::floor(my_start) == std::floor(my_goal) &&
-    std::hypot(
+    (_rear_axle_offset <= 0.0 || std::hypot(
       goal.pose.position.x - start.pose.position.x,
-      goal.pose.position.y - start.pose.position.y) < costmap->getResolution())
+      goal.pose.position.y - start.pose.position.y) < costmap->getResolution()))
   {
     pose.pose = start.pose;
     pose.pose.orientation = goal.pose.orientation;
