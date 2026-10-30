@@ -111,6 +111,29 @@ void SmacPlannerHybrid::configure(
     node, name + ".minimum_turning_radius", rclcpp::ParameterValue(0.4));
   node->get_parameter(name + ".minimum_turning_radius", _minimum_turning_radius_global_coords);
   nav2_util::declare_parameter_if_not_declared(
+    node, name + ".rear_axle_offset", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".rear_axle_offset", _rear_axle_offset);
+  if (_rear_axle_offset < 0.0) {
+    RCLCPP_WARN(_logger, "rear_axle_offset must be >= 0, got %f. Using 0.", _rear_axle_offset);
+    _rear_axle_offset = 0.0;
+  }
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_score", rclcpp::ParameterValue(std::string("stock")));
+  node->get_parameter(name + ".analytic_score", _analytic_score);
+  if (_analytic_score != "stock" && _analytic_score != "length_direction") {
+    RCLCPP_WARN(
+      _logger, "Unknown analytic_score '%s', valid options are stock, length_direction. "
+      "Using stock.", _analytic_score.c_str());
+    _analytic_score = "stock";
+  }
+  _search_info.analytic_score_length_direction = (_analytic_score == "length_direction");
+  if (_rear_axle_offset > 0.0 && smooth_path) {
+    RCLCPP_WARN(
+      _logger, "rear_axle_offset > 0 with smooth_path: the smoother treats the robot frame origin "
+      "as the non-holonomic point and recomputes headings from its chords, which undoes the "
+      "rear-axle geometry. Set smooth_path: false with rear_axle_offset.");
+  }
+  nav2_util::declare_parameter_if_not_declared(
     node, name + ".allow_primitive_interpolation", rclcpp::ParameterValue(false));
   node->get_parameter(
     name + ".allow_primitive_interpolation", _search_info.allow_primitive_interpolation);
@@ -380,13 +403,25 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     _costmap_ros->getRobotFootprint(),
     _costmap_ros->getUseRadius(),
     findCircumscribedCost(_costmap_ros));
+  // With rear_axle_offset > 0 the search plans for the rear-axle point: start and goal move back
+  // along their heading, collision checks are evaluated at the robot frame origin, and the
+  // returned poses are moved forward again, so the output is still a robot-frame path.
+  const double axle = _rear_axle_offset;
+  _collision_checker.setReferenceOffset(
+    static_cast<float>(axle / costmap->getResolution()));
   _a_star->setCollisionChecker(&_collision_checker);
+  const double start_yaw = tf2::getYaw(start.pose.orientation);
+  const double goal_yaw = tf2::getYaw(goal.pose.orientation);
+  const double start_x = start.pose.position.x - axle * cos(start_yaw);
+  const double start_y = start.pose.position.y - axle * sin(start_yaw);
+  const double goal_x = goal.pose.position.x - axle * cos(goal_yaw);
+  const double goal_y = goal.pose.position.y - axle * sin(goal_yaw);
 
   // Set starting point, in A* bin search coordinates
   float mx_start, my_start, mx_goal, my_goal;
   if (!costmap->worldToMapContinuous(
-    start.pose.position.x,
-    start.pose.position.y,
+    start_x,
+    start_y,
     mx_start,
     my_start))
   {
@@ -407,8 +442,8 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
   // Set goal point, in A* bin search coordinates
   if (!costmap->worldToMapContinuous(
-    goal.pose.position.x,
-    goal.pose.position.y,
+    goal_x,
+    goal_y,
     mx_goal,
     my_goal))
   {
@@ -444,9 +479,13 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   pose.pose.orientation.z = 0.0;
   pose.pose.orientation.w = 1.0;
 
-  // Corner case of start and goal being on the same cell
+  // Corner case of start and goal being on the same cell (for both the planned point and the
+  // robot frame origin, which differ by up to 2 * rear_axle_offset after a turn)
   if (std::floor(mx_start) == std::floor(mx_goal) &&
-    std::floor(my_start) == std::floor(my_goal))
+    std::floor(my_start) == std::floor(my_goal) &&
+    (_rear_axle_offset <= 0.0 || std::hypot(
+      goal.pose.position.x - start.pose.position.x,
+      goal.pose.position.y - start.pose.position.y) < costmap->getResolution()))
   {
     pose.pose = start.pose;
     pose.pose.orientation = goal.pose.orientation;
@@ -504,6 +543,11 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   for (int i = path.size() - 1; i >= 0; --i) {
     pose.pose = getWorldCoords(path[i].x, path[i].y, costmap);
     pose.pose.orientation = getWorldOrientation(path[i].theta);
+    if (axle != 0.0) {
+      const double yaw = tf2::getYaw(pose.pose.orientation);
+      pose.pose.position.x += axle * cos(yaw);
+      pose.pose.position.y += axle * sin(yaw);
+    }
     plan.poses.push_back(pose);
   }
 
@@ -632,6 +676,14 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         _max_planning_time = parameter.as_double();
       } else if (name == _name + ".tolerance") {
         _tolerance = static_cast<float>(parameter.as_double());
+      } else if (name == _name + ".rear_axle_offset") {
+        if (parameter.as_double() < 0.0) {
+          RCLCPP_WARN(
+            _logger, "rear_axle_offset must be >= 0, got %f. Keeping %f.",
+            parameter.as_double(), _rear_axle_offset);
+        } else {
+          _rear_axle_offset = parameter.as_double();
+        }
       } else if (name == _name + ".lookup_table_size") {
         reinit_a_star = true;
         _lookup_table_size = parameter.as_double();
@@ -736,7 +788,19 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         _angle_quantizations = static_cast<unsigned int>(angle_quantizations);
       }
     } else if (type == ParameterType::PARAMETER_STRING) {
-      if (name == _name + ".motion_model_for_search") {
+      if (name == _name + ".analytic_score") {
+        const std::string value = parameter.as_string();
+        if (value == "stock" || value == "length_direction") {
+          reinit_a_star = true;
+          _analytic_score = value;
+          _search_info.analytic_score_length_direction = (value == "length_direction");
+        } else {
+          RCLCPP_WARN(
+            _logger,
+            "Unknown analytic_score '%s', valid options are stock, length_direction. Keeping '%s'.",
+            value.c_str(), _analytic_score.c_str());
+        }
+      } else if (name == _name + ".motion_model_for_search") {
         reinit_a_star = true;
         _motion_model = fromString(parameter.as_string());
         if (_motion_model == MotionModel::UNKNOWN) {
