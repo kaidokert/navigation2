@@ -1173,6 +1173,233 @@ TEST(PathHandlerTests, ShortSetupMustBeTraversedBeforeCuspHandoff)
   }
 }
 
+TEST(PathHandlerTests, TwoPoseMicroCuspRelaxesYawOnlyAfterAlongTrackArrival)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("two_pose_micro_cusp");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  node->declare_parameter("dummy.handoff_yaw_relax_per_cycle", rclcpp::ParameterValue(0.0));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // A 26 cm reverse positioning leg has two closely spaced samples at its
+  // cusp. This makes the closest pre-cusp sample remain selected just before
+  // arrival, exercising the two-pose micro-cusp yaw behavior explicitly.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.49, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.249, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.24, 0.50, 0.0));  // cusp
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));  // forward outgoing leg
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 4u);
+  ASSERT_NEAR(handler.getInvertedPath().poses.back().pose.position.x, 0.24, 1e-4);
+
+  // The short stroke is within the XY radius and only 6 cm from the cusp. The
+  // nearest path point leaves two poses, so micro-cusp yaw relaxation is
+  // active; the along-track guard alone must prevent this premature handoff.
+  handler.transformPath(makeYawPose(0.30, 0.50, 0.34, "odom"));
+  ASSERT_EQ(handler.getInvertedPath().poses.size(), 2u);
+  EXPECT_EQ(handler.getInversionLocale(), 4u);
+
+  // At this point the closest path pose is the final sample before the cusp,
+  // leaving exactly two poses and only 5 mm along track. The 0.34 rad yaw error
+  // exceeds the base 0.09 rad gate but is inside the micro-cusp 0.675 rad gate.
+  EXPECT_TRUE(handler.isWithinInversionTolerancesWrapper(
+      makeYawPose(0.245, 0.50, 0.34, "odom")));
+  handler.transformPath(makeYawPose(0.245, 0.50, 0.34, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 0u)
+    << "A traversed two-pose micro-cusp should retain relaxed yaw handoff";
+}
+
+TEST(PathHandlerTests, BlockedOnePoseSetupRetainsProgressTargetWithoutGhostExtension)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("blocked_setup_target");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.0));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.24, 0.50, 0.0));  // reverse setup cusp
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));  // forward outgoing leg
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 2u);
+
+  const auto transformed = handler.transformPath(makeYawPose(0.30, 0.50, 0.34, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 2u)
+    << "The 6 cm along-track remainder must block the cusp handoff";
+  ASSERT_EQ(transformed.poses.size(), 2u)
+    << "Without ghost extension, preserve a positional path segment for MPPI";
+  EXPECT_NEAR(transformed.poses.front().pose.position.x, 0.30, 1e-4);
+  EXPECT_NEAR(transformed.poses.back().pose.position.x, 0.24, 1e-4);
+  EXPECT_NEAR(utils::pathLength(transformed), 0.06, 1e-4);
+
+  // With a clear costmap and a configured ghost horizon, extension already
+  // supplies the second target pose; do not prepend a duplicate robot anchor.
+  PathHandlerWrapper ghost_handler;
+  auto ghost_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("blocked_setup_ghost");
+  ghost_node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  ghost_node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  ghost_node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  ghost_node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  ghost_node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  ghost_node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  ghost_node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.15));
+  ghost_node->declare_parameter("dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
+  ghost_node->declare_parameter("dummy.ghost_point_spacing", rclcpp::ParameterValue(0.05));
+  auto ghost_costmap = makeConfiguredCostmapRos();
+  ParametersHandler ghost_parameters(ghost_node);
+  ghost_handler.initialize(
+    ghost_node, "dummy", ghost_costmap, ghost_costmap->getTfBuffer(), &ghost_parameters);
+  publishIdentityTf(ghost_node, ghost_costmap->getTfBuffer());
+  ghost_handler.setPath(path);
+
+  const auto ghost_transformed = ghost_handler.transformPath(
+    makeYawPose(0.30, 0.50, 0.34, "odom"));
+  EXPECT_EQ(ghost_handler.getInversionLocale(), 2u);
+  ASSERT_GE(ghost_transformed.poses.size(), 2u);
+  EXPECT_NEAR(ghost_transformed.poses.front().pose.position.x, 0.24, 1e-4)
+    << "No robot anchor should be prepended when ghost extension succeeded";
+  EXPECT_LT(ghost_transformed.poses[1].pose.position.x, 0.24)
+    << "Successful reverse ghost extension should continue past the cusp";
+
+  // If the extension is configured but its first point is lethal, it appends
+  // nothing. The same fallback must still leave the real cusp as a positional
+  // target, without ghosting through the obstacle.
+  PathHandlerWrapper blocked_ghost_handler;
+  auto blocked_ghost_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
+    "blocked_setup_lethal_ghost");
+  blocked_ghost_node->declare_parameter(
+    "dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  blocked_ghost_node->declare_parameter(
+    "dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  blocked_ghost_node->declare_parameter(
+    "dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  blocked_ghost_node->declare_parameter(
+    "dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  blocked_ghost_node->declare_parameter(
+    "dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  blocked_ghost_node->declare_parameter(
+    "dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  blocked_ghost_node->declare_parameter(
+    "dummy.min_inversion_horizon", rclcpp::ParameterValue(0.15));
+  blocked_ghost_node->declare_parameter(
+    "dummy.ghost_max_extension", rclcpp::ParameterValue(0.20));
+  blocked_ghost_node->declare_parameter(
+    "dummy.ghost_point_spacing", rclcpp::ParameterValue(0.05));
+  auto blocked_costmap = makeConfiguredCostmapRos();
+  ParametersHandler blocked_parameters(blocked_ghost_node);
+  blocked_ghost_handler.initialize(
+    blocked_ghost_node, "dummy", blocked_costmap, blocked_costmap->getTfBuffer(),
+    &blocked_parameters);
+  publishIdentityTf(blocked_ghost_node, blocked_costmap->getTfBuffer());
+  unsigned int lethal_mx, lethal_my;
+  ASSERT_TRUE(blocked_costmap->getCostmap()->worldToMap(0.19, 0.50, lethal_mx, lethal_my));
+  blocked_costmap->getCostmap()->setCost(
+    lethal_mx, lethal_my, nav2_costmap_2d::LETHAL_OBSTACLE);
+  blocked_ghost_handler.setPath(path);
+
+  const auto blocked_ghost_transformed = blocked_ghost_handler.transformPath(
+    makeYawPose(0.30, 0.50, 0.34, "odom"));
+  EXPECT_EQ(blocked_ghost_handler.getInversionLocale(), 2u);
+  ASSERT_EQ(blocked_ghost_transformed.poses.size(), 2u);
+  EXPECT_NEAR(blocked_ghost_transformed.poses.front().pose.position.x, 0.30, 1e-4);
+  EXPECT_NEAR(blocked_ghost_transformed.poses.back().pose.position.x, 0.24, 1e-4);
+}
+
+TEST(PathHandlerTests, NonCuspSingletonAtCostmapBoundaryDoesNotCreateChord)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("boundary_singleton_path");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.0));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  const auto * costmap = costmap_ros->getCostmap();
+  const double east_edge = costmap->getOriginX() +
+    static_cast<double>(costmap->getSizeInCellsX()) * costmap->getResolution();
+  const double y = 0.50;
+  const double first_in_bounds_x = east_edge - 0.40;
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(first_in_bounds_x, y, 0.0));
+  path.poses.push_back(makeYawPose(east_edge + 0.20, y, 0.0));  // clipped local prefix
+  path.poses.push_back(makeYawPose(east_edge + 0.40, y, 0.0));  // active cusp, outside
+  path.poses.push_back(makeYawPose(east_edge - 0.10, y, 0.0));  // reverse outgoing segment
+  path.poses.push_back(makeYawPose(east_edge - 0.30, y, 0.0));
+  handler.setPath(path);
+  ASSERT_GT(handler.getInversionLocale(), 0u);
+
+  const auto transformed = handler.transformPath(
+    makeYawPose(first_in_bounds_x + 0.05, y, 0.0, "odom"));
+  ASSERT_EQ(transformed.poses.size(), 1u);
+  EXPECT_NEAR(transformed.poses.front().pose.position.x, first_in_bounds_x, 1e-4)
+    << "A non-cusp in-bounds singleton must not be connected directly to the robot";
+}
+
+TEST(PathHandlerTests, CurvedShortCuspApproachDoesNotCreateRobotChord)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("curved_cusp_approach");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.0));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));
+  path.poses.push_back(makeYawPose(0.29, 0.56, 0.0));  // unconsumed bend, behind chord line
+  path.poses.push_back(makeYawPose(0.24, 0.50, 0.0));  // active reverse cusp
+  path.poses.push_back(makeYawPose(0.50, 0.50, 0.0));  // forward outgoing leg
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+  ASSERT_LT(utils::pathLength(handler.getInvertedPath()), 0.30)
+    << "The curved negative must exercise the short-segment fallback guard";
+
+  const auto transformed = handler.transformPath(makeYawPose(0.28, 0.50, 0.34, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 3u)
+    << "Along-track progress must keep the active cusp from handing off";
+  ASSERT_EQ(transformed.poses.size(), 1u);
+  EXPECT_NEAR(transformed.poses.front().pose.position.x, 0.24, 1e-4);
+  EXPECT_NEAR(transformed.poses.front().pose.position.y, 0.50, 1e-4);
+  EXPECT_GT(std::hypot(
+    transformed.poses.front().pose.position.x - 0.28,
+    transformed.poses.front().pose.position.y - 0.50), 0.015)
+    << "A curved remaining setup must not be replaced by a direct robot-to-cusp chord";
+}
+
 TEST(PathHandlerTests, RecordedCurvedReverseSetupRetainedAndLateralArrivalAllowed)
 {
   PathHandlerWrapper handler;

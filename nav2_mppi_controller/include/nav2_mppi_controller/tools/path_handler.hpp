@@ -153,7 +153,10 @@ protected:
     * @param robot_pose Robot's current pose to check
     * @return bool If the robot pose is within the set inversion tolerances
     */
-  bool isWithinInversionTolerances(const geometry_msgs::msg::PoseStamped & robot_pose) const;
+  bool isWithinInversionTolerances(
+    const geometry_msgs::msg::PoseStamped & robot_pose,
+    bool * handoff_blocked_by_along_track = nullptr,
+    double * along_track_remaining = nullptr) const;
 
   /**
    * @brief Check whether ghost extension should be activated for the current path segment
