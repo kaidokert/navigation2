@@ -113,6 +113,10 @@ void SmacPlannerHybrid::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".rear_axle_offset", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".rear_axle_offset", _rear_axle_offset);
+  if (_rear_axle_offset < 0.0) {
+    RCLCPP_WARN(_logger, "rear_axle_offset must be >= 0, got %f. Using 0.", _rear_axle_offset);
+    _rear_axle_offset = 0.0;
+  }
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".analytic_score", rclcpp::ParameterValue(std::string("stock")));
   node->get_parameter(name + ".analytic_score", _analytic_score);
@@ -123,6 +127,12 @@ void SmacPlannerHybrid::configure(
     _analytic_score = "stock";
   }
   _search_info.analytic_score_length_direction = (_analytic_score == "length_direction");
+  if (_rear_axle_offset > 0.0 && smooth_path) {
+    RCLCPP_WARN(
+      _logger, "rear_axle_offset > 0 with smooth_path: the smoother treats the robot frame origin "
+      "as the non-holonomic point and recomputes headings from its chords, which undoes the "
+      "rear-axle geometry. Set smooth_path: false with rear_axle_offset.");
+  }
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".allow_primitive_interpolation", rclcpp::ParameterValue(false));
   node->get_parameter(
@@ -469,9 +479,13 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   pose.pose.orientation.z = 0.0;
   pose.pose.orientation.w = 1.0;
 
-  // Corner case of start and goal being on the same cell
+  // Corner case of start and goal being on the same cell (for both the planned point and the
+  // robot frame origin, which differ by up to 2 * rear_axle_offset after a turn)
   if (std::floor(mx_start) == std::floor(mx_goal) &&
-    std::floor(my_start) == std::floor(my_goal))
+    std::floor(my_start) == std::floor(my_goal) &&
+    std::hypot(
+      goal.pose.position.x - start.pose.position.x,
+      goal.pose.position.y - start.pose.position.y) < costmap->getResolution())
   {
     pose.pose = start.pose;
     pose.pose.orientation = goal.pose.orientation;
@@ -663,7 +677,13 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".tolerance") {
         _tolerance = static_cast<float>(parameter.as_double());
       } else if (name == _name + ".rear_axle_offset") {
-        _rear_axle_offset = parameter.as_double();
+        if (parameter.as_double() < 0.0) {
+          RCLCPP_WARN(
+            _logger, "rear_axle_offset must be >= 0, got %f. Keeping %f.",
+            parameter.as_double(), _rear_axle_offset);
+        } else {
+          _rear_axle_offset = parameter.as_double();
+        }
       } else if (name == _name + ".lookup_table_size") {
         reinit_a_star = true;
         _lookup_table_size = parameter.as_double();

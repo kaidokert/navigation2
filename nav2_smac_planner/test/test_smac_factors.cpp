@@ -169,6 +169,9 @@ TEST(SmacFactors, length_direction_score_weights_reverse_and_cusps)
     nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_theta, info);
 
   nav2_costmap_2d::Costmap2D raw(size_x, size_y, 0.05, 0.0, 0.0, 0);
+  for (unsigned int i = 0; i < size_x; ++i) {
+    raw.setCost(i, 20, 126);  // normalized cost 0.5 on row y = 20
+  }
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>();
   costmap_ros->on_configure(rclcpp_lifecycle::State());
   *costmap_ros->getCostmap() = raw;
@@ -179,14 +182,14 @@ TEST(SmacFactors, length_direction_score_weights_reverse_and_cusps)
   Expansion expander(nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, 72);
 
   std::vector<std::unique_ptr<nav2_smac_planner::NodeHybrid>> nodes;
-  auto build = [&](const std::vector<float> & xs) {
+  auto build = [&](const std::vector<float> & xs, float y = 10.0f) {
       Expansion::AnalyticExpansionNodes expansion;
       for (float x : xs) {
         nodes.push_back(std::make_unique<nav2_smac_planner::NodeHybrid>(0));
         nav2_smac_planner::NodeHybrid * n = nodes.back().get();
-        n->setPose(nav2_smac_planner::NodeHybrid::Coordinates(x, 10.0f, 0.0f));
+        n->setPose(nav2_smac_planner::NodeHybrid::Coordinates(x, y, 0.0f));
         EXPECT_TRUE(n->isNodeValid(false, &checker));
-        nav2_smac_planner::NodeHybrid::Coordinates coords(x, 10.0f, 0.0f);
+        nav2_smac_planner::NodeHybrid::Coordinates coords(x, y, 0.0f);
         expansion.emplace_back(n, coords, coords);
       }
       return expansion;
@@ -201,6 +204,8 @@ TEST(SmacFactors, length_direction_score_weights_reverse_and_cusps)
     2.0f + 3.6f * (1.0f + 2.0f), 1e-4);
   // uneven spacing is measured, not first-step chord x count
   EXPECT_NEAR(expander.lengthDirectionScore(build({10, 10.5f, 13})), 3.0f, 1e-4);
+  // cost penalty, linear: each step x (1 + 3.5 * 0.5)
+  EXPECT_NEAR(expander.lengthDirectionScore(build({10, 11, 12}, 20.0f)), 2.0f * 2.75f, 1e-3);
 
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
 }
@@ -253,6 +258,16 @@ TEST(SmacFactors, rear_axle_offset_plans_for_the_rear_axle)
   ASSERT_GT(stock.poses.size(), 10u);
   EXPECT_LT(traceStats(stock, 0.0).max_lateral_ratio, 0.12);
   EXPECT_GT(traceStats(stock, -d).max_lateral_ratio, 0.25);
+
+  // Rear axles in the same cell but robot frames 2d apart: no single-pose shortcut
+  const auto turned = makePose(1.5 - 2.0 * d, 1.5, M_PI);
+  planner->dynamicParametersCallback({rclcpp::Parameter("test.rear_axle_offset", d)});
+  try {
+    EXPECT_GT(planner->createPlan(start, turned, no_cancel).poses.size(), 1u);
+  } catch (const std::exception &) {
+    // no path is acceptable; a one-pose plan 2d away from the goal is not
+  }
+  planner->dynamicParametersCallback({rclcpp::Parameter("test.rear_axle_offset", 0.0)});
 
   // An unknown score name is ignored (warning) and planning still works
   planner->dynamicParametersCallback(
