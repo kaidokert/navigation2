@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -217,6 +218,8 @@ nav_msgs::msg::Path PathHandler::transformPath(
 
   prunePlan(global_plan_up_to_inversion_, lower_bound);
 
+  bool handoff_blocked_by_along_track = false;
+  double along_track_remaining = 0.0;
   if (enforce_path_inversion_ && inversion_locale_ != 0u && !terminal_stub_aligned_) {
     // Stranded handoff (#102): with the segment fully consumed and the robot beside the cusp but
     // outside the xy gate, the tolerance check can never pass and MPPI rocks on a ghost stub.
@@ -242,7 +245,9 @@ nav_msgs::msg::Path PathHandler::transformPath(
     } else {
       stranded_cycles_ = 0u;
     }
-    if (stranded_handoff || isWithinInversionTolerances(global_pose)) {
+    if (stranded_handoff || isWithinInversionTolerances(
+        global_pose, &handoff_blocked_by_along_track, &along_track_remaining))
+    {
       stranded_cycles_ = 0u;
       // A stranded handoff short-circuits the tolerance check, which would otherwise have reset the
       // Layer 1 count; do it here so no relaxation carries into the next segment.
@@ -391,6 +396,96 @@ nav_msgs::msg::Path PathHandler::transformPath(
     RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
       "[GHOST_SKIP] tgp=%.4fm pts=%zu inv=%u cusp=%.3fm",
       real_tgp_length, transformed_plan.poses.size(), inversion_locale_, cusp_dist);
+  }
+
+  // If the along-track guard blocks handoff after pruning has reduced the local
+  // plan to one pose, only add a robot-to-cusp anchor for a short, near-straight
+  // setup whose singleton is the actual planner cusp. A singleton caused by a
+  // local-costmap boundary may be an ordinary waypoint; do not create a chord
+  // across an unseen bend.
+  if (handoff_blocked_by_along_track && transformed_plan.poses.size() == 1u) {
+    const bool has_active_cusp = inversion_locale_ > 0u &&
+      static_cast<size_t>(inversion_locale_) <= global_plan_.poses.size();
+    if (has_active_cusp) {
+      const size_t cusp_index = static_cast<size_t>(inversion_locale_ - 1u);
+      bool singleton_is_cusp = false;
+      geometry_msgs::msg::PoseStamped cusp_costmap_pose;
+      auto cusp_pose = global_plan_.poses[cusp_index];
+      cusp_pose.header.stamp = global_pose.header.stamp;
+      cusp_pose.header.frame_id = global_plan_.header.frame_id;
+      if (transformPose(costmap_->getGlobalFrameID(), cusp_pose, cusp_costmap_pose)) {
+        const auto & singleton = transformed_plan.poses.back().pose.position;
+        const auto & cusp = cusp_costmap_pose.pose.position;
+        singleton_is_cusp = std::hypot(singleton.x - cusp.x, singleton.y - cusp.y) <= 1e-3;
+      }
+
+      const double dx_to_cusp =
+        global_plan_.poses[cusp_index].pose.position.x - global_pose.pose.position.x;
+      const double dy_to_cusp =
+        global_plan_.poses[cusp_index].pose.position.y - global_pose.pose.position.y;
+      const double chord_length_sq = dx_to_cusp * dx_to_cusp + dy_to_cusp * dy_to_cusp;
+      double max_chord_deviation = 0.0;
+      bool short_path_is_straight = chord_length_sq > 1e-8 &&
+        current_segment_length_ < micro_cusp_length_threshold_;
+      if (short_path_is_straight) {
+        size_t segment_start = cusp_index;
+        double segment_length = 0.0;
+        while (segment_start > 0u &&
+          segment_length < current_segment_length_ - 1e-4)
+        {
+          const auto & current = global_plan_.poses[segment_start].pose.position;
+          const auto & previous = global_plan_.poses[segment_start - 1u].pose.position;
+          segment_length += std::hypot(current.x - previous.x, current.y - previous.y);
+          --segment_start;
+        }
+
+        for (size_t i = segment_start; i <= cusp_index; ++i) {
+          const auto & point = global_plan_.poses[i].pose.position;
+          const double px = point.x - global_pose.pose.position.x;
+          const double py = point.y - global_pose.pose.position.y;
+          // Use distance to the infinite chord line. Clamping at either chord
+          // endpoint would mistake a collinear point behind the robot for a
+          // large bend, while skipping extrapolated samples can miss a real
+          // off-axis setup point.
+          const double projection =
+            (px * dx_to_cusp + py * dy_to_cusp) / chord_length_sq;
+          const double deviation_x = px - projection * dx_to_cusp;
+          const double deviation_y = py - projection * dy_to_cusp;
+          max_chord_deviation = std::max(
+            max_chord_deviation, std::hypot(deviation_x, deviation_y));
+        }
+        short_path_is_straight = max_chord_deviation <= cusp_along_track_threshold_;
+      }
+
+      const auto & actual_cusp = global_plan_.poses[cusp_index].pose.position;
+      const double robot_to_cusp = std::hypot(
+        actual_cusp.x - global_pose.pose.position.x,
+        actual_cusp.y - global_pose.pose.position.y);
+      geometry_msgs::msg::PoseStamped progress_anchor;
+      unsigned int anchor_mx, anchor_my;
+      if (singleton_is_cusp && short_path_is_straight &&
+        robot_to_cusp <= inversion_xy_tolerance_ &&
+        transformPose(costmap_->getGlobalFrameID(), global_pose, progress_anchor) &&
+        costmap_->getCostmap()->worldToMap(
+          progress_anchor.pose.position.x, progress_anchor.pose.position.y,
+          anchor_mx, anchor_my))
+      {
+        transformed_plan.poses.insert(transformed_plan.poses.begin(), progress_anchor);
+        tgp_length = static_cast<double>(utils::pathLength(transformed_plan));
+        RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+          "[HANDOFF_PROGRESS_TARGET] straight cusp approach anchor added "
+          "along=%.3fm target=%.3fm deviation=%.3fm",
+          along_track_remaining, tgp_length, max_chord_deviation);
+      } else {
+        RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+          "[HANDOFF_PROGRESS_TARGET_SKIP] singleton_cusp=%d straight=%d "
+          "robot_cusp=%.3fm deviation=%.3fm",
+          singleton_is_cusp, short_path_is_straight, robot_to_cusp, max_chord_deviation);
+      }
+    } else {
+      RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+        "[HANDOFF_PROGRESS_TARGET_SKIP] no active cusp index");
+    }
   }
 
   if (transformed_plan.poses.empty()) {
@@ -879,8 +974,17 @@ geometry_msgs::msg::PoseStamped PathHandler::getTransformedGoal(
 }
 
 bool PathHandler::isWithinInversionTolerances(
-  const geometry_msgs::msg::PoseStamped & robot_pose) const
+  const geometry_msgs::msg::PoseStamped & robot_pose,
+  bool * handoff_blocked_by_along_track,
+  double * along_track_remaining_output) const
 {
+  if (handoff_blocked_by_along_track) {
+    *handoff_blocked_by_along_track = false;
+  }
+  if (along_track_remaining_output) {
+    *along_track_remaining_output = 0.0;
+  }
+
   // Keep full path if we are within tolerance of the inversion pose
   const auto last_pose = global_plan_up_to_inversion_.poses.back();
   float distance = hypotf(
@@ -894,14 +998,13 @@ bool PathHandler::isWithinInversionTolerances(
   // Relax yaw tolerance for micro-cusps: segments shorter than the threshold
   // can need relaxed yaw alignment at arrival. Their length alone does not
   // make them disposable: a fresh short reverse leg may be a positioning stroke.
-  // For intermediate short segments (15-30 cm), require the segment to be
-  // consumed down to <= 1 pose before unlocking the micro-cusp yaw gate so
-  // the controller does not discard the second half of a 26-29 cm positioning
-  // leg as soon as it enters the 15 cm Euclidean cusp radius.
+  // For intermediate short segments (15-30 cm), retain micro-cusp yaw
+  // relaxation with <= 2 remaining poses. The along-track guard below
+  // separately prevents handoff while a positioning leg remains unconsumed.
   const bool is_micro_cusp =
     (current_segment_length_ < micro_cusp_length_threshold_) &&
     (current_segment_length_ <= static_cast<double>(inversion_xy_tolerance_) ||
-    global_plan_up_to_inversion_.poses.size() <= 1u);
+    global_plan_up_to_inversion_.poses.size() <= 2u);
   const double effective_yaw_tol = is_micro_cusp ?
     inversion_yaw_tolerance_ * micro_cusp_yaw_scale_ :
     inversion_yaw_tolerance_;
@@ -991,6 +1094,12 @@ bool PathHandler::isWithinInversionTolerances(
     (is_lateral_exhausted && along_track_remaining > exhausted_along_track_threshold_ &&
     exhausted_along_track_cycles_ <=
     static_cast<unsigned int>(std::max(exhausted_along_track_hold_cycles_, 0))));
+  if (handoff_blocked_by_along_track) {
+    *handoff_blocked_by_along_track = premature_along_track;
+  }
+  if (along_track_remaining_output) {
+    *along_track_remaining_output = along_track_remaining;
+  }
 
   const bool standard_result = !premature_along_track &&
     distance <= inversion_xy_tolerance_ &&
