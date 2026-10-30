@@ -1173,6 +1173,85 @@ TEST(PathHandlerTests, ShortSetupMustBeTraversedBeforeCuspHandoff)
   }
 }
 
+TEST(PathHandlerTests, Recorded39mmCurvedReverseReplanIsNotHandedOffAtStart)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
+    "recorded_39mm_reverse_replan");
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.09));
+  node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler parameters(node);
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &parameters);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // Baseline004 replans (invocations 1-3) began with this 39.157 mm curved
+  // reverse stroke, then logged HANDOFF_MICRO within 0.32 ms at its start.
+  // The next leg is forward, so the first edge is a real cusp boundary.
+  const double start_x = 0.50;
+  const double start_y = 0.50;
+  const double start_yaw = -1.675515953694479;
+  const double cusp_x = start_x + 0.0054495238039744;
+  const double cusp_y = start_y + 0.0387762442504682;
+  const double cusp_yaw = -1.7453292051898401;
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(start_x, start_y, start_yaw));
+  path.poses.push_back(makeYawPose(cusp_x, cusp_y, cusp_yaw));
+  path.poses.push_back(makeYawPose(
+      cusp_x + 0.20 * std::cos(cusp_yaw),
+      cusp_y + 0.20 * std::sin(cusp_yaw), cusp_yaw));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 2u);
+  ASSERT_NEAR(utils::pathLength(handler.getInvertedPath()), 0.0391573, 1e-5);
+  const auto contains_cusp = [cusp_x, cusp_y](const nav_msgs::msg::Path & candidate) {
+      for (const auto & pose : candidate.poses) {
+        const auto & position = pose.pose.position;
+        if (std::hypot(position.x - cusp_x, position.y - cusp_y) <= 1e-3) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+  const auto at_replan_start = handler.transformPath(
+    makeYawPose(start_x, start_y, -1.6883, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 2u)
+    << "A tick-zero micro handoff must not discard the untraversed 39 mm stroke";
+  ASSERT_GE(at_replan_start.poses.size(), 2u)
+    << "The blocked setup must leave MPPI a positional progress target";
+  EXPECT_TRUE(contains_cusp(at_replan_start))
+    << "The blocked setup must retain the actual planner cusp, not only ghost poses";
+
+  // A fresh planner response may preserve this cusp while refreshing the
+  // same reverse setup. The update must not turn the untraversed leg into an
+  // immediate handoff.
+  handler.setPath(path);
+  const auto after_same_cusp_replan = handler.transformPath(
+    makeYawPose(start_x, start_y, -1.6883, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 2u)
+    << "An equivalent replan must keep the 39 mm setup active";
+  ASSERT_GE(after_same_cusp_replan.poses.size(), 2u)
+    << "The equivalent replan must preserve a positional progress target";
+  EXPECT_TRUE(contains_cusp(after_same_cusp_replan))
+    << "The refreshed path must retain the actual planner cusp";
+
+  // Positive control: once the robot has traversed the stroke to within the
+  // configured 15 mm along-track remainder, the cusp may hand off normally.
+  constexpr double remaining_m = 0.010;
+  const double fraction = (0.0391573 - remaining_m) / 0.0391573;
+  const auto near_cusp = makeYawPose(
+    start_x + fraction * (cusp_x - start_x),
+    start_y + fraction * (cusp_y - start_y), cusp_yaw, "odom");
+  handler.transformPath(near_cusp);
+  EXPECT_EQ(handler.getInversionLocale(), 0u)
+    << "An actually traversed setup may hand off inside the along-track bound";
+}
+
 TEST(PathHandlerTests, TwoPoseMicroCuspRelaxesYawOnlyAfterAlongTrackArrival)
 {
   PathHandlerWrapper handler;
