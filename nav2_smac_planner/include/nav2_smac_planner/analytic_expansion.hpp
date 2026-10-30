@@ -103,6 +103,14 @@ public:
     const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space);
 
   /**
+   * @brief Score an analytic expansion by true step length with search-primitive weights
+   * (cost penalty, reverse penalty, change penalty at each change of gear)
+   * @param expansion The expansion to score, at least 2 nodes
+   * @return The score, lower is better
+   */
+  float lengthDirectionScore(const AnalyticExpansionNodes & expansion);
+
+  /**
    * @brief Takes final analytic expansion and appends to current expanded node
    * @param node The node to start the analytic path from
    * @param goal The goal node to plan to
