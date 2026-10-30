@@ -697,13 +697,6 @@ AnalyticExpansion<NodeT>::getSingleGearAnalyticPath(
                 next->setPose(proposed_coordinates);
                 if (next->isNodeValid(_traverse_unknown, _collision_checker)) {
                   const float c = next->getCost();
-                  if (_search_info.analytic_directional_scoring &&
-                    gear > 0 && abs_dyaw >= 2.2f && c > 0.0f)
-                  {
-                    next->setPose(initial_node_coords);
-                    failure = true;
-                    break;
-                  }
                   possible_nodes.emplace_back(next, initial_node_coords, proposed_coordinates);
                   node_costs.emplace_back(c);
                   cand_score += sp.step_len * gear_mult * (1.0f + weight * (c / 252.0f));
