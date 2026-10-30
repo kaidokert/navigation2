@@ -114,6 +114,14 @@ void SmacPlannerHybrid::configure(
     node, name + ".rear_axle_offset", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".rear_axle_offset", _rear_axle_offset_global_coords);
   nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_directional_scoring", rclcpp::ParameterValue(false));
+  node->get_parameter(
+    name + ".analytic_directional_scoring", _search_info.analytic_directional_scoring);
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".enable_single_gear_analytic", rclcpp::ParameterValue(false));
+  node->get_parameter(
+    name + ".enable_single_gear_analytic", _search_info.enable_single_gear_analytic);
+  nav2_util::declare_parameter_if_not_declared(
     node, name + ".allow_primitive_interpolation", rclcpp::ParameterValue(false));
   node->get_parameter(
     name + ".allow_primitive_interpolation", _search_info.allow_primitive_interpolation);
@@ -708,6 +716,12 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         }
       } else if (name == _name + ".analytic_expansion_max_cost_override") {
         _search_info.analytic_expansion_max_cost_override = parameter.as_bool();
+        reinit_a_star = true;
+      } else if (name == _name + ".analytic_directional_scoring") {
+        _search_info.analytic_directional_scoring = parameter.as_bool();
+        reinit_a_star = true;
+      } else if (name == _name + ".enable_single_gear_analytic") {
+        _search_info.enable_single_gear_analytic = parameter.as_bool();
         reinit_a_star = true;
       }
     } else if (type == ParameterType::PARAMETER_INTEGER) {

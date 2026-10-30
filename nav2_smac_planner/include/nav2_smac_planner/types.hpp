@@ -46,6 +46,8 @@ struct SearchInfo
   float analytic_expansion_max_cost{200.0};
   bool analytic_expansion_max_cost_override{false};
   float rear_axle_offset{0.0};
+  bool analytic_directional_scoring{false};
+  bool enable_single_gear_analytic{false};
   std::string lattice_filepath;
   bool cache_obstacle_heuristic{false};
   bool allow_reverse_expansion{false};

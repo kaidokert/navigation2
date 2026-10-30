@@ -81,7 +81,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
       // Reset the counter and try the analytic path expansion
       analytic_iterations = desired_iterations;
       if (current_node->parent == nullptr &&
-        _search_info.rear_axle_offset > 0.0f &&
+        _search_info.enable_single_gear_analytic &&
         _motion_model == MotionModel::REEDS_SHEPP)
       {
         AnalyticExpansionNodes single_gear_nodes =
@@ -128,15 +128,46 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
 
             float score = 0.0;
             float normalized_cost = 0.0;
-            // Analytic expansions are consistently spaced
-            const float distance = hypotf(
-              expansion[1].proposed_coords.x - expansion[0].proposed_coords.x,
-              expansion[1].proposed_coords.y - expansion[0].proposed_coords.y);
             const float & weight = expansion[0].node->motion_table.cost_penalty;
+            if (!_search_info.analytic_directional_scoring) {
+              // Analytic expansions are consistently spaced
+              const float distance = hypotf(
+                expansion[1].proposed_coords.x - expansion[0].proposed_coords.x,
+                expansion[1].proposed_coords.y - expansion[0].proposed_coords.y);
+              for (auto iter = expansion.begin(); iter != expansion.end(); ++iter) {
+                normalized_cost = iter->node->getCost() / 252.0f;
+                // Search's Traversal Cost Function
+                score += distance * (1.0 + weight * normalized_cost);
+              }
+              return score;
+            }
+
+            const float rev_pen = std::max(1.0f, _search_info.reverse_penalty);
+            const float chg_pen = std::max(0.0f, _search_info.change_penalty) *
+              node->motion_table.min_turning_radius;
+            Coordinates prev_coords = node->pose;
+            int prev_gear = 0;
             for (auto iter = expansion.begin(); iter != expansion.end(); ++iter) {
+              const float dx = iter->proposed_coords.x - prev_coords.x;
+              const float dy = iter->proposed_coords.y - prev_coords.y;
+              const float step_dist = hypotf(dx, dy);
+              const float prev_yaw = node->motion_table.getAngleFromBin(
+                static_cast<unsigned int>(prev_coords.theta));
+              const float fwd_proj = dx * std::cos(prev_yaw) + dy * std::sin(prev_yaw);
+              int gear = prev_gear;
+              if (step_dist > 1e-3f) {
+                gear = (fwd_proj < -1e-4f) ? -1 : 1;
+              }
+              if (prev_gear != 0 && gear != 0 && gear != prev_gear) {
+                score += chg_pen;
+              }
+              if (gear != 0) {
+                prev_gear = gear;
+              }
+              const float gear_mult = (gear < 0) ? rev_pen : 1.0f;
               normalized_cost = iter->node->getCost() / 252.0f;
-              // Search's Traversal Cost Function
-              score += distance * (1.0 + weight * normalized_cost);
+              score += step_dist * gear_mult * (1.0f + weight * normalized_cost);
+              prev_coords = iter->proposed_coords;
             }
             return score;
           };
@@ -180,12 +211,16 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   const ompl::base::StateSpacePtr & state_space)
 {
   static ompl::base::ScopedState<> from(state_space), to(state_space), s(state_space);
-  from[0] = node->pose.x;
-  from[1] = node->pose.y;
-  from[2] = node->motion_table.getAngleFromBin(node->pose.theta);
-  to[0] = goal->pose.x;
-  to[1] = goal->pose.y;
-  to[2] = node->motion_table.getAngleFromBin(goal->pose.theta);
+  const float d_axle = (_motion_model == MotionModel::REEDS_SHEPP ||
+    _motion_model == MotionModel::DUBIN) ? _search_info.rear_axle_offset : 0.0f;
+  const double from_yaw = node->motion_table.getAngleFromBin(node->pose.theta);
+  const double to_yaw = node->motion_table.getAngleFromBin(goal->pose.theta);
+  from[0] = node->pose.x - d_axle * std::cos(from_yaw);
+  from[1] = node->pose.y - d_axle * std::sin(from_yaw);
+  from[2] = from_yaw;
+  to[0] = goal->pose.x - d_axle * std::cos(to_yaw);
+  to[1] = goal->pose.y - d_axle * std::sin(to_yaw);
+  to[2] = to_yaw;
 
   float d = state_space->distance(from(), to());
 
@@ -293,17 +328,29 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     theta = (reals[2] < 0.0) ? (reals[2] + 2.0 * M_PI) : reals[2];
     theta = (theta > 2.0 * M_PI) ? (theta - 2.0 * M_PI) : theta;
     angle = node->motion_table.getAngle(theta);
+    if (angle >= static_cast<float>(_dim_3_size)) {
+      angle -= static_cast<float>(_dim_3_size);
+    }
+
+    const float bx = static_cast<float>(reals[0]) +
+      d_axle * static_cast<float>(std::cos(theta));
+    const float by = static_cast<float>(reals[1]) +
+      d_axle * static_cast<float>(std::sin(theta));
+    if (bx < 0.0f || by < 0.0f) {
+      failure = true;
+      break;
+    }
 
     // Turn the pose into a node, and check if it is valid
     index = NodeT::getIndex(
-      static_cast<unsigned int>(reals[0]),
-      static_cast<unsigned int>(reals[1]),
-      static_cast<unsigned int>(angle));
+      static_cast<unsigned int>(bx),
+      static_cast<unsigned int>(by),
+      static_cast<unsigned int>(angle) % _dim_3_size);
     // Get the node from the graph
     if (node_getter(index, next)) {
       Coordinates initial_node_coords = (next == prev && !possible_nodes.empty()) ?
         possible_nodes.back().initial_coords : next->pose;
-      proposed_coordinates = {static_cast<float>(reals[0]), static_cast<float>(reals[1]), angle};
+      proposed_coordinates = {bx, by, angle};
       next->setPose(proposed_coordinates);
       if (next->isNodeValid(_traverse_unknown, _collision_checker)) {
         // Save the node, and its previous coordinates in case we need to abort
@@ -426,10 +473,10 @@ AnalyticExpansion<NodeT>::getSingleGearAnalyticPath(
   const NodePtr & goal,
   const NodeGetter & node_getter)
 {
-  const float d_axle = _search_info.rear_axle_offset;
-  if (d_axle <= 0.0f || _motion_model != MotionModel::REEDS_SHEPP) {
+  if (!_search_info.enable_single_gear_analytic || _motion_model != MotionModel::REEDS_SHEPP) {
     return AnalyticExpansionNodes();
   }
+  const float d_axle = _search_info.rear_axle_offset;
 
   const float sx = node->pose.x;
   const float sy = node->pose.y;
@@ -480,7 +527,8 @@ AnalyticExpansion<NodeT>::getSingleGearAnalyticPath(
 
   for (int gear : {1, -1}) {
     const float gear_f = static_cast<float>(gear);
-    const float gear_mult = (gear < 0) ? rev_pen : 1.0f;
+    const float gear_mult = (_search_info.analytic_directional_scoring && gear < 0) ?
+      rev_pen : 1.0f;
     const float ux_s = gear_f * std::cos(syaw);
     const float uy_s = gear_f * std::sin(syaw);
 
@@ -649,7 +697,9 @@ AnalyticExpansion<NodeT>::getSingleGearAnalyticPath(
                 next->setPose(proposed_coordinates);
                 if (next->isNodeValid(_traverse_unknown, _collision_checker)) {
                   const float c = next->getCost();
-                  if (gear > 0 && abs_dyaw >= 2.2f && c > 0.0f) {
+                  if (_search_info.analytic_directional_scoring &&
+                    gear > 0 && abs_dyaw >= 2.2f && c > 0.0f)
+                  {
                     next->setPose(initial_node_coords);
                     failure = true;
                     break;

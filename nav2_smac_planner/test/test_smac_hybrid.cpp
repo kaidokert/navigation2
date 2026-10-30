@@ -311,6 +311,10 @@ TEST(SmacTest, test_smac_rear_axle_180_single_gear_semicircle)
     nodeSE2->set_parameter(rclcpp::Parameter("test.minimum_turning_radius", 0.56));
     nodeSE2->declare_parameter("test.rear_axle_offset", 0.10636);
     nodeSE2->set_parameter(rclcpp::Parameter("test.rear_axle_offset", 0.10636));
+    nodeSE2->declare_parameter("test.analytic_directional_scoring", true);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.analytic_directional_scoring", true));
+    nodeSE2->declare_parameter("test.enable_single_gear_analytic", true);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.enable_single_gear_analytic", true));
     nodeSE2->declare_parameter("test.reverse_penalty", 3.6);
     nodeSE2->set_parameter(rclcpp::Parameter("test.reverse_penalty", 3.6));
     nodeSE2->declare_parameter("test.change_penalty", 2.0);
@@ -379,6 +383,107 @@ TEST(SmacTest, test_smac_rear_axle_180_single_gear_semicircle)
     costmap_ros.reset();
     nodeSE2.reset();
   }
+}
+
+TEST(SmacTest, test_smac_factorial_toggles_a_b_c)
+{
+  auto dummy_cancel_checker = []() {return false;};
+
+  rclcpp_lifecycle::LifecycleNode::SharedPtr nodeSE2 =
+    std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacFactorialToggleTest");
+
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
+    std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(300, 300, 0.02, -3.0, -3.0);
+
+  nodeSE2->declare_parameter("test.downsample_costmap", false);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.downsample_costmap", false));
+  nodeSE2->declare_parameter("test.angle_quantization_bins", 72);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.angle_quantization_bins", 72));
+  nodeSE2->declare_parameter("test.lookup_table_size", 4.0);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.lookup_table_size", 4.0));
+  nodeSE2->declare_parameter("test.minimum_turning_radius", 0.56);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.minimum_turning_radius", 0.56));
+  nodeSE2->declare_parameter("test.reverse_penalty", 2.5);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.reverse_penalty", 2.5));
+  nodeSE2->declare_parameter("test.change_penalty", 0.5);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.change_penalty", 0.5));
+  nodeSE2->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  nodeSE2->set_parameter(
+    rclcpp::Parameter("test.motion_model_for_search", std::string("REEDS_SHEPP")));
+  nodeSE2->declare_parameter("test.smooth_path", false);
+  nodeSE2->set_parameter(rclcpp::Parameter("test.smooth_path", false));
+
+  auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner->configure(nodeSE2, "test", nullptr, costmap_ros);
+  planner->activate();
+
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = "map";
+  start.pose.position.x = 0.0;
+  start.pose.position.y = 0.0;
+  start.pose.orientation.w = 1.0;
+
+  goal.header.frame_id = "map";
+  goal.pose.position.x = 0.0;
+  goal.pose.position.y = 1.05;
+  goal.pose.orientation.z = 1.0;
+  goal.pose.orientation.w = 0.0;
+
+  auto countCusps = [](const nav_msgs::msg::Path & p) {
+      size_t cusps = 0;
+      int prev_gear = 0;
+      for (size_t i = 1; i < p.poses.size(); ++i) {
+        const double dx = p.poses[i].pose.position.x - p.poses[i - 1].pose.position.x;
+        const double dy = p.poses[i].pose.position.y - p.poses[i - 1].pose.position.y;
+        const double step = std::hypot(dx, dy);
+        if (step < 1e-4) {
+          continue;
+        }
+        const double th = tf2::getYaw(p.poses[i - 1].pose.orientation);
+        const double dot = dx * std::cos(th) + dy * std::sin(th);
+        const int gear = (dot < -1e-4) ? -1 : 1;
+        if (prev_gear != 0 && gear != prev_gear) {
+          ++cusps;
+        }
+        prev_gear = gear;
+      }
+      return cusps;
+    };
+
+  // C = 0 (exact OMPL Reeds-Shepp): both B=0 and B=1 produce cusps at 1.05 m < 1.12 m
+  nodeSE2->set_parameters({
+    rclcpp::Parameter("test.rear_axle_offset", 0.0),
+    rclcpp::Parameter("test.analytic_directional_scoring", false),
+    rclcpp::Parameter("test.enable_single_gear_analytic", false)
+  });
+  auto plan_000 = planner->createPlan(start, goal, dummy_cancel_checker);
+  EXPECT_GE(countCusps(plan_000), 1u);
+
+  nodeSE2->set_parameters({
+    rclcpp::Parameter("test.rear_axle_offset", 0.0),
+    rclcpp::Parameter("test.analytic_directional_scoring", true),
+    rclcpp::Parameter("test.enable_single_gear_analytic", false)
+  });
+  auto plan_010 = planner->createPlan(start, goal, dummy_cancel_checker);
+  EXPECT_EQ(countCusps(plan_010), countCusps(plan_000));
+
+  // C = 1 (bounded-tolerance single-gear analytic): produces 0 cusps
+  nodeSE2->set_parameters({
+    rclcpp::Parameter("test.rear_axle_offset", 0.10636),
+    rclcpp::Parameter("test.analytic_directional_scoring", true),
+    rclcpp::Parameter("test.enable_single_gear_analytic", true)
+  });
+  auto plan_111 = planner->createPlan(start, goal, dummy_cancel_checker);
+  EXPECT_EQ(countCusps(plan_111), 0u);
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros.reset();
+  nodeSE2.reset();
 }
 
 TEST(SmacTest, test_smac_costmap_mutation_throws)
