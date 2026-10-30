@@ -103,6 +103,17 @@ public:
     const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space);
 
   /**
+   * @brief Attempt a single-gear (zero-cusp) Ackermann analytic expansion in rear-axle space
+   * @param node The node to start the analytic path from
+   * @param goal The goal node to plan to
+   * @param getter The function object that gets valid nodes from the graph
+   * @return A set of analytically expanded nodes to the goal from current node, if possible
+   */
+  AnalyticExpansionNodes getSingleGearAnalyticPath(
+    const NodePtr & node, const NodePtr & goal,
+    const NodeGetter & getter);
+
+  /**
    * @brief Takes final analytic expansion and appends to current expanded node
    * @param node The node to start the analytic path from
    * @param goal The goal node to plan to

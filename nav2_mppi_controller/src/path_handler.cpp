@@ -892,16 +892,28 @@ bool PathHandler::isWithinInversionTolerances(
     tf2::getYaw(last_pose.pose.orientation));
 
   // Relax yaw tolerance for micro-cusps: segments shorter than the threshold
-  // are planner artifacts, not meaningful maneuvers. Demanding precise yaw
-  // alignment on a 4cm segment overconstrains the Ackermann controller.
-  // For intermediate short segments (15-30 cm), require the segment to be
-  // consumed down to <= 2 poses before unlocking the micro-cusp yaw gate so
-  // the controller does not discard the second half of a 26-29 cm positioning
-  // leg as soon as it enters the 15 cm Euclidean cusp radius.
+  const double cusp_yaw = tf2::getYaw(last_pose.pose.orientation);
+  const double travel_yaw = current_segment_is_reverse_ ?
+    angles::normalize_angle(cusp_yaw + M_PI) : cusp_yaw;
+  const double dx_to_cusp = last_pose.pose.position.x - robot_pose.pose.position.x;
+  const double dy_to_cusp = last_pose.pose.position.y - robot_pose.pose.position.y;
+  const double along_track_remaining =
+    dx_to_cusp * std::cos(travel_yaw) + dy_to_cusp * std::sin(travel_yaw);
+  const double cross_track_offset = std::fabs(
+    -dx_to_cusp * std::sin(travel_yaw) + dy_to_cusp * std::cos(travel_yaw));
+
+  // True planner-jitter micro-cusps (<= exhausted_along_track_threshold_ = 3 cm)
+  // are planner artifacts, not meaningful maneuvers. For real short positioning
+  // segments (3-30 cm), require the robot to actually consume the segment down
+  // to the cusp (<= 1 pose remaining or along_track_remaining <= cusp_along_track_threshold_)
+  // before unlocking the micro-cusp yaw gate, preventing premature handoff at t=0
+  // on 6-15 cm initial Reeds-Shepp positioning legs.
   const bool is_micro_cusp =
     (current_segment_length_ < micro_cusp_length_threshold_) &&
-    (current_segment_length_ <= static_cast<double>(inversion_xy_tolerance_) ||
-    global_plan_up_to_inversion_.poses.size() <= 1u);
+    (current_segment_length_ <= exhausted_along_track_threshold_ ||
+    global_plan_up_to_inversion_.poses.size() <= 1u ||
+    along_track_remaining <= std::max(
+      cusp_along_track_threshold_, 0.35 * current_segment_length_));
   const double effective_yaw_tol = is_micro_cusp ?
     inversion_yaw_tolerance_ * micro_cusp_yaw_scale_ :
     inversion_yaw_tolerance_;
@@ -928,16 +940,6 @@ bool PathHandler::isWithinInversionTolerances(
   // dominates over remaining along-track distance inside inversion_xy_tolerance_)
   // from premature longitudinal pruning on a sparse path (where the robot is
   // still longitudinally short of the cusp along-track).
-  const double cusp_yaw = tf2::getYaw(last_pose.pose.orientation);
-  const double travel_yaw = current_segment_is_reverse_ ?
-    angles::normalize_angle(cusp_yaw + M_PI) : cusp_yaw;
-  const double dx_to_cusp = last_pose.pose.position.x - robot_pose.pose.position.x;
-  const double dy_to_cusp = last_pose.pose.position.y - robot_pose.pose.position.y;
-  const double along_track_remaining =
-    dx_to_cusp * std::cos(travel_yaw) + dy_to_cusp * std::sin(travel_yaw);
-  const double cross_track_offset = std::fabs(
-    -dx_to_cusp * std::sin(travel_yaw) + dy_to_cusp * std::cos(travel_yaw));
-
   const bool is_segment_exhausted =
     (global_plan_up_to_inversion_.poses.size() <= 1u) && !terminal_stub_aligned_;
   const bool is_lateral_exhausted = is_segment_exhausted &&
@@ -981,11 +983,14 @@ bool PathHandler::isWithinInversionTolerances(
     exhausted_along_track_cycles_ = 0u;
     has_last_exhausted_check_pose_ = false;
   }
+  const double active_along_track_tol = is_micro_cusp ?
+    std::max(cusp_along_track_threshold_, 0.35 * current_segment_length_) :
+    cusp_along_track_threshold_;
   const bool premature_along_track =
-    (current_segment_length_ > static_cast<double>(inversion_xy_tolerance_)) &&
-    ((!is_segment_exhausted && along_track_remaining > cusp_along_track_threshold_) ||
+    (current_segment_length_ > exhausted_along_track_threshold_) &&
+    ((!is_segment_exhausted && along_track_remaining > active_along_track_tol) ||
     (is_segment_exhausted && !is_lateral_exhausted &&
-    along_track_remaining > cusp_along_track_threshold_) ||
+    along_track_remaining > active_along_track_tol) ||
     (is_lateral_exhausted && along_track_remaining > exhausted_along_track_threshold_ &&
     exhausted_along_track_cycles_ <=
     static_cast<unsigned int>(std::max(exhausted_along_track_hold_cycles_, 0))));

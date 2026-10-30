@@ -219,6 +219,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
     optimize(diag);
   } while (fallback(critics_data_.fail_flag));
 
+  const models::ControlSequence pre_sg_sequence = control_sequence_;
+
   // [E] POST-OPTIMIZE (after softmax + accel constraints)
   if (diag && ts >= 5) {
     RCLCPP_DEBUG(logger_,
@@ -239,7 +241,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
-  auto control = getValidatedControlFromSequenceAsTwist(plan.header.stamp);
+  auto control = getValidatedControlFromSequenceAsTwist(plan.header.stamp, &pre_sg_sequence);
 
   // [G] FINAL CMD_VEL
   if (diag) {
@@ -696,20 +698,86 @@ bool Optimizer::controlSequenceCollisionFree() const
   return true;
 }
 
-geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwist(
-  const builtin_interfaces::msg::Time & stamp)
+bool Optimizer::recoverCollisionFreeControlSequence(
+  const models::ControlSequence & pre_sg_sequence)
 {
+  control_sequence_ = pre_sg_sequence;
+  if (controlSequenceFinite()) {
+    motion_model_->applyConstraints(control_sequence_);
+    if (controlSequenceCollisionFree()) {
+      return true;
+    }
+  }
+  if (!critics_data_.fail_flag &&
+    costs_.size() == settings_.batch_size && settings_.batch_size > 0)
+  {
+    const size_t n = settings_.time_steps;
+    const size_t offset = settings_.shift_control_sequence ? 1u : 0u;
+    const size_t batch = settings_.batch_size;
+    const size_t max_candidates = std::min<size_t>(batch, 24u);
+    std::vector<size_t> order(batch);
+    std::iota(order.begin(), order.end(), 0u);
+    std::partial_sort(
+      order.begin(), order.begin() + max_candidates, order.end(),
+      [this](size_t a, size_t b) {
+        const bool af = std::isfinite(costs_(a));
+        const bool bf = std::isfinite(costs_(b));
+        if (af != bf) {
+          return af;
+        }
+        return af && (costs_(a) < costs_(b));
+      });
+    for (size_t rank = 0; rank < max_candidates; ++rank) {
+      const size_t idx = order[rank];
+      if (!std::isfinite(costs_(idx))) {
+        break;
+      }
+      if (offset > 0u) {
+        control_sequence_.vx(0) = static_cast<float>(state_.speed.linear.x);
+        control_sequence_.wz(0) = static_cast<float>(state_.speed.angular.z);
+        if (isHolonomic()) {
+          control_sequence_.vy(0) = static_cast<float>(state_.speed.linear.y);
+        }
+      }
+      for (size_t j = offset; j < n; ++j) {
+        const size_t src = j - offset;
+        control_sequence_.vx(j) = state_.cvx(idx, src);
+        control_sequence_.wz(j) = state_.cwz(idx, src);
+        if (isHolonomic()) {
+          control_sequence_.vy(j) = state_.cvy(idx, src);
+        }
+      }
+      if (controlSequenceFinite()) {
+        applyControlSequenceConstraints();
+        if (controlSequenceCollisionFree()) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwist(
+  const builtin_interfaces::msg::Time & stamp,
+  const models::ControlSequence * pre_sg_sequence)
+{
+  bool valid = false;
   // Validate raw controls before clamping can turn NaN/Inf into a finite bound.
   if (controlSequenceFinite()) {
     // Smoothing follows optimization and can invalidate the Ackermann cone.
     // No velocity or steering adjustment is permitted after this validation.
     applyControlSequenceConstraints();
-    if (controlSequenceCollisionFree()) {
-      const auto control = getControlFromSequenceAsTwist(stamp);
-      control_history_.back() = {static_cast<float>(control.twist.linear.x),
-        static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
-      return control;
-    }
+    valid = controlSequenceCollisionFree();
+  }
+  if (!valid && pre_sg_sequence != nullptr) {
+    valid = recoverCollisionFreeControlSequence(*pre_sg_sequence);
+  }
+  if (valid) {
+    const auto control = getControlFromSequenceAsTwist(stamp);
+    control_history_.back() = {static_cast<float>(control.twist.linear.x),
+      static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
+    return control;
   }
   control_sequence_.reset(settings_.time_steps);
   control_history_.fill({0.0f, 0.0f, 0.0f});

@@ -237,10 +237,19 @@ protected:
   bool controlSequenceCollisionFree() const;
 
   /**
+   * @brief Recover a collision-free control sequence from pre-SG or top-ranked
+   * sampled rollouts when Savitzky-Golay smoothing or bimodal softmax averaging
+   * pushes the rollout into a lethal obstacle.
+   */
+  bool recoverCollisionFreeControlSequence(const models::ControlSequence & pre_sg_sequence);
+
+  /**
    * @brief Apply final constraints and veto colliding output before conversion.
    */
   geometry_msgs::msg::TwistStamped
-  getValidatedControlFromSequenceAsTwist(const builtin_interfaces::msg::Time & stamp);
+  getValidatedControlFromSequenceAsTwist(
+    const builtin_interfaces::msg::Time & stamp,
+    const models::ControlSequence * pre_sg_sequence = nullptr);
 
   bool controlSequenceFinite() const;
 

@@ -280,6 +280,107 @@ TEST(SmacTest, test_smac_m5_terminal_density)
   nodeSE2.reset();
 }
 
+TEST(SmacTest, test_smac_rear_axle_180_single_gear_semicircle)
+{
+  auto dummy_cancel_checker = []() {return false;};
+
+  // Test across multiple grid resolutions (2 cm, 4 cm, 5 cm) with polygon footprint
+  // and across yaw=0 boundary (verifying no out-of-bounds angle bin on tiny negative angles).
+  for (double res : {0.02, 0.04, 0.05}) {
+    rclcpp_lifecycle::LifecycleNode::SharedPtr nodeSE2 =
+      std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacRearAxle180Test");
+
+    std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros =
+      std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+    costmap_ros->set_parameter(
+      rclcpp::Parameter(
+        "footprint",
+        std::string("[[0.170,0.151],[0.170,-0.151],[-0.156,-0.151],[-0.156,0.151]]")));
+    costmap_ros->on_configure(rclcpp_lifecycle::State());
+
+    const unsigned int cells = static_cast<unsigned int>(std::ceil(6.0 / res));
+    costmap_ros->getCostmap()->resizeMap(cells, cells, res, -3.0, -3.0);
+
+    nodeSE2->declare_parameter("test.downsample_costmap", false);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.downsample_costmap", false));
+    nodeSE2->declare_parameter("test.angle_quantization_bins", 72);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.angle_quantization_bins", 72));
+    nodeSE2->declare_parameter("test.lookup_table_size", 4.0);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.lookup_table_size", 4.0));
+    nodeSE2->declare_parameter("test.minimum_turning_radius", 0.56);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.minimum_turning_radius", 0.56));
+    nodeSE2->declare_parameter("test.rear_axle_offset", 0.10636);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.rear_axle_offset", 0.10636));
+    nodeSE2->declare_parameter("test.reverse_penalty", 3.6);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.reverse_penalty", 3.6));
+    nodeSE2->declare_parameter("test.change_penalty", 2.0);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.change_penalty", 2.0));
+    nodeSE2->declare_parameter("test.cost_penalty", 3.5);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.cost_penalty", 3.5));
+    nodeSE2->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+    nodeSE2->set_parameter(
+      rclcpp::Parameter("test.motion_model_for_search", std::string("REEDS_SHEPP")));
+    nodeSE2->declare_parameter("test.smooth_path", true);
+    nodeSE2->set_parameter(rclcpp::Parameter("test.smooth_path", true));
+
+    auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+    planner->configure(nodeSE2, "test", nullptr, costmap_ros);
+    planner->activate();
+
+    // Case A: Forward-right 180 semicircle goal generated around rear axle (x_rear = -0.10636 m)
+    geometry_msgs::msg::PoseStamped start, goal;
+    start.header.frame_id = "map";
+    start.pose.position.x = 1.132;
+    start.pose.position.y = 0.369;
+    const double start_yaw = -M_PI_2;
+    start.pose.orientation.z = std::sin(start_yaw / 2.0);
+    start.pose.orientation.w = std::cos(start_yaw / 2.0);
+
+    goal.header.frame_id = "map";
+    goal.pose.position.x = 0.080;
+    goal.pose.position.y = 0.350;
+    const double goal_yaw = M_PI_2;
+    goal.pose.orientation.z = std::sin(goal_yaw / 2.0);
+    goal.pose.orientation.w = std::cos(goal_yaw / 2.0);
+
+    nav_msgs::msg::Path plan = planner->createPlan(start, goal, dummy_cancel_checker);
+    ASSERT_GT(plan.poses.size(), 10u) << "res=" << res;
+
+    size_t reversals = 0;
+    for (size_t i = 1; i < plan.poses.size(); ++i) {
+      const double dx = plan.poses[i].pose.position.x - plan.poses[i - 1].pose.position.x;
+      const double dy = plan.poses[i].pose.position.y - plan.poses[i - 1].pose.position.y;
+      const double th = tf2::getYaw(plan.poses[i - 1].pose.orientation);
+      const double dot = dx * std::cos(th) + dy * std::sin(th);
+      if (dot < -1e-4) {
+        ++reversals;
+      }
+    }
+    EXPECT_EQ(reversals, 0u)
+      << "Expected single-gear forward 180 arc with zero reverse steps at res=" << res;
+
+    // Case B: 180 semicircle ending at yaw = 0.0 (testing tiny negative angle wrap near 2*pi)
+    start.pose.position.x = -0.10636;
+    start.pose.position.y = 1.050;
+    start.pose.orientation.z = 1.0;
+    start.pose.orientation.w = 0.0;  // yaw = pi
+    goal.pose.position.x = 0.10636;
+    goal.pose.position.y = 0.0;
+    goal.pose.orientation.z = 0.0;
+    goal.pose.orientation.w = 1.0;   // yaw = 0.0 (dth_off = -0.045 / 0.0 crosses 0 / 2*pi)
+
+    nav_msgs::msg::Path plan_zero_yaw = planner->createPlan(start, goal, dummy_cancel_checker);
+    EXPECT_GT(plan_zero_yaw.poses.size(), 10u) << "res=" << res;
+
+    planner->deactivate();
+    planner->cleanup();
+    planner.reset();
+    costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+    costmap_ros.reset();
+    nodeSE2.reset();
+  }
+}
+
 TEST(SmacTest, test_smac_costmap_mutation_throws)
 {
   rclcpp_lifecycle::LifecycleNode::SharedPtr nodeSE2 =

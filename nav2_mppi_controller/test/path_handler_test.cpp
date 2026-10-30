@@ -1330,3 +1330,50 @@ TEST(PathHandlerTests, StrandedHandoffFiresOnlyInsideRadiusAfterCycles)
     EXPECT_EQ(handler->getInversionLocale(), locale);
   }
 }
+
+TEST(PathHandlerTests, ShortInitialPositioningSegmentDrivesBeforeMicroCuspHandoff)
+{
+  PathHandlerWrapper handler;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("short_pos_seg_node");
+  node->declare_parameter("dummy.max_robot_pose_search_dist", rclcpp::ParameterValue(99999.9));
+  node->declare_parameter("dummy.enforce_path_inversion", rclcpp::ParameterValue(true));
+  node->declare_parameter("dummy.inversion_xy_tolerance", rclcpp::ParameterValue(0.15));
+  node->declare_parameter("dummy.inversion_yaw_tolerance", rclcpp::ParameterValue(0.262));
+  node->declare_parameter("dummy.micro_cusp_length_threshold", rclcpp::ParameterValue(0.30));
+  node->declare_parameter("dummy.micro_cusp_yaw_scale", rclcpp::ParameterValue(7.5));
+  node->declare_parameter("dummy.cusp_along_track_threshold", rclcpp::ParameterValue(0.015));
+  node->declare_parameter("dummy.exhausted_along_track_threshold", rclcpp::ParameterValue(0.03));
+  node->declare_parameter("dummy.min_inversion_horizon", rclcpp::ParameterValue(0.30));
+  auto costmap_ros = makeConfiguredCostmapRos();
+  ParametersHandler param_handler(node);
+
+  handler.initialize(node, "dummy", costmap_ros, costmap_ros->getTfBuffer(), &param_handler);
+  publishIdentityTf(node, costmap_ros->getTfBuffer());
+
+  // 10 cm initial forward positioning arc (x=0.20 -> x=0.30, yaw=0.0 -> 0.18),
+  // followed by a reverse arc (x=0.30 -> x=0.10). Even though 10 cm <= 0.15 m
+  // and < micro_cusp_length_threshold (0.30 m), the controller must NOT hand
+  // off at t=0 (x=0.20) while 10 cm of along-track distance remains.
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makeYawPose(0.20, 0.20, 0.0));
+  path.poses.push_back(makeYawPose(0.25, 0.20, 0.09));
+  path.poses.push_back(makeYawPose(0.30, 0.20, 0.18));  // cusp at x=0.30 (10cm from start)
+  path.poses.push_back(makeYawPose(0.20, 0.25, 0.35));  // reverse segment
+  path.poses.push_back(makeYawPose(0.10, 0.35, 0.55));
+  handler.setPath(path);
+  ASSERT_EQ(handler.getInversionLocale(), 3u);
+
+  // At start pose (x=0.20, y=0.20, yaw=0.0): dist_to_cusp = 0.10m <= 0.15m,
+  // but along_track_remaining > 0.015m and poses.size() == 3 -> must NOT hand off!
+  handler.transformPath(makeYawPose(0.20, 0.20, 0.0, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 3u)
+    << "10cm positioning segment must not hand off at t=0 before robot drives to cusp";
+
+  // Once the robot drives within 1cm along-track of the cusp (x=0.292, y=0.20),
+  // even with a 0.45 rad yaw error (> 0.262 rad normal gate, <= 7.5*0.262 micro gate),
+  // is_micro_cusp unlocks and hands off cleanly to the reverse segment.
+  handler.transformPath(makeYawPose(0.292, 0.20, -0.27, "odom"));
+  EXPECT_EQ(handler.getInversionLocale(), 0u)
+    << "10cm positioning segment must hand off with micro-cusp yaw gate once robot reaches cusp";
+}

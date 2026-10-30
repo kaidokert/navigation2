@@ -111,6 +111,9 @@ void SmacPlannerHybrid::configure(
     node, name + ".minimum_turning_radius", rclcpp::ParameterValue(0.4));
   node->get_parameter(name + ".minimum_turning_radius", _minimum_turning_radius_global_coords);
   nav2_util::declare_parameter_if_not_declared(
+    node, name + ".rear_axle_offset", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".rear_axle_offset", _rear_axle_offset_global_coords);
+  nav2_util::declare_parameter_if_not_declared(
     node, name + ".allow_primitive_interpolation", rclcpp::ParameterValue(false));
   node->get_parameter(
     name + ".allow_primitive_interpolation", _search_info.allow_primitive_interpolation);
@@ -208,6 +211,8 @@ void SmacPlannerHybrid::configure(
   }
   _search_info.minimum_turning_radius =
     _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+  _search_info.rear_axle_offset =
+    _rear_axle_offset_global_coords / (_costmap->getResolution() * _downsampling_factor);
   _lookup_table_dim =
     static_cast<float>(_lookup_table_size) /
     static_cast<float>(_costmap->getResolution() * _downsampling_factor);
@@ -670,6 +675,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".analytic_expansion_max_cost") {
         reinit_a_star = true;
         _search_info.analytic_expansion_max_cost = static_cast<float>(parameter.as_double());
+      } else if (name == _name + ".rear_axle_offset") {
+        reinit_a_star = true;
+        _rear_axle_offset_global_coords = parameter.as_double();
       } else if (name == "resolution") {
         // Special case: When the costmap's resolution changes, need to reinitialize
         // the controller to have new resolution information
@@ -758,6 +766,8 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     }
     _search_info.minimum_turning_radius =
       _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+    _search_info.rear_axle_offset =
+      _rear_axle_offset_global_coords / (_costmap->getResolution() * _downsampling_factor);
     _lookup_table_dim =
       static_cast<float>(_lookup_table_size) /
       static_cast<float>(_costmap->getResolution() * _downsampling_factor);

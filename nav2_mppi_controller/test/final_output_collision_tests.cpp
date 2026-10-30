@@ -58,10 +58,19 @@ public:
     control_sequence_.wz.fill(wz);
   }
   bool clear() {return controlSequenceCollisionFree();}
-  auto emit() {return getValidatedControlFromSequenceAsTwist(builtin_interfaces::msg::Time{});}
+  auto emit(const mppi::models::ControlSequence * pre_sg = nullptr)
+  {
+    return getValidatedControlFromSequenceAsTwist(builtin_interfaces::msg::Time{}, pre_sg);
+  }
   void smooth() {mppi::utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);}
+  bool recover(const mppi::models::ControlSequence & pre_sg)
+  {
+    return recoverCollisionFreeControlSequence(pre_sg);
+  }
   using Optimizer::control_sequence_;
   using Optimizer::control_history_;
+  using Optimizer::costs_;
+  using Optimizer::critics_data_;
   using Optimizer::motion_model_;
   using Optimizer::settings_;
   using Optimizer::state_;
@@ -129,10 +138,85 @@ TEST_F(FinalOutputTest, SmoothingCanMakeSafeStoppedSequenceCollide)
   obstacle(0.21, 0.0);
   opt.sequence(0.0f);
   ASSERT_TRUE(opt.clear());
+  const auto pre_sg = opt.control_sequence_;
   opt.control_history_.fill({0.5f, 0.0f, 0.0f});
   opt.smooth();
   ASSERT_GT(opt.control_sequence_.vx(0), 0.1f);
   EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  // Pre-SG recovery restores the collision-free stopped sequence before veto.
+  opt.sequence(0.0f);
+  opt.control_history_.fill({0.5f, 0.0f, 0.0f});
+  opt.smooth();
+  EXPECT_TRUE(opt.recover(pre_sg));
+  EXPECT_NO_THROW(opt.emit());
+}
+
+TEST_F(FinalOutputTest, BimodalCollidingMeanRecoversLowestCostSampledRollout)
+{
+  opt.settings_.batch_size = 2;
+  opt.state_.reset(2, opt.settings_.time_steps);
+  opt.state_.pose.pose.orientation.w = 1.0;
+  opt.state_.speed.linear.x = 0.3;
+  opt.costs_ = xt::zeros<float>({2});
+  opt.costs_(0) = 15.0f;
+  opt.costs_(1) = 10.0f;
+  opt.critics_data_.fail_flag = false;
+  obstacle(0.8, 0.0);
+
+  // Sample 0 curves left (clear), Sample 1 curves right (clear, lower cost).
+  xt::view(opt.state_.cvx, 0, xt::all()).fill(0.3f);
+  xt::view(opt.state_.cwz, 0, xt::all()).fill(0.6f);
+  xt::view(opt.state_.cvx, 1, xt::all()).fill(0.3f);
+  xt::view(opt.state_.cwz, 1, xt::all()).fill(-0.6f);
+
+  // Mean is straight ahead into the obstacle at (0.8, 0.0).
+  opt.sequence(0.3f, 0.0f);
+  const auto pre_sg = opt.control_sequence_;
+  ASSERT_FALSE(opt.clear());
+  const auto cmd = opt.emit(&pre_sg);
+  EXPECT_NEAR(cmd.twist.angular.z, -0.6, 1e-4);
+}
+
+TEST_F(FinalOutputTest, AckermannShiftedRecoveryIsSinglePassAndHandlesNaNCosts)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ackermann_recovery_test");
+  mppi::ParametersHandler ph(node);
+  node->declare_parameter("t.AckermannConstraints.min_turning_r", 0.5);
+  opt.configure(cm, true, 25);
+  opt.motion_model_ = std::make_shared<mppi::AckermannMotionModel>(&ph, "t");
+  opt.settings_.constraints.ax_max = 10.0f;
+  opt.settings_.constraints.az_max = 6.5f;
+  opt.syncModel();
+
+  opt.settings_.batch_size = 3;
+  opt.state_.reset(3, opt.settings_.time_steps);
+  opt.state_.pose.pose.orientation.w = 1.0;
+  opt.state_.speed.linear.x = 0.10;
+  opt.state_.speed.angular.z = 0.05;
+  opt.costs_ = xt::zeros<float>({3});
+  opt.costs_(0) = std::numeric_limits<float>::quiet_NaN();
+  opt.costs_(1) = 15.0f;
+  opt.costs_(2) = 10.0f;
+  opt.critics_data_.fail_flag = false;
+  obstacle(0.73, 0.0);
+
+  // Sample 0 has NaN cost; Sample 1 curves left (clear); Sample 2 curves right (clear, lower cost).
+  xt::view(opt.state_.cvx, 0, xt::all()).fill(0.3f);
+  xt::view(opt.state_.cwz, 0, xt::all()).fill(0.0f);
+  xt::view(opt.state_.cvx, 1, xt::all()).fill(0.3f);
+  xt::view(opt.state_.cwz, 1, xt::all()).fill(0.6f);
+  xt::view(opt.state_.cvx, 2, xt::all()).fill(0.3f);
+  xt::view(opt.state_.cwz, 2, xt::all()).fill(-0.6f);
+
+  // Colliding pre-SG and post-SG straight sequences.
+  opt.sequence(0.3f, 0.0f);
+  const auto pre_sg = opt.control_sequence_;
+  ASSERT_FALSE(opt.clear());
+  const auto cmd = opt.emit(&pre_sg);
+  // Slot 0 was anchored at state_.speed (vx=0.10, wz=0.05), and Slot 1 (emitted when
+  // shift_control_sequence=true) stepped by az_max*dt=0.65 from +0.05 to -0.60 on a single pass.
+  EXPECT_NEAR(cmd.twist.linear.x, 0.3, 1e-4);
+  EXPECT_NEAR(cmd.twist.angular.z, -0.6, 1e-4);
 }
 
 TEST_F(FinalOutputTest, ValidationStartsWithActualShiftedCommand)
