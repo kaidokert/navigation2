@@ -210,6 +210,18 @@ TEST(SmacFactors, length_direction_score_weights_reverse_and_cusps)
   // cost penalty, linear: each step x (1 + 3.5 * 0.5)
   EXPECT_NEAR(expander.lengthDirectionScore(build({10, 11, 12}, 20.0f)), 2.0f * 2.75f, 1e-3);
 
+  // length_direction_cusp: each change of gear adds change_penalty x radius (2 x 10 cells), so a
+  // sliver of reverse no longer scores like a single-gear path
+  info.analytic_score_cusp_cost = true;
+  Expansion cusp_expander(nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, 72);
+  EXPECT_NEAR(cusp_expander.lengthDirectionScore(build({10, 11, 12, 13})), 3.0f, 1e-4);
+  EXPECT_NEAR(
+    cusp_expander.lengthDirectionScore(build({10, 11, 12, 11})),
+    2.0f + 3.6f * (1.0f + 2.0f) + 2.0f * 10.0f, 1e-3);
+  EXPECT_GT(
+    cusp_expander.lengthDirectionScore(build({10, 11, 12, 13, 12.99f})),
+    cusp_expander.lengthDirectionScore(build({10, 11, 12, 13})) + 19.0f);
+
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
 }
 

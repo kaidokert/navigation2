@@ -254,7 +254,10 @@ float AnalyticExpansion<NodeHybrid>::lengthDirectionScore(const AnalyticExpansio
 {
   // True length of every step, weighted like a search primitive: cost penalty, reverse
   // penalty on steps that move against the heading, change penalty on the first step after
-  // a change of gear.
+  // a change of gear. With analytic_score_cusp_cost every change of gear also costs a fixed
+  // change_penalty x minimum turning radius (cells): a cusp is a stop and a gear change for the
+  // robot whatever the length of the segment after it, so a millimetre-long sliver must not
+  // make a two-gear word score like a single-gear one.
   auto & table = expansion[0].node->motion_table;
   float score = 0.0f;
   int previous_gear = 0;
@@ -281,6 +284,9 @@ float AnalyticExpansion<NodeHybrid>::lengthDirectionScore(const AnalyticExpansio
     }
     if (previous_gear != 0 && gear != previous_gear) {
       step *= 1.0f + _search_info.change_penalty;
+      if (_search_info.analytic_score_cusp_cost) {
+        score += _search_info.change_penalty * table.min_turning_radius;
+      }
     }
     previous_gear = gear;
     score += step;
