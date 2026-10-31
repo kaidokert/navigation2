@@ -124,6 +124,8 @@ protected:
   double _max_planning_time;
   double _lookup_table_size;
   double _minimum_turning_radius_global_coords;
+  double _rear_axle_offset;
+  std::string _analytic_score;
   bool _debug_visualizations;
   bool _publish_analytic_expansion_trace{false};
   uint64_t _trace_plan_id{0};

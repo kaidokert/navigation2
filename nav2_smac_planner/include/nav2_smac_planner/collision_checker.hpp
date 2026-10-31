@@ -69,6 +69,15 @@ public:
     const double & possible_collision_cost);
 
   /**
+   * @brief Set the distance from the planned point back to the costmap's robot frame.
+   * With a nonzero offset, poses passed to inCollision(x, y, theta, ...) are the planned
+   * point (e.g. the rear axle), and the footprint and center cost are evaluated at the
+   * robot frame origin, offset cells ahead along the pose's heading.
+   * @param offset Offset in costmap cells, 0 (default) checks at the given pose
+   */
+  void setReferenceOffset(const float & offset);
+
+  /**
    * @brief Check if in collision with costmap and footprint at pose
    * @param x X coordinate of pose to check against
    * @param y Y coordinate of pose to check against
@@ -129,6 +138,9 @@ protected:
   float center_cost_;
   bool footprint_is_radius_{false};
   std::vector<float> angles_;
+  float reference_offset_{0.0f};
+  std::vector<float> reference_dx_;
+  std::vector<float> reference_dy_;
   float possible_collision_cost_{-1};
   rclcpp::Logger logger_{rclcpp::get_logger("SmacPlannerCollisionChecker")};
   rclcpp::Clock::SharedPtr clock_;

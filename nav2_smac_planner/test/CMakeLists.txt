@@ -86,6 +86,17 @@ target_link_libraries(test_smac_hybrid
   ${library_name}
 )
 
+# Test SMAC hybrid opt-in factors (rear_axle_offset, analytic_score)
+ament_add_gtest(test_smac_factors
+  test_smac_factors.cpp
+)
+ament_target_dependencies(test_smac_factors
+  ${dependencies}
+)
+target_link_libraries(test_smac_factors
+  ${library_name}
+)
+
 # Test SMAC 2D
 ament_add_gtest(test_smac_2d
   test_smac_2d.cpp
