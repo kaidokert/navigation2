@@ -177,7 +177,6 @@ bool GridCollisionChecker::inCollision(
   const unsigned int & i,
   const bool & traverse_unknown)
 {
-  center_cost_ = std::numeric_limits<float>::quiet_NaN();
   center_cost_ = costmap_->getCost(i);
   if (center_cost_ == UNKNOWN && traverse_unknown) {
     return false;
