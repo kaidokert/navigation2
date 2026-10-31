@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. Reserved.
 
+#include <cmath>
+
 #include "nav2_smac_planner/collision_checker.hpp"
 
 #include <cmath>
@@ -104,12 +106,39 @@ void GridCollisionChecker::setFootprint(
   unoriented_footprint_ = footprint;
 }
 
+void GridCollisionChecker::setReferenceOffset(const float & offset)
+{
+  if (offset == reference_offset_) {
+    return;
+  }
+  reference_offset_ = offset;
+  reference_dx_.clear();
+  reference_dy_.clear();
+  if (offset == 0.0f) {
+    return;
+  }
+  reference_dx_.reserve(angles_.size());
+  reference_dy_.reserve(angles_.size());
+  for (const float & angle : angles_) {
+    reference_dx_.push_back(offset * std::cos(angle));
+    reference_dy_.push_back(offset * std::sin(angle));
+  }
+}
+
 bool GridCollisionChecker::inCollision(
-  const float & x,
-  const float & y,
+  const float & x_in,
+  const float & y_in,
   const float & angle_bin,
   const bool & traverse_unknown)
 {
+  float x = x_in;
+  float y = y_in;
+  if (!reference_dx_.empty()) {
+    const unsigned int bin = static_cast<unsigned int>(angle_bin) % reference_dx_.size();
+    x += reference_dx_[bin];
+    y += reference_dy_[bin];
+  }
+
   // Do not expose the previous sample's cost if this query exits before reading a cell.
   center_cost_ = std::numeric_limits<float>::quiet_NaN();
   // Check to make sure cell is inside the map

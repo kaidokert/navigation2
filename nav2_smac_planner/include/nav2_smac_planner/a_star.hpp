@@ -151,7 +151,8 @@ public:
   void setStart(
     const float & mx,
     const float & my,
-    const unsigned int & dim_3);
+    const unsigned int & dim_3,
+    const float & continuous_dim_3 = -1.0f);
 
   /**
    * @brief Get maximum number of iterations to plan
