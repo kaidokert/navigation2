@@ -153,6 +153,9 @@ void SmacPlannerHybrid::configure(
     _analytic_score = "stock";
   }
   _search_info.analytic_score_length_direction = (_analytic_score == "length_direction");
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_single_gear", rclcpp::ParameterValue(false));
+  node->get_parameter(name + ".analytic_single_gear", _search_info.analytic_single_gear);
   if (_rear_axle_offset > 0.0 && smooth_path) {
     RCLCPP_WARN(
       _logger, "rear_axle_offset > 0 with smooth_path: the smoother treats the robot frame origin "
@@ -661,6 +664,16 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     }
     plan.poses.push_back(pose);
   }
+  // The start and goal nodes carry quantized headings, so moving them forward from the rear axle
+  // misses the requested robot-frame pose by up to axle * half a bin, a millimetre step that can
+  // point against the path. Their rear-axle points came from the exact poses: restore those.
+  if (axle != 0.0 && !plan.poses.empty()) {
+    plan.poses.front().pose = start.pose;
+    const auto & last = path.front();
+    if (std::hypot(last.x - mx_goal, last.y - my_goal) < 1e-3) {
+      plan.poses.back().pose = goal.pose;
+    }
+  }
 
   // Publish raw path for debug
   if (_raw_plan_publisher->get_subscription_count() > 0) {
@@ -866,6 +879,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         _search_info.cache_obstacle_heuristic = parameter.as_bool();
       } else if (name == _name + ".allow_primitive_interpolation") {
         _search_info.allow_primitive_interpolation = parameter.as_bool();
+        reinit_a_star = true;
+      } else if (name == _name + ".analytic_single_gear") {
+        _search_info.analytic_single_gear = parameter.as_bool();
         reinit_a_star = true;
       } else if (name == _name + ".smooth_path") {
         if (parameter.as_bool()) {

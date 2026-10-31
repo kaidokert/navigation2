@@ -19,9 +19,11 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "ompl/base/spaces/DubinsStateSpace.h"
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
@@ -279,4 +281,221 @@ TEST(SmacFactors, rear_axle_offset_plans_for_the_rear_axle)
   planner->cleanup();
   planner.reset();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
+
+namespace
+{
+
+// Robot-frame pose of a rear-axle U-turn: the rear axle ends `lateral` to the left, level with
+// its start, heading reversed. offset_lon / offset_yaw perturb the goal (start frame).
+geometry_msgs::msg::PoseStamped uTurnGoal(
+  const geometry_msgs::msg::PoseStamped & start, double axle, double lateral,
+  double offset_lon = 0.0, double offset_yaw = 0.0)
+{
+  const double yaw = tf2::getYaw(start.pose.orientation);
+  const double rx = start.pose.position.x - axle * cos(yaw);
+  const double ry = start.pose.position.y - axle * sin(yaw);
+  const double gx = rx + offset_lon * cos(yaw) - lateral * sin(yaw);
+  const double gy = ry + offset_lon * sin(yaw) + lateral * cos(yaw);
+  const double gyaw = yaw + M_PI + offset_yaw;
+  return makePose(gx + axle * cos(gyaw), gy + axle * sin(gyaw), gyaw);
+}
+
+nav_msgs::msg::Path subPath(const nav_msgs::msg::Path & plan, size_t first, size_t count)
+{
+  nav_msgs::msg::Path out;
+  for (size_t i = first; i < first + count && i < plan.poses.size(); ++i) {
+    out.poses.push_back(plan.poses[i]);
+  }
+  return out;
+}
+
+std::unique_ptr<FactorPlanner> makeRobotPlanner(
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & node,
+  const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros)
+{
+  // The robot settings that matter here: 0.56 m radius, 180 heading bins, rear axle 0.106 m
+  // behind base_link, no smoothing.
+  node->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  node->declare_parameter("test.minimum_turning_radius", 0.56);
+  node->declare_parameter("test.angle_quantization_bins", 180);
+  node->declare_parameter("test.lookup_table_size", 1.0);
+  node->declare_parameter("test.downsample_costmap", false);
+  node->declare_parameter("test.smooth_path", false);
+  node->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  node->declare_parameter("test.reverse_penalty", 3.6);
+  node->declare_parameter("test.change_penalty", 2.0);
+  node->declare_parameter("test.rear_axle_offset", 0.106);
+  node->declare_parameter("test.analytic_score", std::string("length_direction"));
+  node->declare_parameter("test.analytic_single_gear", false);
+  auto planner = std::make_unique<FactorPlanner>();
+  planner->configure(node, "test", nullptr, costmap_ros);
+  planner->activate();
+  return planner;
+}
+
+}  // namespace
+
+TEST(SmacFactors, rear_axle_plan_ends_on_the_exact_start_and_goal)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("factorsEndpoints");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  *costmap_ros->getCostmap() = nav2_costmap_2d::Costmap2D(200, 200, 0.02, 0.0, 0.0, 0);
+  auto planner = makeRobotPlanner(node, costmap_ros);
+  auto no_cancel = []() {return false;};
+
+  // The plan starts and ends on the exact requested poses, also for start headings between the
+  // 2 degree bins (the start node heading is quantized). On a bin, the U-turn is one gear end to
+  // end: no millimetre end step against the path.
+  for (const double yaw : {M_PI / 2.0, 0.0123, 1.5654, -0.4}) {
+    const auto start = makePose(1.6, 1.4, yaw);
+    const auto goal = uTurnGoal(start, 0.106, 1.12);
+    const nav_msgs::msg::Path plan = planner->createPlan(start, goal, no_cancel);
+    ASSERT_GT(plan.poses.size(), 10u);
+    EXPECT_DOUBLE_EQ(plan.poses.front().pose.position.x, start.pose.position.x);
+    EXPECT_DOUBLE_EQ(plan.poses.front().pose.position.y, start.pose.position.y);
+    EXPECT_NEAR(tf2::getYaw(plan.poses.front().pose.orientation), yaw, 1e-9);
+    EXPECT_DOUBLE_EQ(plan.poses.back().pose.position.x, goal.pose.position.x);
+    EXPECT_DOUBLE_EQ(plan.poses.back().pose.position.y, goal.pose.position.y);
+    if (yaw == M_PI / 2.0) {
+      const TraceStats all = traceStats(plan, -0.106);
+      EXPECT_TRUE(all.reverse_steps == 0 || all.reverse_steps == all.steps)
+        << all.reverse_steps << " of " << all.steps;
+    }
+  }
+
+  // Between bins the quantized headings alone make the shortest Reeds-Shepp word add a
+  // centimetre stub. With a few centimetres to spare across the turn (1.16 m for 2R = 1.12 m) and
+  // the single-gear candidates, the whole plan, ends included, is one gear. At exactly 2R the
+  // rotated goal can fall inside 2R, where a stub is genuinely shorter than any one-gear path.
+  planner->dynamicParametersCallback({rclcpp::Parameter("test.analytic_single_gear", true)});
+  for (const double yaw : {0.0123, 1.5654, -0.4}) {
+    const auto start = makePose(1.6, 1.4, yaw);
+    const auto goal = uTurnGoal(start, 0.106, 1.16);
+    const nav_msgs::msg::Path plan = planner->createPlan(start, goal, no_cancel);
+    ASSERT_GT(plan.poses.size(), 10u);
+    const size_t n = plan.poses.size();
+    const TraceStats first = traceStats(subPath(plan, 0, 3), -0.106);
+    const TraceStats last = traceStats(subPath(plan, n - 3, 3), -0.106);
+    const TraceStats all = traceStats(plan, -0.106);
+    EXPECT_TRUE(all.reverse_steps == 0 || all.reverse_steps == all.steps) << "yaw " << yaw;
+    EXPECT_EQ(first.reverse_steps == 0, all.reverse_steps == 0) << "yaw " << yaw;
+    EXPECT_EQ(last.reverse_steps == 0, all.reverse_steps == 0) << "yaw " << yaw;
+    EXPECT_DOUBLE_EQ(plan.poses.front().pose.position.x, start.pose.position.x);
+    EXPECT_DOUBLE_EQ(plan.poses.back().pose.position.y, goal.pose.position.y);
+  }
+  planner->dynamicParametersCallback({rclcpp::Parameter("test.analytic_single_gear", false)});
+
+  // Stock frame: endpoints are not restored, the start node is used as is
+  planner->dynamicParametersCallback({rclcpp::Parameter("test.rear_axle_offset", 0.0)});
+  const auto start = makePose(1.6, 1.4, 0.0123);
+  const nav_msgs::msg::Path stock = planner->createPlan(
+    start, uTurnGoal(start, 0.106, 1.12), no_cancel);
+  ASSERT_GT(stock.poses.size(), 1u);
+  EXPECT_NEAR(stock.poses.front().pose.position.x, 1.6, 1e-6);
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
+
+TEST(SmacFactors, single_gear_candidates_remove_stubs_from_perturbed_u_turns)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("factorsSingleGear");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("global_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  *costmap_ros->getCostmap() = nav2_costmap_2d::Costmap2D(200, 200, 0.02, 0.0, 0.0, 0);
+  auto planner = makeRobotPlanner(node, costmap_ros);
+  auto no_cancel = []() {return false;};
+
+  // U-turns with room (rear axle 1.20 m across) but the goal 1-2 cm and 2-3 degrees off the
+  // exact turn: the shortest Reeds-Shepp word adds a centimetre opposite-gear stub.
+  struct Case {double lon, yaw;};
+  const std::vector<Case> cases = {{0.02, 0.0}, {-0.02, 0.0}, {0.0, 0.035}, {0.01, -0.05}};
+  int stubbed_without = 0;
+  for (const auto & c : cases) {
+    const auto start = makePose(1.6, 1.4, 0.0);
+    const auto goal = uTurnGoal(start, 0.106, 1.20, c.lon, c.yaw);
+    planner->dynamicParametersCallback({rclcpp::Parameter("test.analytic_single_gear", false)});
+    const TraceStats without = traceStats(planner->createPlan(start, goal, no_cancel), -0.106);
+    stubbed_without += (without.reverse_steps > 0 && without.reverse_steps < without.steps);
+    planner->dynamicParametersCallback({rclcpp::Parameter("test.analytic_single_gear", true)});
+    const nav_msgs::msg::Path plan = planner->createPlan(start, goal, no_cancel);
+    const TraceStats with = traceStats(plan, -0.106);
+    EXPECT_EQ(with.reverse_steps, 0) << "lon " << c.lon << " yaw " << c.yaw;
+    EXPECT_DOUBLE_EQ(plan.poses.back().pose.position.x, goal.pose.position.x);
+  }
+  EXPECT_GT(stubbed_without, 0);
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
+
+TEST(SmacFactors, reverse_only_candidate_drives_backwards)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("factorsReverse");
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 14;  // cells
+  info.reverse_penalty = 3.6;
+  info.change_penalty = 2.0;
+  info.analytic_expansion_max_length = 200;
+  unsigned int size_x = 200;
+  unsigned int size_y = 200;
+  unsigned int size_theta = 180;
+  nav2_smac_planner::NodeHybrid::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_theta, info);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>();
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  *costmap_ros->getCostmap() = nav2_costmap_2d::Costmap2D(size_x, size_y, 0.04, 0.0, 0.0, 0);
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, size_theta, node);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  using Expansion = nav2_smac_planner::AnalyticExpansion<nav2_smac_planner::NodeHybrid>;
+  Expansion expander(nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  expander.setCollisionChecker(&checker);
+  std::unordered_map<uint64_t, std::unique_ptr<nav2_smac_planner::NodeHybrid>> graph;
+  Expansion::NodeGetter getter =
+    [&](const uint64_t & index, nav2_smac_planner::NodeHybrid * & n) {
+      auto & slot = graph[index];
+      if (!slot) {
+        slot = std::make_unique<nav2_smac_planner::NodeHybrid>(index);
+      }
+      n = slot.get();
+      return true;
+    };
+  nav2_smac_planner::NodeHybrid start(0), goal(1);
+  start.setPose(nav2_smac_planner::NodeHybrid::Coordinates(80.0f, 100.0f, 0.0f));
+  // A U-turn to the left, 30 cells across, heading reversed (bin 90 of 180)
+  goal.setPose(nav2_smac_planner::NodeHybrid::Coordinates(80.0f, 130.0f, 90.0f));
+  auto space = std::make_shared<ompl::base::DubinsStateSpace>(info.minimum_turning_radius);
+  for (const bool reverse_only : {false, true}) {
+    const auto nodes = expander.getAnalyticPath(&start, &goal, getter, space, reverse_only);
+    ASSERT_GT(nodes.size(), 10u);
+    int forward = 0;
+    int reverse = 0;
+    float px = start.pose.x;
+    float py = start.pose.y;
+    float ptheta = start.pose.theta;
+    for (const auto & n : nodes) {
+      const float heading = n.node->motion_table.getAngleFromBin(ptheta);
+      const float along =
+        (n.proposed_coords.x - px) * cosf(heading) + (n.proposed_coords.y - py) * sinf(heading);
+      if (along < 0.0f) {
+        reverse++;
+      } else {
+        forward++;
+      }
+      px = n.proposed_coords.x;
+      py = n.proposed_coords.y;
+      ptheta = n.proposed_coords.theta;
+    }
+    EXPECT_EQ(reverse_only ? forward : reverse, 0) << "reverse_only " << reverse_only;
+    EXPECT_NEAR(nodes.back().proposed_coords.x, 80.0f, 0.5f);
+    EXPECT_NEAR(nodes.back().proposed_coords.y, 130.0f, 0.5f);
+  }
+  nav2_smac_planner::NodeHybrid::destroyStaticAssets();
 }

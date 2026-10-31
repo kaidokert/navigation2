@@ -112,11 +112,14 @@ public:
    * @param goal The goal node to plan to
    * @param getter The function object that gets valid nodes from the graph
    * @param state_space State space to use for computing analytic expansions
+   * @param reverse_only Plan with headings flipped by pi, so a forward-only state space
+   * (Dubins) yields a reverse-only path
    * @return A set of analytically expanded nodes to the goal from current node, if possible
    */
   AnalyticExpansionNodes getAnalyticPath(
     const NodePtr & node, const NodePtr & goal,
-    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space);
+    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space,
+    const bool reverse_only = false);
 
   /**
    * @brief Score an analytic expansion by true step length with search-primitive weights
@@ -159,6 +162,7 @@ protected:
   uint64_t _trace_schedule_skips{0};
   uint64_t _trace_request_attempts{0};
   float _trace_candidate_turning_radius{0.0f};
+  const char * _trace_candidate_kind{"reeds_shepp"};
 };
 
 }  // namespace nav2_smac_planner
