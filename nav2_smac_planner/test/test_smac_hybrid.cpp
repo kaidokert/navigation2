@@ -16,9 +16,14 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <chrono>
+#include <thread>
 
 #include "gtest/gtest.h"
+#include "nlohmann/json.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/costmap_subscriber.hpp"
 #include "nav2_util/lifecycle_node.hpp"
@@ -278,6 +283,149 @@ TEST(SmacTest, test_smac_m5_terminal_density)
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
   costmap_ros.reset();
   nodeSE2.reset();
+}
+
+TEST(SmacTest, analytic_expansion_trace_is_buffered_complete_and_noninvasive)
+{
+  using json = nlohmann::json;
+  auto traced_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacTraceTest");
+  auto baseline_node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacTraceBaselineTest");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("trace_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(200, 200, 0.05, -5.0, -5.0);
+
+  traced_node->declare_parameter("test.publish_analytic_expansion_trace", true);
+  traced_node->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  traced_node->declare_parameter("test.minimum_turning_radius", 0.5);
+  traced_node->declare_parameter("test.smooth_path", false);
+  traced_node->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  traced_node->declare_parameter("test.analytic_expansion_ratio", 2.0);
+  traced_node->declare_parameter("test.lookup_table_size", 10.0);
+  baseline_node->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  baseline_node->declare_parameter("test.minimum_turning_radius", 0.5);
+  baseline_node->declare_parameter("test.smooth_path", false);
+  baseline_node->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  baseline_node->declare_parameter("test.analytic_expansion_ratio", 2.0);
+  baseline_node->declare_parameter("test.lookup_table_size", 10.0);
+
+  auto traced_planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  auto baseline_planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  traced_planner->configure(traced_node, "test", nullptr, costmap_ros);
+  baseline_planner->configure(baseline_node, "test", nullptr, costmap_ros);
+  traced_planner->activate();
+  baseline_planner->activate();
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("smac_trace_test_subscriber");
+  std::vector<std::string> batches;
+  auto subscription = subscriber_node->create_subscription<std_msgs::msg::String>(
+    "/analytic_expansion_trace", rclcpp::QoS(10),
+    [&batches](std_msgs::msg::String::ConstSharedPtr message) {
+      batches.push_back(message->data);
+    });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(subscriber_node);
+  for (int i = 0; i < 20; ++i) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  auto wait_for_batch = [&executor, &batches](size_t expected_count) {
+      for (int i = 0; i < 100 && batches.size() < expected_count; ++i) {
+        executor.spin_some();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      return batches.size() >= expected_count;
+    };
+  auto make_pose = [](double x, double y, double yaw) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.frame_id = "map";
+      pose.pose.position.x = x;
+      pose.pose.position.y = y;
+      pose.pose.orientation.z = std::sin(yaw / 2.0);
+      pose.pose.orientation.w = std::cos(yaw / 2.0);
+      return pose;
+    };
+  const auto start = make_pose(-1.188, 0.843, 252.0 * M_PI / 180.0);
+  const auto goal = make_pose(-1.18, 0.90, 270.0 * M_PI / 180.0);
+  auto no_cancel = []() {return false;};
+
+  const auto traced_plan = traced_planner->createPlan(start, goal, no_cancel);
+  ASSERT_TRUE(wait_for_batch(1));
+  const auto baseline_plan = baseline_planner->createPlan(start, goal, no_cancel);
+  ASSERT_EQ(traced_plan.poses.size(), baseline_plan.poses.size());
+  for (size_t i = 0; i < traced_plan.poses.size(); ++i) {
+    EXPECT_DOUBLE_EQ(
+      traced_plan.poses[i].pose.position.x, baseline_plan.poses[i].pose.position.x);
+    EXPECT_DOUBLE_EQ(
+      traced_plan.poses[i].pose.position.y, baseline_plan.poses[i].pose.position.y);
+    EXPECT_DOUBLE_EQ(
+      traced_plan.poses[i].pose.orientation.z, baseline_plan.poses[i].pose.orientation.z);
+    EXPECT_DOUBLE_EQ(
+      traced_plan.poses[i].pose.orientation.w, baseline_plan.poses[i].pose.orientation.w);
+  }
+
+  const json records = json::parse(batches[0]);
+  ASSERT_TRUE(records.is_array());
+  ASSERT_GE(records.size(), 3u);
+  EXPECT_EQ(records.front()["event"], "plan_boundary");
+  EXPECT_EQ(records.front()["result"], "started");
+  EXPECT_EQ(records.back()["event"], "plan_boundary");
+  EXPECT_EQ(records.back()["result"], "succeeded");
+  const auto request_id = records.front()["request_id"];
+  size_t candidate_count = 0;
+  size_t selection_count = 0;
+  std::vector<uint64_t> candidate_ids;
+  std::vector<uint64_t> selection_ids;
+  for (const auto & record : records) {
+    EXPECT_EQ(record["request_id"], request_id);
+    if (record["event"] == "candidate") {
+      ++candidate_count;
+      candidate_ids.push_back(record["attempt_id"].get<uint64_t>());
+    } else if (record["event"] == "selection") {
+      ++selection_count;
+      selection_ids.push_back(record["attempt_id"].get<uint64_t>());
+    }
+  }
+  EXPECT_EQ(candidate_count, records.back()["candidate_attempts"].get<size_t>());
+  ASSERT_EQ(selection_count, 1u);
+  EXPECT_NE(
+    std::find(candidate_ids.begin(), candidate_ids.end(), selection_ids.front()),
+    candidate_ids.end());
+
+  auto same_cell_start = make_pose(0.0, 0.0, 0.0);
+  auto same_cell_goal = make_pose(0.01, 0.01, 0.0);
+  EXPECT_EQ(
+    traced_planner->createPlan(same_cell_start, same_cell_goal, no_cancel).poses.size(),
+    1u);
+  ASSERT_TRUE(wait_for_batch(2));
+  const json same_cell_records = json::parse(batches[1]);
+  EXPECT_EQ(same_cell_records.front()["result"], "started");
+  EXPECT_EQ(same_cell_records.back()["result"], "succeeded");
+  EXPECT_EQ(same_cell_records.back()["candidate_attempts"], 0u);
+
+  EXPECT_FALSE(traced_node->set_parameter(
+      rclcpp::Parameter("test.publish_analytic_expansion_trace", false)).successful);
+  EXPECT_TRUE(traced_node->get_parameter("test.publish_analytic_expansion_trace").as_bool());
+
+  EXPECT_THROW(
+    traced_planner->createPlan(start, make_pose(20.0, 20.0, 0.0), no_cancel),
+    nav2_core::GoalOutsideMapBounds);
+  ASSERT_TRUE(wait_for_batch(3));
+  const json out_of_map_records = json::parse(batches[2]);
+  EXPECT_EQ(out_of_map_records.front()["result"], "started");
+  EXPECT_EQ(out_of_map_records.back()["result"], "exception");
+  EXPECT_EQ(out_of_map_records.back()["candidate_attempts"], 0u);
+
+  traced_planner->deactivate();
+  baseline_planner->deactivate();
+  traced_planner->cleanup();
+  baseline_planner->cleanup();
+  traced_planner.reset();
+  baseline_planner.reset();
+  executor.remove_node(subscriber_node->get_node_base_interface());
+  subscription.reset();
+  subscriber_node.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
 }
 
 TEST(SmacTest, test_smac_costmap_mutation_throws)

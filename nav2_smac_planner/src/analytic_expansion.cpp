@@ -17,6 +17,7 @@
 #include <ompl/base/spaces/ReedsSheppStateSpace.h>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <iomanip>
@@ -233,8 +234,8 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   auto publish_attempt = [this, attempt_id, node, goal, distance, &has_rejected_sample,
       &rejected_sample_index, &rejected_sample_x, &rejected_sample_y, &rejected_sample_yaw,
       &rejected_sample_cost](
-      const char * outcome, size_t sample_count, size_t valid_count,
-      const std::string & segments)
+    const char * outcome, size_t sample_count, size_t valid_count,
+    const std::string & segments)
     {
       if (!_trace_callback) {
         return;
@@ -255,8 +256,13 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
       if (has_rejected_sample) {
         event << "{\"index\":" << rejected_sample_index << ",\"x\":"
               << rejected_sample_x << ",\"y\":" << rejected_sample_y
-              << ",\"yaw\":" << rejected_sample_yaw << ",\"cost\":"
-              << rejected_sample_cost << "}";
+              << ",\"yaw\":" << rejected_sample_yaw << ",\"cost\":";
+        if (std::isfinite(rejected_sample_cost) && rejected_sample_cost >= 0.0f) {
+          event << rejected_sample_cost;
+        } else {
+          event << "null";
+        }
+        event << "}";
       } else {
         event << "null";
       }
@@ -299,7 +305,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
         if (std::abs(rs_path.length_[i]) < 1e-6) {
           continue;
         }
-        if (!first) { segments << ","; }
+        if (!first) {segments << ",";}
         first = false;
         const char * type = "unknown";
         switch (rs_path.type_[i]) {
@@ -341,7 +347,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
       std::ostringstream segments;
       segments << std::setprecision(9) << "[";
       for (int i = 0; i < 3; ++i) {
-        if (i > 0) { segments << ","; }
+        if (i > 0) {segments << ",";}
         const char * type = "unknown";
         switch ((*dubins_path.type_)[i]) {
           case ompl::base::DubinsStateSpace::DUBINS_LEFT: type = "left"; break;
@@ -401,6 +407,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   Coordinates proposed_coordinates;
   bool failure = false;
   const char * rejection_reason = "none";
+  const char * candidate_outcome = "valid";
   const size_t planned_sample_count = fractions.size();
   std::vector<float> node_costs;
   node_costs.reserve(fractions.size());
@@ -497,6 +504,11 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
           _search_info.analytic_expansion_max_cost_override)
         {
           failure = false;
+          candidate_outcome = "valid_max_cost_override";
+          rejection_reason = "none";
+          has_rejected_sample = false;
+          rejected_sample_index = -1;
+          rejected_sample_cost = -1.0f;
         }
       }
     }
@@ -513,7 +525,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     return AnalyticExpansionNodes();
   }
 
-  publish_attempt("valid", planned_sample_count, possible_nodes.size(), trace_segments);
+  publish_attempt(candidate_outcome, planned_sample_count, possible_nodes.size(), trace_segments);
   return possible_nodes;
 }
 

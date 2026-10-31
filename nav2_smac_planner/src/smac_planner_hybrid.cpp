@@ -20,6 +20,7 @@
 #include <limits>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
@@ -29,6 +30,32 @@
 
 namespace nav2_smac_planner
 {
+
+namespace
+{
+class ScopeExit
+{
+public:
+  explicit ScopeExit(std::function<void()> callback)
+  : callback_(std::move(callback))
+  {}
+
+  ~ScopeExit()
+  {
+    try {
+      callback_();
+    } catch (...) {
+      // Diagnostic publication must never change the planner result.
+    }
+  }
+
+  ScopeExit(const ScopeExit &) = delete;
+  ScopeExit & operator=(const ScopeExit &) = delete;
+
+private:
+  std::function<void()> callback_;
+};
+}  // namespace
 
 using namespace std::chrono;  // NOLINT
 using rcl_interfaces::msg::ParameterType;
@@ -275,7 +302,7 @@ void SmacPlannerHybrid::configure(
   if (_publish_analytic_expansion_trace) {
     _analytic_expansion_trace_publisher =
       node->create_publisher<std_msgs::msg::String>(
-      "analytic_expansion_trace", rclcpp::QoS(rclcpp::KeepLast(10000)).reliable());
+      "analytic_expansion_trace", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
   }
 
   RCLCPP_INFO(
@@ -372,6 +399,51 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   std::function<bool()> cancel_checker)
 {
   std::lock_guard<std::mutex> lock_reinit(_mutex);
+  const bool trace_enabled = _publish_analytic_expansion_trace;
+  const uint64_t trace_request_id = trace_enabled ? ++_trace_plan_id : 0;
+  const int initial_uncaught_exceptions = std::uncaught_exceptions();
+  std::string trace_result = "failed";
+  std::vector<std::string> trace_records;
+  if (trace_enabled) {
+    _a_star->setAnalyticExpansionTraceRequestId(trace_request_id);
+    trace_records.emplace_back(
+      "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
+      std::to_string(trace_request_id) + ",\"result\":\"started\"}");
+    _a_star->setAnalyticExpansionTraceCallback(
+      [&trace_records](const std::string & json_record) {
+        trace_records.push_back(json_record);
+      });
+  }
+  ScopeExit flush_trace([&]() {
+      if (!trace_enabled || !_analytic_expansion_trace_publisher ||
+      !_analytic_expansion_trace_publisher->is_activated())
+      {
+        return;
+      }
+      if (std::uncaught_exceptions() > initial_uncaught_exceptions) {
+        trace_result = "exception";
+      }
+      trace_records.emplace_back(
+        "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
+        std::to_string(trace_request_id) + ",\"result\":\"" + trace_result +
+        "\",\"analytic_opportunities\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
+        ",\"schedule_skips\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
+        ",\"candidate_attempts\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceAttempts()) + "}");
+      std::string json_array = "[";
+      for (size_t i = 0; i < trace_records.size(); ++i) {
+        if (i != 0) {
+          json_array += ",";
+        }
+        json_array += trace_records[i];
+      }
+      json_array += "]";
+      std_msgs::msg::String message;
+      message.data = std::move(json_array);
+      _analytic_expansion_trace_publisher->publish(message);
+    });
   steady_clock::time_point a = steady_clock::now();
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
@@ -397,23 +469,6 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     _costmap_ros->getUseRadius(),
     findCircumscribedCost(_costmap_ros));
   _a_star->setCollisionChecker(&_collision_checker);
-  if (_publish_analytic_expansion_trace) {
-    _a_star->setAnalyticExpansionTraceCallback(
-      [this](const std::string & json_record) {
-        if (!_analytic_expansion_trace_publisher ||
-          !_analytic_expansion_trace_publisher->is_activated())
-        {
-          return;
-        }
-        std_msgs::msg::String message;
-        message.data = json_record;
-        _analytic_expansion_trace_publisher->publish(message);
-      });
-  }
-  const uint64_t trace_request_id = ++_trace_plan_id;
-  if (_publish_analytic_expansion_trace) {
-    _a_star->setAnalyticExpansionTraceRequestId(trace_request_id);
-  }
 
   // Set starting point, in A* bin search coordinates
   float mx_start, my_start, mx_goal, my_goal;
@@ -490,6 +545,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       _raw_plan_publisher->publish(plan);
     }
 
+    trace_result = "succeeded";
     return plan;
   }
 
@@ -502,36 +558,15 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     expansions = std::make_unique<std::vector<std::tuple<float, float, float>>>();
   }
   // Note: All exceptions thrown are handled by the planner server and returned to the action
-  auto publish_trace_boundary = [this, trace_request_id](const char * result) {
-      if (!_publish_analytic_expansion_trace || !_analytic_expansion_trace_publisher ||
-        !_analytic_expansion_trace_publisher->is_activated())
-      {
-        return;
-      }
-      std_msgs::msg::String message;
-      message.data = std::string("{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":") +
-        std::to_string(trace_request_id) + ",\"result\":\"" + result +
-        "\",\"analytic_opportunities\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
-        ",\"schedule_skips\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
-        ",\"candidate_attempts\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceAttempts()) + "}";
-      _analytic_expansion_trace_publisher->publish(message);
-    };
-  publish_trace_boundary("started");
   bool path_found = false;
   try {
     path_found = _a_star->createPath(
       path, num_iterations,
       _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get());
   } catch (...) {
-    publish_trace_boundary("exception");
     throw;
   }
-  if (!path_found)
-  {
-    publish_trace_boundary("failed");
+  if (!path_found) {
     if (_debug_visualizations) {
       geometry_msgs::msg::PoseArray msg;
       geometry_msgs::msg::Pose msg_pose;
@@ -557,7 +592,6 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       throw nav2_core::PlannerTimedOut("exceeded maximum iterations");
     }
   }
-  publish_trace_boundary("succeeded");
 
   // Convert to world coordinates
   plan.poses.reserve(path.size());
@@ -668,6 +702,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     }
   }
 
+  trace_result = "succeeded";
   return plan;
 }
 
@@ -685,6 +720,13 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
   for (auto parameter : parameters) {
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
+
+    if (name == _name + ".publish_analytic_expansion_trace") {
+      result.successful = false;
+      result.reason = "publish_analytic_expansion_trace is configure-time only; "
+        "reconfigure the planner to change it";
+      return result;
+    }
 
     if (type == ParameterType::PARAMETER_DOUBLE) {
       if (name == _name + ".max_planning_time") {

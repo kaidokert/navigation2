@@ -14,6 +14,8 @@
 
 #include "nav2_smac_planner/collision_checker.hpp"
 
+#include <limits>
+
 namespace nav2_smac_planner
 {
 
@@ -107,6 +109,8 @@ bool GridCollisionChecker::inCollision(
   const float & angle_bin,
   const bool & traverse_unknown)
 {
+  // Do not expose the previous sample's cost if this query exits before reading a cell.
+  center_cost_ = std::numeric_limits<float>::quiet_NaN();
   // Check to make sure cell is inside the map
   if (outsideRange(costmap_->getSizeInCellsX(), x) ||
     outsideRange(costmap_->getSizeInCellsY(), y))
@@ -173,6 +177,7 @@ bool GridCollisionChecker::inCollision(
   const unsigned int & i,
   const bool & traverse_unknown)
 {
+  center_cost_ = std::numeric_limits<float>::quiet_NaN();
   center_cost_ = costmap_->getCost(i);
   if (center_cost_ == UNKNOWN && traverse_unknown) {
     return false;

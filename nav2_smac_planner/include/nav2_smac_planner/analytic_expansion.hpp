@@ -79,7 +79,7 @@ public:
   void setCollisionChecker(GridCollisionChecker * collision_checker);
 
   /** Set an optional callback for analytic-expansion diagnostic records. */
-  void setTraceCallback(const TraceCallback & callback) { _trace_callback = callback; }
+  void setTraceCallback(const TraceCallback & callback) {_trace_callback = callback;}
   void setTraceRequestId(uint64_t request_id)
   {
     _trace_request_id = request_id;
@@ -87,9 +87,9 @@ public:
     _trace_schedule_skips = 0;
     _trace_request_attempts = 0;
   }
-  uint64_t getTraceOpportunities() const { return _trace_opportunities; }
-  uint64_t getTraceScheduleSkips() const { return _trace_schedule_skips; }
-  uint64_t getTraceRequestAttempts() const { return _trace_request_attempts; }
+  uint64_t getTraceOpportunities() const {return _trace_opportunities;}
+  uint64_t getTraceScheduleSkips() const {return _trace_schedule_skips;}
+  uint64_t getTraceRequestAttempts() const {return _trace_request_attempts;}
 
   /**
    * @brief Attempt an analytic path completion
