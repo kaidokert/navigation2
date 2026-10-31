@@ -363,12 +363,6 @@ void SmacPlannerHybrid::deactivate()
   if (_costmap_downsampler) {
     _costmap_downsampler->on_deactivate();
   }
-  // shutdown dyn_param_handler
-  auto node = _node.lock();
-  if (_dyn_params_handler && node) {
-    node->remove_on_set_parameters_callback(_dyn_params_handler.get());
-  }
-  _dyn_params_handler.reset();
 }
 
 void SmacPlannerHybrid::cleanup()
@@ -376,6 +370,11 @@ void SmacPlannerHybrid::cleanup()
   RCLCPP_INFO(
     _logger, "Cleaning up plugin %s of type SmacPlannerHybrid",
     _name.c_str());
+  auto node = _node.lock();
+  if (_dyn_params_handler && node) {
+    node->remove_on_set_parameters_callback(_dyn_params_handler.get());
+  }
+  _dyn_params_handler.reset();
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
   _a_star.reset();
   _smoother.reset();
@@ -730,6 +729,17 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
   rcl_interfaces::msg::SetParametersResult result;
   std::lock_guard<std::mutex> lock_reinit(_mutex);
 
+  const auto trace_parameter = std::find_if(
+    parameters.begin(), parameters.end(), [this](const rclcpp::Parameter & parameter) {
+      return parameter.get_name() == _name + ".publish_analytic_expansion_trace";
+    });
+  if (trace_parameter != parameters.end()) {
+    result.successful = false;
+    result.reason = "publish_analytic_expansion_trace is configure-time only; "
+      "reconfigure the planner to change it";
+    return result;
+  }
+
   bool reinit_collision_checker = false;
   bool reinit_a_star = false;
   bool reinit_downsampler = false;
@@ -738,13 +748,6 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
   for (auto parameter : parameters) {
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
-
-    if (name == _name + ".publish_analytic_expansion_trace") {
-      result.successful = false;
-      result.reason = "publish_analytic_expansion_trace is configure-time only; "
-        "reconfigure the planner to change it";
-      return result;
-    }
 
     if (type == ParameterType::PARAMETER_DOUBLE) {
       if (name == _name + ".max_planning_time") {

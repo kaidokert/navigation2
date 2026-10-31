@@ -101,6 +101,13 @@ TEST(collision_footprint, out_of_map_query_does_not_reuse_previous_cost)
   EXPECT_FLOAT_EQ(collision_checker.getCost(), 0.0f);
   EXPECT_TRUE(collision_checker.inCollision(-1.0f, 5.0f, 0.0f, false));
   EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+
+  EXPECT_TRUE(collision_checker.inCollision(10.0f, 5.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+  EXPECT_TRUE(collision_checker.inCollision(5.0f, 10.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+  EXPECT_TRUE(collision_checker.inCollision(9.6f, 5.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
 }
 
 TEST(collision_footprint, test_world_to_map)

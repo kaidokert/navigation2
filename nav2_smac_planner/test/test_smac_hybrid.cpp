@@ -403,8 +403,11 @@ TEST(SmacTest, analytic_expansion_trace_is_buffered_complete_and_noninvasive)
   EXPECT_EQ(same_cell_records.back()["result"], "succeeded");
   EXPECT_EQ(same_cell_records.back()["candidate_attempts"], 0u);
 
-  EXPECT_FALSE(traced_node->set_parameter(
-      rclcpp::Parameter("test.publish_analytic_expansion_trace", false)).successful);
+  const auto rejected_atomic_update = traced_node->set_parameters_atomically({
+    rclcpp::Parameter("test.tolerance", 0.12),
+    rclcpp::Parameter("test.publish_analytic_expansion_trace", false)});
+  EXPECT_FALSE(rejected_atomic_update.successful);
+  EXPECT_DOUBLE_EQ(traced_node->get_parameter("test.tolerance").as_double(), 0.25);
   EXPECT_TRUE(traced_node->get_parameter("test.publish_analytic_expansion_trace").as_bool());
 
   EXPECT_THROW(
@@ -433,6 +436,9 @@ TEST(SmacTest, analytic_expansion_trace_is_buffered_complete_and_noninvasive)
   EXPECT_EQ(failed_records.back()["failure_reason"], "goal_occupied");
 
   traced_planner->deactivate();
+  EXPECT_FALSE(traced_node->set_parameter(
+      rclcpp::Parameter("test.publish_analytic_expansion_trace", false)).successful);
+  EXPECT_TRUE(traced_node->get_parameter("test.publish_analytic_expansion_trace").as_bool());
   baseline_planner->deactivate();
   traced_planner->cleanup();
   baseline_planner->cleanup();

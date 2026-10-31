@@ -14,6 +14,7 @@
 
 #include "nav2_smac_planner/collision_checker.hpp"
 
+#include <cmath>
 #include <limits>
 
 namespace nav2_smac_planner
@@ -194,7 +195,8 @@ float GridCollisionChecker::getCost()
 
 bool GridCollisionChecker::outsideRange(const unsigned int & max, const float & value)
 {
-  return value < 0.0f || value > max;
+  return !std::isfinite(value) || value < 0.0f ||
+         value >= static_cast<float>(max) - 0.5f;
 }
 
 }  // namespace nav2_smac_planner
