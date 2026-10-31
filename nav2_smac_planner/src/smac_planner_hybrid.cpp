@@ -20,7 +20,6 @@
 #include <limits>
 #include <cmath>
 #include <cstdlib>
-#include <exception>
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
@@ -401,8 +400,8 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   std::lock_guard<std::mutex> lock_reinit(_mutex);
   const bool trace_enabled = _publish_analytic_expansion_trace;
   const uint64_t trace_request_id = trace_enabled ? ++_trace_plan_id : 0;
-  const int initial_uncaught_exceptions = std::uncaught_exceptions();
-  std::string trace_result = "failed";
+  std::string trace_result = "exception";
+  std::string trace_failure_reason;
   std::vector<std::string> trace_records;
   if (trace_enabled) {
     _a_star->setAnalyticExpansionTraceRequestId(trace_request_id);
@@ -415,23 +414,27 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       });
   }
   ScopeExit flush_trace([&]() {
+      if (trace_enabled) {
+        _a_star->setAnalyticExpansionTraceCallback({});
+      }
       if (!trace_enabled || !_analytic_expansion_trace_publisher ||
       !_analytic_expansion_trace_publisher->is_activated())
       {
         return;
       }
-      if (std::uncaught_exceptions() > initial_uncaught_exceptions) {
-        trace_result = "exception";
+      std::string boundary =
+      "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
+      std::to_string(trace_request_id) + ",\"result\":\"" + trace_result +
+      "\",\"analytic_opportunities\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
+      ",\"schedule_skips\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
+      ",\"candidate_attempts\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceAttempts());
+      if (!trace_failure_reason.empty()) {
+        boundary += ",\"failure_reason\":\"" + trace_failure_reason + "\"";
       }
-      trace_records.emplace_back(
-        "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
-        std::to_string(trace_request_id) + ",\"result\":\"" + trace_result +
-        "\",\"analytic_opportunities\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
-        ",\"schedule_skips\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
-        ",\"candidate_attempts\":" +
-        std::to_string(_a_star->getAnalyticExpansionTraceAttempts()) + "}");
+      trace_records.emplace_back(boundary + "}");
       std::string json_array = "[";
       for (size_t i = 0; i < trace_records.size(); ++i) {
         if (i != 0) {
@@ -449,6 +452,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
 
   if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5) {
+    trace_failure_reason = "costmap_resolution_changed";
     throw nav2_core::PlannerException(
       "SmacPlannerHybrid configuration invariant violation: costmap resolution mutated "
       "post-configure! Configured resolution: " + std::to_string(_configured_resolution) +
@@ -478,6 +482,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     mx_start,
     my_start))
   {
+    trace_failure_reason = "start_outside_map";
     throw nav2_core::StartOutsideMapBounds(
             "Start Coordinates of(" + std::to_string(start.pose.position.x) + ", " +
             std::to_string(start.pose.position.y) + ") was outside bounds");
@@ -500,6 +505,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     mx_goal,
     my_goal))
   {
+    trace_failure_reason = "goal_outside_map";
     throw nav2_core::GoalOutsideMapBounds(
             "Goal Coordinates of(" + std::to_string(goal.pose.position.x) + ", " +
             std::to_string(goal.pose.position.y) + ") was outside bounds");
@@ -563,7 +569,13 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     path_found = _a_star->createPath(
       path, num_iterations,
       _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get());
-  } catch (...) {
+  } catch (const nav2_core::GoalOccupied &) {
+    trace_result = "failed";
+    trace_failure_reason = "goal_occupied";
+    throw;
+  } catch (const nav2_core::PlannerCancelled &) {
+    trace_result = "failed";
+    trace_failure_reason = "cancelled";
     throw;
   }
   if (!path_found) {
@@ -583,12 +595,18 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
     // Note: If the start is blocked only one iteration will occur before failure
     if (num_iterations == 1) {
+      trace_result = "failed";
+      trace_failure_reason = "start_occupied";
       throw nav2_core::StartOccupied("Start occupied");
     }
 
     if (num_iterations < _a_star->getMaxIterations()) {
+      trace_result = "failed";
+      trace_failure_reason = "no_valid_path";
       throw nav2_core::NoValidPathCouldBeFound("no valid path found");
     } else {
+      trace_result = "failed";
+      trace_failure_reason = "max_iterations";
       throw nav2_core::PlannerTimedOut("exceeded maximum iterations");
     }
   }

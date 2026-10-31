@@ -414,7 +414,23 @@ TEST(SmacTest, analytic_expansion_trace_is_buffered_complete_and_noninvasive)
   const json out_of_map_records = json::parse(batches[2]);
   EXPECT_EQ(out_of_map_records.front()["result"], "started");
   EXPECT_EQ(out_of_map_records.back()["result"], "exception");
+  EXPECT_EQ(out_of_map_records.back()["failure_reason"], "goal_outside_map");
   EXPECT_EQ(out_of_map_records.back()["candidate_attempts"], 0u);
+
+  EXPECT_TRUE(traced_node->set_parameter(
+      rclcpp::Parameter("test.tolerance", 0.0)).successful);
+  unsigned int goal_x;
+  unsigned int goal_y;
+  ASSERT_TRUE(costmap_ros->getCostmap()->worldToMap(-1.18, 0.90, goal_x, goal_y));
+  costmap_ros->getCostmap()->setCost(
+    goal_x, goal_y, nav2_costmap_2d::LETHAL_OBSTACLE);
+  EXPECT_THROW(
+    traced_planner->createPlan(start, goal, no_cancel), nav2_core::GoalOccupied);
+  ASSERT_TRUE(wait_for_batch(4));
+  const json failed_records = json::parse(batches[3]);
+  EXPECT_EQ(failed_records.front()["result"], "started");
+  EXPECT_EQ(failed_records.back()["result"], "failed");
+  EXPECT_EQ(failed_records.back()["failure_reason"], "goal_occupied");
 
   traced_planner->deactivate();
   baseline_planner->deactivate();
