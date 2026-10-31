@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cmath>
 
 #include "gtest/gtest.h"
 #include "nav2_smac_planner/collision_checker.hpp"
@@ -84,6 +85,29 @@ TEST(collision_footprint, test_point_cost)
   float cost = collision_checker.getCost();
   EXPECT_NEAR(cost, 0.0, 0.001);
   delete costmap_;
+}
+
+TEST(collision_footprint, out_of_map_query_does_not_reuse_previous_cost)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("out_of_map_cost_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>();
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(10, 10, 0.1, 0.0, 0.0);
+
+  nav2_smac_planner::GridCollisionChecker collision_checker(costmap_ros, 72, node);
+  collision_checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  EXPECT_FALSE(collision_checker.inCollision(5.0f, 5.0f, 0.0f, false));
+  EXPECT_FLOAT_EQ(collision_checker.getCost(), 0.0f);
+  EXPECT_TRUE(collision_checker.inCollision(-1.0f, 5.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+
+  EXPECT_TRUE(collision_checker.inCollision(10.0f, 5.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+  EXPECT_TRUE(collision_checker.inCollision(5.0f, 10.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
+  EXPECT_TRUE(collision_checker.inCollision(9.6f, 5.0f, 0.0f, false));
+  EXPECT_TRUE(std::isnan(collision_checker.getCost()));
 }
 
 TEST(collision_footprint, test_world_to_map)

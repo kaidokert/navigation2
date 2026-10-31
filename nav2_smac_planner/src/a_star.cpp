@@ -125,6 +125,37 @@ void AStarAlgorithm<NodeT>::setCollisionChecker(GridCollisionChecker * collision
 }
 
 template<typename NodeT>
+void AStarAlgorithm<NodeT>::setAnalyticExpansionTraceCallback(
+  const typename AnalyticExpansion<NodeT>::TraceCallback & callback)
+{
+  _expander->setTraceCallback(callback);
+}
+
+template<typename NodeT>
+void AStarAlgorithm<NodeT>::setAnalyticExpansionTraceRequestId(uint64_t request_id)
+{
+  _expander->setTraceRequestId(request_id);
+}
+
+template<typename NodeT>
+uint64_t AStarAlgorithm<NodeT>::getAnalyticExpansionTraceOpportunities() const
+{
+  return _expander->getTraceOpportunities();
+}
+
+template<typename NodeT>
+uint64_t AStarAlgorithm<NodeT>::getAnalyticExpansionTraceScheduleSkips() const
+{
+  return _expander->getTraceScheduleSkips();
+}
+
+template<typename NodeT>
+uint64_t AStarAlgorithm<NodeT>::getAnalyticExpansionTraceAttempts() const
+{
+  return _expander->getTraceRequestAttempts();
+}
+
+template<typename NodeT>
 typename AStarAlgorithm<NodeT>::NodePtr AStarAlgorithm<NodeT>::addToGraph(
   const uint64_t & index)
 {

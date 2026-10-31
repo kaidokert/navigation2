@@ -30,6 +30,32 @@
 namespace nav2_smac_planner
 {
 
+namespace
+{
+class ScopeExit
+{
+public:
+  explicit ScopeExit(std::function<void()> callback)
+  : callback_(std::move(callback))
+  {}
+
+  ~ScopeExit()
+  {
+    try {
+      callback_();
+    } catch (...) {
+      // Diagnostic publication must never change the planner result.
+    }
+  }
+
+  ScopeExit(const ScopeExit &) = delete;
+  ScopeExit & operator=(const ScopeExit &) = delete;
+
+private:
+  std::function<void()> callback_;
+};
+}  // namespace
+
 using namespace std::chrono;  // NOLINT
 using rcl_interfaces::msg::ParameterType;
 using std::placeholders::_1;
@@ -169,6 +195,10 @@ void SmacPlannerHybrid::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".debug_visualizations", rclcpp::ParameterValue(false));
   node->get_parameter(name + ".debug_visualizations", _debug_visualizations);
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".publish_analytic_expansion_trace", rclcpp::ParameterValue(false));
+  node->get_parameter(
+    name + ".publish_analytic_expansion_trace", _publish_analytic_expansion_trace);
 
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".motion_model_for_search", rclcpp::ParameterValue(std::string("DUBIN")));
@@ -268,6 +298,11 @@ void SmacPlannerHybrid::configure(
       node->create_publisher<visualization_msgs::msg::MarkerArray>(
       "smoothed_footprints", 1);
   }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher =
+      node->create_publisher<std_msgs::msg::String>(
+      "analytic_expansion_trace", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+  }
 
   RCLCPP_INFO(
     _logger, "Configured plugin %s of type SmacPlannerHybrid with "
@@ -288,6 +323,9 @@ void SmacPlannerHybrid::activate()
     _expansions_publisher->on_activate();
     _planned_footprints_publisher->on_activate();
     _smoothed_footprints_publisher->on_activate();
+  }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher->on_activate();
   }
   if (_costmap_downsampler) {
     _costmap_downsampler->on_activate();
@@ -319,15 +357,12 @@ void SmacPlannerHybrid::deactivate()
     _planned_footprints_publisher->on_deactivate();
     _smoothed_footprints_publisher->on_deactivate();
   }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher->on_deactivate();
+  }
   if (_costmap_downsampler) {
     _costmap_downsampler->on_deactivate();
   }
-  // shutdown dyn_param_handler
-  auto node = _node.lock();
-  if (_dyn_params_handler && node) {
-    node->remove_on_set_parameters_callback(_dyn_params_handler.get());
-  }
-  _dyn_params_handler.reset();
 }
 
 void SmacPlannerHybrid::cleanup()
@@ -335,6 +370,11 @@ void SmacPlannerHybrid::cleanup()
   RCLCPP_INFO(
     _logger, "Cleaning up plugin %s of type SmacPlannerHybrid",
     _name.c_str());
+  auto node = _node.lock();
+  if (_dyn_params_handler && node) {
+    node->remove_on_set_parameters_callback(_dyn_params_handler.get());
+  }
+  _dyn_params_handler.reset();
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
   _a_star.reset();
   _smoother.reset();
@@ -348,6 +388,7 @@ void SmacPlannerHybrid::cleanup()
     _planned_footprints_publisher.reset();
     _smoothed_footprints_publisher.reset();
   }
+  _analytic_expansion_trace_publisher.reset();
 }
 
 nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
@@ -356,11 +397,61 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   std::function<bool()> cancel_checker)
 {
   std::lock_guard<std::mutex> lock_reinit(_mutex);
+  const bool trace_enabled = _publish_analytic_expansion_trace;
+  const uint64_t trace_request_id = trace_enabled ? ++_trace_plan_id : 0;
+  std::string trace_result = "exception";
+  std::string trace_failure_reason;
+  std::vector<std::string> trace_records;
+  if (trace_enabled) {
+    _a_star->setAnalyticExpansionTraceRequestId(trace_request_id);
+    trace_records.emplace_back(
+      "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
+      std::to_string(trace_request_id) + ",\"result\":\"started\"}");
+    _a_star->setAnalyticExpansionTraceCallback(
+      [&trace_records](const std::string & json_record) {
+        trace_records.push_back(json_record);
+      });
+  }
+  ScopeExit flush_trace([&]() {
+      if (trace_enabled) {
+        _a_star->setAnalyticExpansionTraceCallback({});
+      }
+      if (!trace_enabled || !_analytic_expansion_trace_publisher ||
+      !_analytic_expansion_trace_publisher->is_activated())
+      {
+        return;
+      }
+      std::string boundary =
+      "{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":" +
+      std::to_string(trace_request_id) + ",\"result\":\"" + trace_result +
+      "\",\"analytic_opportunities\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
+      ",\"schedule_skips\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
+      ",\"candidate_attempts\":" +
+      std::to_string(_a_star->getAnalyticExpansionTraceAttempts());
+      if (!trace_failure_reason.empty()) {
+        boundary += ",\"failure_reason\":\"" + trace_failure_reason + "\"";
+      }
+      trace_records.emplace_back(boundary + "}");
+      std::string json_array = "[";
+      for (size_t i = 0; i < trace_records.size(); ++i) {
+        if (i != 0) {
+          json_array += ",";
+        }
+        json_array += trace_records[i];
+      }
+      json_array += "]";
+      std_msgs::msg::String message;
+      message.data = std::move(json_array);
+      _analytic_expansion_trace_publisher->publish(message);
+    });
   steady_clock::time_point a = steady_clock::now();
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
 
   if (std::abs(_costmap->getResolution() - _configured_resolution) > 1e-5) {
+    trace_failure_reason = "costmap_resolution_changed";
     throw nav2_core::PlannerException(
       "SmacPlannerHybrid configuration invariant violation: costmap resolution mutated "
       "post-configure! Configured resolution: " + std::to_string(_configured_resolution) +
@@ -390,6 +481,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     mx_start,
     my_start))
   {
+    trace_failure_reason = "start_outside_map";
     throw nav2_core::StartOutsideMapBounds(
             "Start Coordinates of(" + std::to_string(start.pose.position.x) + ", " +
             std::to_string(start.pose.position.y) + ") was outside bounds");
@@ -412,6 +504,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     mx_goal,
     my_goal))
   {
+    trace_failure_reason = "goal_outside_map";
     throw nav2_core::GoalOutsideMapBounds(
             "Goal Coordinates of(" + std::to_string(goal.pose.position.x) + ", " +
             std::to_string(goal.pose.position.y) + ") was outside bounds");
@@ -457,6 +550,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       _raw_plan_publisher->publish(plan);
     }
 
+    trace_result = "succeeded";
     return plan;
   }
 
@@ -469,10 +563,21 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     expansions = std::make_unique<std::vector<std::tuple<float, float, float>>>();
   }
   // Note: All exceptions thrown are handled by the planner server and returned to the action
-  if (!_a_star->createPath(
+  bool path_found = false;
+  try {
+    path_found = _a_star->createPath(
       path, num_iterations,
-      _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get()))
-  {
+      _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get());
+  } catch (const nav2_core::GoalOccupied &) {
+    trace_result = "failed";
+    trace_failure_reason = "goal_occupied";
+    throw;
+  } catch (const nav2_core::PlannerCancelled &) {
+    trace_result = "failed";
+    trace_failure_reason = "cancelled";
+    throw;
+  }
+  if (!path_found) {
     if (_debug_visualizations) {
       geometry_msgs::msg::PoseArray msg;
       geometry_msgs::msg::Pose msg_pose;
@@ -489,12 +594,18 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
 
     // Note: If the start is blocked only one iteration will occur before failure
     if (num_iterations == 1) {
+      trace_result = "failed";
+      trace_failure_reason = "start_occupied";
       throw nav2_core::StartOccupied("Start occupied");
     }
 
     if (num_iterations < _a_star->getMaxIterations()) {
+      trace_result = "failed";
+      trace_failure_reason = "no_valid_path";
       throw nav2_core::NoValidPathCouldBeFound("no valid path found");
     } else {
+      trace_result = "failed";
+      trace_failure_reason = "max_iterations";
       throw nav2_core::PlannerTimedOut("exceeded maximum iterations");
     }
   }
@@ -608,6 +719,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     }
   }
 
+  trace_result = "succeeded";
   return plan;
 }
 
@@ -616,6 +728,17 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
 {
   rcl_interfaces::msg::SetParametersResult result;
   std::lock_guard<std::mutex> lock_reinit(_mutex);
+
+  const auto trace_parameter = std::find_if(
+    parameters.begin(), parameters.end(), [this](const rclcpp::Parameter & parameter) {
+      return parameter.get_name() == _name + ".publish_analytic_expansion_trace";
+    });
+  if (trace_parameter != parameters.end()) {
+    result.successful = false;
+    result.reason = "publish_analytic_expansion_trace is configure-time only; "
+      "reconfigure the planner to change it";
+    return result;
+  }
 
   bool reinit_collision_checker = false;
   bool reinit_a_star = false;
