@@ -52,6 +52,7 @@ struct SearchInfo
   bool downsample_obstacle_heuristic{true};
   bool use_quadratic_cost_penalty{false};
   bool analytic_score_length_direction{false};
+  bool analytic_score_cusp_cost{false};
   bool analytic_single_gear{false};
 };
 

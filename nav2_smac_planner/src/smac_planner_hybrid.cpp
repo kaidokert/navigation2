@@ -146,13 +146,16 @@ void SmacPlannerHybrid::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".analytic_score", rclcpp::ParameterValue(std::string("stock")));
   node->get_parameter(name + ".analytic_score", _analytic_score);
-  if (_analytic_score != "stock" && _analytic_score != "length_direction") {
+  if (_analytic_score != "stock" && _analytic_score != "length_direction" &&
+    _analytic_score != "length_direction_cusp")
+  {
     RCLCPP_WARN(
-      _logger, "Unknown analytic_score '%s', valid options are stock, length_direction. "
-      "Using stock.", _analytic_score.c_str());
+      _logger, "Unknown analytic_score '%s', valid options are stock, length_direction, "
+      "length_direction_cusp. Using stock.", _analytic_score.c_str());
     _analytic_score = "stock";
   }
-  _search_info.analytic_score_length_direction = (_analytic_score == "length_direction");
+  _search_info.analytic_score_length_direction = (_analytic_score != "stock");
+  _search_info.analytic_score_cusp_cost = (_analytic_score == "length_direction_cusp");
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".analytic_single_gear", rclcpp::ParameterValue(false));
   node->get_parameter(name + ".analytic_single_gear", _search_info.analytic_single_gear);
@@ -929,14 +932,16 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     } else if (type == ParameterType::PARAMETER_STRING) {
       if (name == _name + ".analytic_score") {
         const std::string value = parameter.as_string();
-        if (value == "stock" || value == "length_direction") {
+        if (value == "stock" || value == "length_direction" || value == "length_direction_cusp") {
           reinit_a_star = true;
           _analytic_score = value;
-          _search_info.analytic_score_length_direction = (value == "length_direction");
+          _search_info.analytic_score_length_direction = (value != "stock");
+          _search_info.analytic_score_cusp_cost = (value == "length_direction_cusp");
         } else {
           RCLCPP_WARN(
             _logger,
-            "Unknown analytic_score '%s', valid options are stock, length_direction. Keeping '%s'.",
+            "Unknown analytic_score '%s', valid options are stock, length_direction, "
+            "length_direction_cusp. Keeping '%s'.",
             value.c_str(), _analytic_score.c_str());
         }
       } else if (name == _name + ".motion_model_for_search") {
