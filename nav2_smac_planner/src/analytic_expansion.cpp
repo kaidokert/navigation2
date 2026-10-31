@@ -87,15 +87,22 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
       // Reset the counter and try the analytic path expansion
       analytic_iterations = desired_iterations;
       _trace_candidate_turning_radius = current_node->motion_table.min_turning_radius;
+      _trace_candidate_kind =
+        _motion_model == MotionModel::DUBIN ? "dubins" : "reeds_shepp";
       AnalyticExpansionNodes analytic_nodes =
         getAnalyticPath(current_node, goal_node, getter, current_node->motion_table.state_space);
-      if (!analytic_nodes.empty()) {
+      // Optional single-gear candidates (forward-only and reverse-only Dubins paths to the exact
+      // goal) for Reeds-Shepp search. They are scored with the other candidates below.
+      const bool single_gear =
+        _search_info.analytic_single_gear && _motion_model == MotionModel::REEDS_SHEPP;
+      const bool have_shortest_word = !analytic_nodes.empty();
+      if (have_shortest_word || single_gear) {
         uint64_t selected_attempt_id = _last_trace_attempt_id;
         // If we have a valid path, attempt to refine it
         NodePtr node = current_node;
         NodePtr test_node = current_node;
         AnalyticExpansionNodes refined_analytic_nodes;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8 && have_shortest_word; i++) {
           // Attempt to create better paths in 5 node increments, need to make sure
           // they exist for each in order to do so (maximum of 40 points back).
           if (test_node->parent && test_node->parent->parent && test_node->parent->parent->parent &&
@@ -146,7 +153,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           };
 
         float best_score = scoringFn(analytic_nodes);
-        if (_trace_callback) {
+        if (_trace_callback && have_shortest_word) {
           std::ostringstream event;
           event << std::setprecision(9)
                 << "{\"schema\":1,\"event\":\"score\",\"request_id\":"
@@ -157,7 +164,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
         float score = std::numeric_limits<float>::max();
         float min_turn_rad = node->motion_table.min_turning_radius;
         const float max_min_turn_rad = 4.0 * min_turn_rad;  // Up to 4x the turning radius
-        while (min_turn_rad < max_min_turn_rad) {
+        while (have_shortest_word && min_turn_rad < max_min_turn_rad) {
           min_turn_rad += 0.5;  // In Grid Coords, 1/2 cell steps
           ompl::base::StateSpacePtr state_space;
           if (node->motion_table.motion_model == MotionModel::DUBIN) {
@@ -182,6 +189,40 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
                   << ",\"score\":" << score << "}";
             _trace_callback(event.str());
           }
+        }
+
+        if (single_gear) {
+          const float radius = node->motion_table.min_turning_radius;
+          auto dubins_space = std::make_shared<ompl::base::DubinsStateSpace>(radius);
+          for (const bool reverse_only : {false, true}) {
+            _trace_candidate_turning_radius = radius;
+            _trace_candidate_kind = reverse_only ? "single_gear_reverse" : "single_gear_forward";
+            refined_analytic_nodes =
+              getAnalyticPath(node, goal_node, getter, dubins_space, reverse_only);
+            score = scoringFn(refined_analytic_nodes);
+            const uint64_t attempt_id = _last_trace_attempt_id;
+            // Strictly better only: on a tie the shortest Reeds-Shepp word is kept
+            if (score < best_score) {
+              analytic_nodes = refined_analytic_nodes;
+              best_score = score;
+              selected_attempt_id = attempt_id;
+            }
+            if (_trace_callback) {
+              std::ostringstream event;
+              event << std::setprecision(9)
+                    << "{\"schema\":1,\"event\":\"score\",\"request_id\":"
+                    << _trace_request_id << ",\"attempt_id\":" << attempt_id
+                    << ",\"score\":" << score << "}";
+              _trace_callback(event.str());
+            }
+          }
+          _trace_candidate_kind = "reeds_shepp";
+        }
+
+        if (analytic_nodes.empty()) {
+          // No valid candidate of any kind: same as a failed shortest-word attempt
+          analytic_iterations--;
+          return NodePtr(nullptr);
         }
 
         if (_trace_callback) {
@@ -265,7 +306,8 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   const NodePtr & node,
   const NodePtr & goal,
   const NodeGetter & node_getter,
-  const ompl::base::StateSpacePtr & state_space)
+  const ompl::base::StateSpacePtr & state_space,
+  const bool reverse_only)
 {
   const uint64_t attempt_id = ++_trace_attempt_id;
   _last_trace_attempt_id = attempt_id;
@@ -275,10 +317,13 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   static ompl::base::ScopedState<> from(state_space), to(state_space), s(state_space);
   from[0] = node->pose.x;
   from[1] = node->pose.y;
-  from[2] = node->motion_table.getAngleFromBin(node->pose.theta);
+  // A reverse-only path is a forward path for the robot turned around: flip both headings,
+  // plan, and flip the sampled headings back.
+  const double heading_flip = reverse_only ? M_PI : 0.0;
+  from[2] = node->motion_table.getAngleFromBin(node->pose.theta) + heading_flip;
   to[0] = goal->pose.x;
   to[1] = goal->pose.y;
-  to[2] = node->motion_table.getAngleFromBin(goal->pose.theta);
+  to[2] = node->motion_table.getAngleFromBin(goal->pose.theta) + heading_flip;
   const float distance = state_space->distance(from(), to());
   std::string trace_segments = "[]";
   bool has_rejected_sample = false;
@@ -300,7 +345,8 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
       event << std::setprecision(9)
             << "{\"schema\":1,\"event\":\"candidate\",\"request_id\":"
             << _trace_request_id << ",\"attempt_id\":" << attempt_id
-            << ",\"outcome\":\"" << outcome << "\",\"start_grid\":["
+            << ",\"outcome\":\"" << outcome << "\",\"kind\":\"" << _trace_candidate_kind
+            << "\",\"start_grid\":["
             << node->pose.x << "," << node->pose.y << ","
             << node->motion_table.getAngleFromBin(node->pose.theta) << "],\"goal_grid\":["
             << goal->pose.x << "," << goal->pose.y << ","
@@ -473,6 +519,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     const float interp_fraction = fractions[sample_index];
     state_space->interpolate(from(), to(), interp_fraction, s());
     reals = s.reals();
+    reals[2] -= heading_flip;
     // Make sure in range [0, 2PI)
     theta = (reals[2] < 0.0) ? (reals[2] + 2.0 * M_PI) : reals[2];
     theta = (theta > 2.0 * M_PI) ? (theta - 2.0 * M_PI) : theta;
@@ -642,7 +689,8 @@ getAnalyticPath(
   const NodePtr & node,
   const NodePtr & goal,
   const NodeGetter & node_getter,
-  const ompl::base::StateSpacePtr & state_space)
+  const ompl::base::StateSpacePtr & state_space,
+  const bool reverse_only)
 {
   return AnalyticExpansionNodes();
 }
