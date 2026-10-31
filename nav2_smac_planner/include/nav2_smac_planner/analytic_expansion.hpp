@@ -19,6 +19,8 @@
 #include <vector>
 #include <list>
 #include <memory>
+#include <functional>
+#include <cstdint>
 
 #include "nav2_smac_planner/node_2d.hpp"
 #include "nav2_smac_planner/node_hybrid.hpp"
@@ -33,6 +35,7 @@ template<typename NodeT>
 class AnalyticExpansion
 {
 public:
+  using TraceCallback = std::function<void(const std::string &)>;
   typedef NodeT * NodePtr;
   typedef typename NodeT::Coordinates Coordinates;
   typedef std::function<bool (const uint64_t &, NodeT * &)> NodeGetter;
@@ -74,6 +77,19 @@ public:
    * @param collision_checker Collision checker to use
    */
   void setCollisionChecker(GridCollisionChecker * collision_checker);
+
+  /** Set an optional callback for analytic-expansion diagnostic records. */
+  void setTraceCallback(const TraceCallback & callback) { _trace_callback = callback; }
+  void setTraceRequestId(uint64_t request_id)
+  {
+    _trace_request_id = request_id;
+    _trace_opportunities = 0;
+    _trace_schedule_skips = 0;
+    _trace_request_attempts = 0;
+  }
+  uint64_t getTraceOpportunities() const { return _trace_opportunities; }
+  uint64_t getTraceScheduleSkips() const { return _trace_schedule_skips; }
+  uint64_t getTraceRequestAttempts() const { return _trace_request_attempts; }
 
   /**
    * @brief Attempt an analytic path completion
@@ -127,6 +143,14 @@ protected:
   unsigned int _dim_3_size;
   GridCollisionChecker * _collision_checker;
   std::list<std::unique_ptr<NodeT>> _detached_nodes;
+  TraceCallback _trace_callback;
+  uint64_t _trace_attempt_id{0};
+  uint64_t _last_trace_attempt_id{0};
+  uint64_t _trace_request_id{0};
+  uint64_t _trace_opportunities{0};
+  uint64_t _trace_schedule_skips{0};
+  uint64_t _trace_request_attempts{0};
+  float _trace_candidate_turning_radius{0.0f};
 };
 
 }  // namespace nav2_smac_planner

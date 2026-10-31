@@ -169,6 +169,10 @@ void SmacPlannerHybrid::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".debug_visualizations", rclcpp::ParameterValue(false));
   node->get_parameter(name + ".debug_visualizations", _debug_visualizations);
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".publish_analytic_expansion_trace", rclcpp::ParameterValue(false));
+  node->get_parameter(
+    name + ".publish_analytic_expansion_trace", _publish_analytic_expansion_trace);
 
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".motion_model_for_search", rclcpp::ParameterValue(std::string("DUBIN")));
@@ -268,6 +272,11 @@ void SmacPlannerHybrid::configure(
       node->create_publisher<visualization_msgs::msg::MarkerArray>(
       "smoothed_footprints", 1);
   }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher =
+      node->create_publisher<std_msgs::msg::String>(
+      "analytic_expansion_trace", rclcpp::QoS(rclcpp::KeepLast(10000)).reliable());
+  }
 
   RCLCPP_INFO(
     _logger, "Configured plugin %s of type SmacPlannerHybrid with "
@@ -288,6 +297,9 @@ void SmacPlannerHybrid::activate()
     _expansions_publisher->on_activate();
     _planned_footprints_publisher->on_activate();
     _smoothed_footprints_publisher->on_activate();
+  }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher->on_activate();
   }
   if (_costmap_downsampler) {
     _costmap_downsampler->on_activate();
@@ -319,6 +331,9 @@ void SmacPlannerHybrid::deactivate()
     _planned_footprints_publisher->on_deactivate();
     _smoothed_footprints_publisher->on_deactivate();
   }
+  if (_publish_analytic_expansion_trace) {
+    _analytic_expansion_trace_publisher->on_deactivate();
+  }
   if (_costmap_downsampler) {
     _costmap_downsampler->on_deactivate();
   }
@@ -348,6 +363,7 @@ void SmacPlannerHybrid::cleanup()
     _planned_footprints_publisher.reset();
     _smoothed_footprints_publisher.reset();
   }
+  _analytic_expansion_trace_publisher.reset();
 }
 
 nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
@@ -381,6 +397,23 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     _costmap_ros->getUseRadius(),
     findCircumscribedCost(_costmap_ros));
   _a_star->setCollisionChecker(&_collision_checker);
+  if (_publish_analytic_expansion_trace) {
+    _a_star->setAnalyticExpansionTraceCallback(
+      [this](const std::string & json_record) {
+        if (!_analytic_expansion_trace_publisher ||
+          !_analytic_expansion_trace_publisher->is_activated())
+        {
+          return;
+        }
+        std_msgs::msg::String message;
+        message.data = json_record;
+        _analytic_expansion_trace_publisher->publish(message);
+      });
+  }
+  const uint64_t trace_request_id = ++_trace_plan_id;
+  if (_publish_analytic_expansion_trace) {
+    _a_star->setAnalyticExpansionTraceRequestId(trace_request_id);
+  }
 
   // Set starting point, in A* bin search coordinates
   float mx_start, my_start, mx_goal, my_goal;
@@ -469,10 +502,36 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     expansions = std::make_unique<std::vector<std::tuple<float, float, float>>>();
   }
   // Note: All exceptions thrown are handled by the planner server and returned to the action
-  if (!_a_star->createPath(
+  auto publish_trace_boundary = [this, trace_request_id](const char * result) {
+      if (!_publish_analytic_expansion_trace || !_analytic_expansion_trace_publisher ||
+        !_analytic_expansion_trace_publisher->is_activated())
+      {
+        return;
+      }
+      std_msgs::msg::String message;
+      message.data = std::string("{\"schema\":1,\"event\":\"plan_boundary\",\"request_id\":") +
+        std::to_string(trace_request_id) + ",\"result\":\"" + result +
+        "\",\"analytic_opportunities\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceOpportunities()) +
+        ",\"schedule_skips\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceScheduleSkips()) +
+        ",\"candidate_attempts\":" +
+        std::to_string(_a_star->getAnalyticExpansionTraceAttempts()) + "}";
+      _analytic_expansion_trace_publisher->publish(message);
+    };
+  publish_trace_boundary("started");
+  bool path_found = false;
+  try {
+    path_found = _a_star->createPath(
       path, num_iterations,
-      _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get()))
+      _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get());
+  } catch (...) {
+    publish_trace_boundary("exception");
+    throw;
+  }
+  if (!path_found)
   {
+    publish_trace_boundary("failed");
     if (_debug_visualizations) {
       geometry_msgs::msg::PoseArray msg;
       geometry_msgs::msg::Pose msg_pose;
@@ -498,6 +557,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
       throw nav2_core::PlannerTimedOut("exceeded maximum iterations");
     }
   }
+  publish_trace_boundary("succeeded");
 
   // Convert to world coordinates
   plan.poses.reserve(path.size());

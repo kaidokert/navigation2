@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <vector>
 #include <memory>
+#include <iomanip>
+#include <sstream>
 
 #include "nav2_smac_planner/analytic_expansion.hpp"
 
@@ -56,6 +58,9 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
   if (_motion_model == MotionModel::DUBIN || _motion_model == MotionModel::REEDS_SHEPP ||
     _motion_model == MotionModel::STATE_LATTICE)
   {
+    if (_trace_callback) {
+      ++_trace_opportunities;
+    }
     // See if we are closer and should be expanding more often
     const Coordinates node_coords =
       NodeT::getCoords(
@@ -80,9 +85,11 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
     if (analytic_iterations <= 0) {
       // Reset the counter and try the analytic path expansion
       analytic_iterations = desired_iterations;
+      _trace_candidate_turning_radius = current_node->motion_table.min_turning_radius;
       AnalyticExpansionNodes analytic_nodes =
         getAnalyticPath(current_node, goal_node, getter, current_node->motion_table.state_space);
       if (!analytic_nodes.empty()) {
+        uint64_t selected_attempt_id = _last_trace_attempt_id;
         // If we have a valid path, attempt to refine it
         NodePtr node = current_node;
         NodePtr test_node = current_node;
@@ -95,12 +102,14 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
             test_node->parent->parent->parent->parent->parent)
           {
             test_node = test_node->parent->parent->parent->parent->parent;
+            _trace_candidate_turning_radius = test_node->motion_table.min_turning_radius;
             refined_analytic_nodes =
               getAnalyticPath(test_node, goal_node, getter, test_node->motion_table.state_space);
             if (refined_analytic_nodes.empty()) {
               break;
             }
             analytic_nodes = refined_analytic_nodes;
+            selected_attempt_id = _last_trace_attempt_id;
             node = test_node;
           } else {
             break;
@@ -132,6 +141,14 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           };
 
         float best_score = scoringFn(analytic_nodes);
+        if (_trace_callback) {
+          std::ostringstream event;
+          event << std::setprecision(9)
+                << "{\"schema\":1,\"event\":\"score\",\"request_id\":"
+                << _trace_request_id << ",\"attempt_id\":" << selected_attempt_id
+                << ",\"score\":" << best_score << "}";
+          _trace_callback(event.str());
+        }
         float score = std::numeric_limits<float>::max();
         float min_turn_rad = node->motion_table.min_turning_radius;
         const float max_min_turn_rad = 4.0 * min_turn_rad;  // Up to 4x the turning radius
@@ -143,15 +160,39 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           } else {
             state_space = std::make_shared<ompl::base::ReedsSheppStateSpace>(min_turn_rad);
           }
+          _trace_candidate_turning_radius = min_turn_rad;
           refined_analytic_nodes = getAnalyticPath(node, goal_node, getter, state_space);
           score = scoringFn(refined_analytic_nodes);
+          const uint64_t attempt_id = _last_trace_attempt_id;
           if (score <= best_score) {
             analytic_nodes = refined_analytic_nodes;
             best_score = score;
+            selected_attempt_id = attempt_id;
+          }
+          if (_trace_callback) {
+            std::ostringstream event;
+            event << std::setprecision(9)
+                  << "{\"schema\":1,\"event\":\"score\",\"request_id\":"
+                  << _trace_request_id << ",\"attempt_id\":" << attempt_id
+                  << ",\"score\":" << score << "}";
+            _trace_callback(event.str());
           }
         }
 
+        if (_trace_callback) {
+          std::ostringstream event;
+          event << std::setprecision(9)
+                << "{\"schema\":1,\"event\":\"selection\",\"request_id\":"
+                << _trace_request_id << ",\"attempt_id\":" << selected_attempt_id
+                << ",\"score\":" << best_score << "}";
+          _trace_callback(event.str());
+        }
+
         return setAnalyticPath(node, goal_node, analytic_nodes);
+      }
+    } else {
+      if (_trace_callback) {
+        ++_trace_schedule_skips;
       }
     }
 
@@ -169,6 +210,11 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   const NodeGetter & node_getter,
   const ompl::base::StateSpacePtr & state_space)
 {
+  const uint64_t attempt_id = ++_trace_attempt_id;
+  _last_trace_attempt_id = attempt_id;
+  if (_trace_callback) {
+    ++_trace_request_attempts;
+  }
   static ompl::base::ScopedState<> from(state_space), to(state_space), s(state_space);
   from[0] = node->pose.x;
   from[1] = node->pose.y;
@@ -176,8 +222,48 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   to[0] = goal->pose.x;
   to[1] = goal->pose.y;
   to[2] = node->motion_table.getAngleFromBin(goal->pose.theta);
-
-  float d = state_space->distance(from(), to());
+  const float distance = state_space->distance(from(), to());
+  std::string trace_segments = "[]";
+  bool has_rejected_sample = false;
+  int rejected_sample_index = -1;
+  double rejected_sample_x = 0.0;
+  double rejected_sample_y = 0.0;
+  double rejected_sample_yaw = 0.0;
+  float rejected_sample_cost = -1.0f;
+  auto publish_attempt = [this, attempt_id, node, goal, distance, &has_rejected_sample,
+      &rejected_sample_index, &rejected_sample_x, &rejected_sample_y, &rejected_sample_yaw,
+      &rejected_sample_cost](
+      const char * outcome, size_t sample_count, size_t valid_count,
+      const std::string & segments)
+    {
+      if (!_trace_callback) {
+        return;
+      }
+      std::ostringstream event;
+      event << std::setprecision(9)
+            << "{\"schema\":1,\"event\":\"candidate\",\"request_id\":"
+            << _trace_request_id << ",\"attempt_id\":" << attempt_id
+            << ",\"outcome\":\"" << outcome << "\",\"start_grid\":["
+            << node->pose.x << "," << node->pose.y << ","
+            << node->motion_table.getAngleFromBin(node->pose.theta) << "],\"goal_grid\":["
+            << goal->pose.x << "," << goal->pose.y << ","
+            << node->motion_table.getAngleFromBin(goal->pose.theta) << "],\"distance\":"
+            << distance << ",\"turning_radius_cells\":"
+            << _trace_candidate_turning_radius << ",\"sample_count\":"
+            << sample_count << ",\"valid_sample_count\":" << valid_count
+            << ",\"segments\":" << segments << ",\"rejected_sample\":";
+      if (has_rejected_sample) {
+        event << "{\"index\":" << rejected_sample_index << ",\"x\":"
+              << rejected_sample_x << ",\"y\":" << rejected_sample_y
+              << ",\"yaw\":" << rejected_sample_yaw << ",\"cost\":"
+              << rejected_sample_cost << "}";
+      } else {
+        event << "null";
+      }
+      event << "}";
+      _trace_callback(event.str());
+    };
+  const float d = distance;
 
   // Feasibility-preserving sampling: cap heading change per step at
   // max_dtheta so chords between samples never imply R < R_min.
@@ -192,6 +278,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   // into higher cost areas far out from the goal itself, let search to the work of getting
   // close before the analytic expansion brings it home.
   if (d > _search_info.analytic_expansion_max_length || d < sqrt_2) {
+    publish_attempt("distance_gate", 0, 0, "[]");
     return AnalyticExpansionNodes();
   }
 
@@ -204,6 +291,29 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
 
   if (rs_space) {
     auto rs_path = rs_space->reedsShepp(from(), to());
+    if (_trace_callback) {
+      std::ostringstream segments;
+      segments << std::setprecision(9) << "[";
+      bool first = true;
+      for (int i = 0; i < 5; ++i) {
+        if (std::abs(rs_path.length_[i]) < 1e-6) {
+          continue;
+        }
+        if (!first) { segments << ","; }
+        first = false;
+        const char * type = "unknown";
+        switch (rs_path.type_[i]) {
+          case ompl::base::ReedsSheppStateSpace::RS_LEFT: type = "left"; break;
+          case ompl::base::ReedsSheppStateSpace::RS_STRAIGHT: type = "straight"; break;
+          case ompl::base::ReedsSheppStateSpace::RS_RIGHT: type = "right"; break;
+          default: break;
+        }
+        segments << "{\"type\":\"" << type << "\",\"signed_length\":"
+                 << rs_path.length_[i] << "}";
+      }
+      segments << "]";
+      trace_segments = segments.str();
+    }
     double total_len = rs_path.totalLength_;
     if (total_len > 1e-6) {
       double t_accum = 0.0;
@@ -227,6 +337,24 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     }
   } else if (dubins_space) {
     auto dubins_path = dubins_space->dubins(from(), to());
+    if (_trace_callback) {
+      std::ostringstream segments;
+      segments << std::setprecision(9) << "[";
+      for (int i = 0; i < 3; ++i) {
+        if (i > 0) { segments << ","; }
+        const char * type = "unknown";
+        switch ((*dubins_path.type_)[i]) {
+          case ompl::base::DubinsStateSpace::DUBINS_LEFT: type = "left"; break;
+          case ompl::base::DubinsStateSpace::DUBINS_STRAIGHT: type = "straight"; break;
+          case ompl::base::DubinsStateSpace::DUBINS_RIGHT: type = "right"; break;
+          default: break;
+        }
+        segments << "{\"type\":\"" << type << "\",\"length\":"
+                 << dubins_path.length_[i] << "}";
+      }
+      segments << "]";
+      trace_segments = segments.str();
+    }
     double total_len = dubins_path.length();
     if (total_len > 1e-6) {
       double t_accum = 0.0;
@@ -272,11 +400,14 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   float angle = 0.0;
   Coordinates proposed_coordinates;
   bool failure = false;
+  const char * rejection_reason = "none";
+  const size_t planned_sample_count = fractions.size();
   std::vector<float> node_costs;
   node_costs.reserve(fractions.size());
 
   // Check intermediary poses (non-goal, non-start)
-  for (const float & interp_fraction : fractions) {
+  for (size_t sample_index = 0; sample_index < fractions.size(); ++sample_index) {
+    const float interp_fraction = fractions[sample_index];
     state_space->interpolate(from(), to(), interp_fraction, s());
     reals = s.reals();
     // Make sure in range [0, 2PI)
@@ -302,13 +433,26 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
         prev = next;
       } else {
         // Abort
+        rejected_sample_cost = next->getCost();
         next->setPose(initial_node_coords);
         failure = true;
+        rejection_reason = "invalid_sample";
+        has_rejected_sample = true;
+        rejected_sample_index = static_cast<int>(sample_index);
+        rejected_sample_x = reals[0];
+        rejected_sample_y = reals[1];
+        rejected_sample_yaw = reals[2];
         break;
       }
     } else {
       // Abort
       failure = true;
+      rejection_reason = "node_lookup_failed";
+      has_rejected_sample = true;
+      rejected_sample_index = static_cast<int>(sample_index);
+      rejected_sample_x = reals[0];
+      rejected_sample_y = reals[1];
+      rejected_sample_yaw = reals[2];
       break;
     }
   }
@@ -330,6 +474,18 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
           cost_exit_high_cost_region = true;
         } else if (curr_cost > max_cost && cost_exit_high_cost_region) {
           failure = true;
+          rejection_reason = "max_cost";
+          const size_t sample_index = static_cast<size_t>(
+            std::distance(node_costs.begin(), iter.base()) - 1);
+          if (sample_index < possible_nodes.size()) {
+            has_rejected_sample = true;
+            rejected_sample_index = static_cast<int>(sample_index);
+            rejected_sample_x = possible_nodes[sample_index].proposed_coords.x;
+            rejected_sample_y = possible_nodes[sample_index].proposed_coords.y;
+            rejected_sample_yaw = node->motion_table.getAngleFromBin(
+              possible_nodes[sample_index].proposed_coords.theta);
+            rejected_sample_cost = curr_cost;
+          }
           break;
         }
       }
@@ -352,9 +508,12 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   }
 
   if (failure) {
+    publish_attempt(rejection_reason, planned_sample_count, possible_nodes.size(),
+      trace_segments);
     return AnalyticExpansionNodes();
   }
 
+  publish_attempt("valid", planned_sample_count, possible_nodes.size(), trace_segments);
   return possible_nodes;
 }
 

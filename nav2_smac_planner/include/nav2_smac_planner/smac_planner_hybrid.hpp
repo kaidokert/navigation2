@@ -26,6 +26,7 @@
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav2_core/global_planner.hpp"
 #include "nav_msgs/msg/path.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -124,6 +125,8 @@ protected:
   double _lookup_table_size;
   double _minimum_turning_radius_global_coords;
   bool _debug_visualizations;
+  bool _publish_analytic_expansion_trace{false};
+  uint64_t _trace_plan_id{0};
   std::string _motion_model_for_search;
   MotionModel _motion_model;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr _raw_plan_publisher;
@@ -133,6 +136,8 @@ protected:
     _smoothed_footprints_publisher;
   rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseArray>::SharedPtr
     _expansions_publisher;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr
+    _analytic_expansion_trace_publisher;
   std::mutex _mutex;
   rclcpp_lifecycle::LifecycleNode::WeakPtr _node;
 

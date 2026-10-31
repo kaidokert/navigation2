@@ -122,6 +122,14 @@ public:
    */
   void setCollisionChecker(GridCollisionChecker * collision_checker);
 
+  /** Set optional analytic-expansion diagnostics callback. */
+  void setAnalyticExpansionTraceCallback(
+    const typename AnalyticExpansion<NodeT>::TraceCallback & callback);
+  void setAnalyticExpansionTraceRequestId(uint64_t request_id);
+  uint64_t getAnalyticExpansionTraceOpportunities() const;
+  uint64_t getAnalyticExpansionTraceScheduleSkips() const;
+  uint64_t getAnalyticExpansionTraceAttempts() const;
+
   /**
    * @brief Set the goal for planning, as a node index
    * @param mx The node X index of the goal
