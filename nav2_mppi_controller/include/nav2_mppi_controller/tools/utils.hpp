@@ -347,10 +347,10 @@ inline void findPathCosts(
 {
   auto * costmap = costmap_ros->getCostmap();
   unsigned int map_x, map_y;
-  const size_t path_segments_count = data.path.x.shape(0) - 1;
-  data.path_pts_valid = std::vector<bool>(path_segments_count, false);
+  const size_t path_point_count = data.path.x.shape(0);
+  data.path_pts_valid = std::vector<bool>(path_point_count, false);
   const bool tracking_unknown = costmap_ros->getLayeredCostmap()->isTrackingUnknown();
-  for (unsigned int idx = 0; idx < path_segments_count; idx++) {
+  for (unsigned int idx = 0; idx < path_point_count; idx++) {
     if (!costmap->worldToMap(data.path.x(idx), data.path.y(idx), map_x, map_y)) {
       (*data.path_pts_valid)[idx] = false;
       continue;
