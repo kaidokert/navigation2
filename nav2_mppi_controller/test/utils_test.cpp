@@ -324,11 +324,20 @@ TEST(UtilsTests, findPathCosts)
   path.x(20) = 4.2;  // IN INFLATED
   path.y(20) = 4.2;
 
+  // Final point must receive the same validity check: valid while free, then lethal.
+  setPathCostsIfNotSet(data3, costmap_ros);
+  ASSERT_EQ(data3.path_pts_valid->size(), path.x.shape(0));
+  EXPECT_TRUE(data3.path_pts_valid->back());
+  data3.path_pts_valid.reset();
+  path.x(49) = 1.5;
+  path.y(49) = 1.5;
+
   // This should be evaluated and have real outputs now
   setPathCostsIfNotSet(data3, costmap_ros);
   EXPECT_TRUE(data3.path_pts_valid.has_value());
-  for (unsigned int i = 0; i != path.x.shape(0) - 1; i++) {
-    if (i == 1 || i == 10) {
+  ASSERT_EQ(data3.path_pts_valid->size(), path.x.shape(0));
+  for (unsigned int i = 0; i != path.x.shape(0); i++) {
+    if (i == 1 || i == 10 || i == 49) {
       EXPECT_FALSE((*data3.path_pts_valid)[i]);
     } else {
       EXPECT_TRUE((*data3.path_pts_valid)[i]);
