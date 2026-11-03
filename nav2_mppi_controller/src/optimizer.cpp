@@ -258,6 +258,9 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    // Recentring changes each row's controls and rollout. Costs from an earlier
+    // bank (including collision penalties) do not score this new trajectory.
+    costs_.fill(0.0f);
     generateNoisedTrajectories();
 
     // [B] BATCH STATS after noise+predict

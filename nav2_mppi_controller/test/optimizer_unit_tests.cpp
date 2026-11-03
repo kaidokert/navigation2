@@ -225,7 +225,56 @@ public:
   {
     return integrateStateVelocities(traj, state);
   }
+
+  void expectFinalBankCostsMatchFreshEvaluation()
+  {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "map";
+    pose.pose.orientation.w = 1.0;
+    nav_msgs::msg::Path path;
+    path.header = pose.header;
+    path.poses = {pose, pose};
+    path.poses.back().pose.position.x = 1.0;
+    prepare(pose, geometry_msgs::msg::Twist{}, path, path.poses.back().pose, nullptr);
+    optimize();
+    const auto final_costs = costs_;
+    // Independently score precisely the final bank, without another noise draw
+    // or control update. Gamma is zero, so this must be the complete objective.
+    costs_.fill(0.0f);
+    critic_manager_.evalTrajectoriesScores(critics_data_);
+    ASSERT_GT(xt::amin(costs_)(), 1.0f);  // Ensure the real critic actually ran.
+    EXPECT_LT(xt::amax(xt::abs(final_costs - costs_))(), 1e-5f);
+  }
 };
+
+TEST(OptimizerTests, EachIterationScoresItsCurrentBankWithoutEarlierCosts)
+{
+  // One iteration is the unchanged control; three exercises repeated recentering.
+  for (const int iterations : {1, 3}) {
+    SCOPED_TRACE(iterations);
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("bank_cost_node");
+    node->declare_parameter("controller_frequency", rclcpp::ParameterValue(20.0));
+    node->declare_parameter("mppic.batch_size", rclcpp::ParameterValue(32));
+    node->declare_parameter("mppic.time_steps", rclcpp::ParameterValue(10));
+    node->declare_parameter("mppic.iteration_count", rclcpp::ParameterValue(iterations));
+    node->declare_parameter("mppic.gamma", rclcpp::ParameterValue(0.0));
+    node->declare_parameter("mppic.regenerate_noises", rclcpp::ParameterValue(false));
+    node->declare_parameter(
+      "mppic.critics", rclcpp::ParameterValue(std::vector<std::string>{"GoalCritic"}));
+    node->declare_parameter("mppic.GoalCritic.threshold_to_consider", rclcpp::ParameterValue(2.0));
+    auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+      "bank_costmap", "", "bank_costmap", true);
+    rclcpp_lifecycle::State lifecycle_state;
+    ASSERT_EQ(costmap->on_configure(lifecycle_state), nav2_util::CallbackReturn::SUCCESS);
+    costmap->pause();
+    ParametersHandler parameters(node);
+    OptimizerTester optimizer;
+    optimizer.initialize(node, "mppic", costmap, &parameters);
+    optimizer.expectFinalBankCostsMatchFreshEvaluation();
+    optimizer.shutdown();
+    costmap->on_cleanup(lifecycle_state);
+  }
+}
 
 TEST(OptimizerTests, BasicInitializedFunctions)
 {
