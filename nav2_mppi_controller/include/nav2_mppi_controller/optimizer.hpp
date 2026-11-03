@@ -106,7 +106,8 @@ public:
   geometry_msgs::msg::TwistStamped evalControl(
     const geometry_msgs::msg::PoseStamped & robot_pose,
     const geometry_msgs::msg::Twist & robot_speed, const nav_msgs::msg::Path & plan,
-    const geometry_msgs::msg::Pose & goal, nav2_core::GoalChecker * goal_checker);
+    const geometry_msgs::msg::Pose & goal, nav2_core::GoalChecker * goal_checker,
+    int active_cusp_direction = 0);
 
   /**
    * @brief Get the trajectories generated in a cycle for visualization
@@ -150,7 +151,8 @@ protected:
     const geometry_msgs::msg::PoseStamped & robot_pose,
     const geometry_msgs::msg::Twist & robot_speed,
     const nav_msgs::msg::Path & plan,
-    const geometry_msgs::msg::Pose & goal, nav2_core::GoalChecker * goal_checker);
+    const geometry_msgs::msg::Pose & goal, nav2_core::GoalChecker * goal_checker,
+    int active_cusp_direction = 0);
 
   /**
    * @brief Obtain the main controller's parameters

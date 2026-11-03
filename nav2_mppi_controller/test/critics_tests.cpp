@@ -259,6 +259,48 @@ TEST(CriticTests, GoalAngleCritic)
   EXPECT_NEAR(costs(0), 9.42, 0.02);  // (3.14 - 0.0) * 3.0 weight
 }
 
+TEST(CriticTests, GoalAngleFinalSegmentOnly)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  node->declare_parameter("critic.final_segment_only", true);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state;
+  models::Trajectories trajectories;
+  trajectories.reset(2, 3);
+  models::Path path;
+  path.reset(1);
+  path.x(0) = .03;
+  path.yaws(0) = -.30657;
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = .03;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float dt = .05;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  GoalAngleCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  for (int direction : {-1, 1}) {
+    data.active_cusp_direction = direction;
+    critic.score(data);
+    EXPECT_FLOAT_EQ(costs(0), 0.0f);
+    EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  }
+  data.active_cusp_direction = 0;
+  // Same endpoint position, but only one rollout aligns its heading.
+  xt::view(trajectories.yaws, 1, xt::all()) = -.30657f;
+  critic.score(data);
+  EXPECT_NEAR(costs(0), .91971f, 1e-5);
+  EXPECT_NEAR(costs(1), 0.0f, 1e-5);
+  costs.fill(0.0f);
+  path.reset(0);
+  EXPECT_NO_THROW(critic.score(data));
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+}
+
 TEST(CriticTests, GoalAngleSymmetricCritic)
 {
   // Standard preamble
@@ -360,6 +402,40 @@ TEST(CriticTests, GoalCritic)
   critic.score(data);
   EXPECT_NEAR(costs(2), 2.5, 1e-6);  // (sqrt(10.0 * 10.0) * 5.0 weight
   EXPECT_NEAR(xt::sum(costs, immediate)(), 2500.0, 1e-6);  // should be 2.5 * 1000
+}
+
+TEST(CriticTests, GoalFinalSegmentOnly)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  node->declare_parameter("critic.final_segment_only", true);
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+  models::State state;
+  models::Trajectories trajectories;
+  trajectories.reset(2, 3);
+  models::Path path;
+  path.reset(1);
+  path.x(0) = .03;
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = .03;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float dt = .05;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  GoalCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  for (int direction : {-1, 1}) {
+    data.active_cusp_direction = direction;
+    critic.score(data);
+    EXPECT_FLOAT_EQ(costs(0), 0.0f);
+    EXPECT_FLOAT_EQ(costs(1), 0.0f);
+  }
+  data.active_cusp_direction = 0;
+  critic.score(data);
+  EXPECT_GT(costs(0), 0.0f);
 }
 
 TEST(CriticTests, PathAngleCritic)

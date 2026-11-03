@@ -199,9 +199,10 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   const geometry_msgs::msg::Twist & robot_speed,
   const nav_msgs::msg::Path & plan,
   const geometry_msgs::msg::Pose & goal,
-  nav2_core::GoalChecker * goal_checker)
+  nav2_core::GoalChecker * goal_checker,
+  int active_cusp_direction)
 {
-  prepare(robot_pose, robot_speed, plan, goal, goal_checker);
+  prepare(robot_pose, robot_speed, plan, goal, goal_checker, active_cusp_direction);
 
   bool diag = (diag_tick_++ % 4 == 0);
   const auto ts = settings_.time_steps;
@@ -321,7 +322,8 @@ void Optimizer::prepare(
   const geometry_msgs::msg::Twist & robot_speed,
   const nav_msgs::msg::Path & plan,
   const geometry_msgs::msg::Pose & goal,
-  nav2_core::GoalChecker * goal_checker)
+  nav2_core::GoalChecker * goal_checker,
+  int active_cusp_direction)
 {
   state_.pose = robot_pose;
   state_.speed = robot_speed;
@@ -335,6 +337,7 @@ void Optimizer::prepare(
   critics_data_.motion_model = motion_model_;
   critics_data_.furthest_reached_path_point.reset();
   critics_data_.path_pts_valid.reset();
+  critics_data_.active_cusp_direction = active_cusp_direction;
 }
 
 void Optimizer::shiftControlSequence()
