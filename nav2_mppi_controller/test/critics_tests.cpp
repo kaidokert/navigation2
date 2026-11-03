@@ -1074,7 +1074,11 @@ TEST(CriticTests, PathAlignIncludesReachedEndpoint)
       EXPECT_GT(costs(1), costs(0) + 0.1f);
       EXPECT_GT(costs(2), costs(0) + 0.1f);
 
-      // The newly included endpoint must be checked, never assumed traversable.
+      // The newly included endpoint must be checked, never assumed traversable:
+      // valid while its cell is free, invalid once it is lethal.
+      ASSERT_TRUE(data.path_pts_valid.has_value());
+      ASSERT_EQ(data.path_pts_valid->size(), point_count);
+      EXPECT_TRUE(data.path_pts_valid->back());
       unsigned int mx, my;
       ASSERT_TRUE(grid->worldToMap(path.x(point_count - 1), path.y(point_count - 1), mx, my));
       grid->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
