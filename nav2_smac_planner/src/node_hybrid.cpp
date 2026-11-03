@@ -307,7 +307,13 @@ MotionPoses HybridMotionTable::getProjections(const NodeHybrid * node)
     const MotionPose & motion_model = projections[i];
 
     // normalize theta, I know its overkill, but I've been burned before...
-    const float & node_heading = node->pose.theta;
+    float node_heading = std::round(node->pose.theta);
+    if (node_heading < 0.0f) {
+      node_heading += num_angle_quantization_float;
+    }
+    if (node_heading >= num_angle_quantization_float) {
+      node_heading -= num_angle_quantization_float;
+    }
     float new_heading = node_heading + motion_model._theta;
 
     if (new_heading < 0.0) {

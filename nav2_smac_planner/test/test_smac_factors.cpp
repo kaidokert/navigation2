@@ -222,6 +222,12 @@ TEST(SmacFactors, length_direction_score_weights_reverse_and_cusps)
     cusp_expander.lengthDirectionScore(build({10, 11, 12, 13, 12.99f})),
     cusp_expander.lengthDirectionScore(build({10, 11, 12, 13})) + 19.0f);
 
+  // start_coords precedes expansion[0]: a first-step gear reversal from start_coords is also scored
+  const nav2_smac_planner::NodeHybrid::Coordinates start_pose(10.01f, 10.0f, 0.0f);
+  EXPECT_GT(
+    cusp_expander.lengthDirectionScore(build({10, 11, 12, 13}), &start_pose),
+    cusp_expander.lengthDirectionScore(build({10, 11, 12, 13})) + 19.0f);
+
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
 }
 

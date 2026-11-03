@@ -528,15 +528,21 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
             std::to_string(start.pose.position.y) + ") was outside bounds");
   }
 
-  double orientation_bin = std::round(tf2::getYaw(start.pose.orientation) / _angle_bin_size);
-  while (orientation_bin < 0.0) {
-    orientation_bin += static_cast<float>(_angle_quantizations);
+  double continuous_start_bin = start_yaw / _angle_bin_size;
+  while (continuous_start_bin < 0.0) {
+    continuous_start_bin += static_cast<double>(_angle_quantizations);
   }
+  while (continuous_start_bin >= static_cast<double>(_angle_quantizations)) {
+    continuous_start_bin -= static_cast<double>(_angle_quantizations);
+  }
+  double orientation_bin = std::round(continuous_start_bin);
   // This is needed to handle precision issues
   if (orientation_bin >= static_cast<float>(_angle_quantizations)) {
     orientation_bin -= static_cast<float>(_angle_quantizations);
   }
-  _a_star->setStart(mx_start, my_start, static_cast<unsigned int>(orientation_bin));
+  _a_star->setStart(
+    mx_start, my_start, static_cast<unsigned int>(orientation_bin),
+    (axle > 0.0) ? static_cast<float>(continuous_start_bin) : -1.0f);
 
   // Set goal point, in A* bin search coordinates
   if (!costmap->worldToMapContinuous(

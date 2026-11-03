@@ -134,7 +134,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
             }
 
             if (_search_info.analytic_score_length_direction) {
-              return lengthDirectionScore(expansion);
+              return lengthDirectionScore(expansion, &node->pose);
             }
 
             float score = 0.0;
@@ -250,7 +250,9 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
 }
 
 template<>
-float AnalyticExpansion<NodeHybrid>::lengthDirectionScore(const AnalyticExpansionNodes & expansion)
+float AnalyticExpansion<NodeHybrid>::lengthDirectionScore(
+  const AnalyticExpansionNodes & expansion,
+  const Coordinates * start_coords)
 {
   // True length of every step, weighted like a search primitive: cost penalty, reverse
   // penalty on steps that move against the heading, change penalty on the first step after
@@ -261,48 +263,58 @@ float AnalyticExpansion<NodeHybrid>::lengthDirectionScore(const AnalyticExpansio
   auto & table = expansion[0].node->motion_table;
   float score = 0.0f;
   int previous_gear = 0;
-  for (size_t i = 0; i + 1 < expansion.size(); ++i) {
-    const auto & a = expansion[i].proposed_coords;
-    const auto & b = expansion[i + 1].proposed_coords;
-    const float dx = b.x - a.x;
-    const float dy = b.y - a.y;
-    const float length = hypotf(dx, dy);
-    if (length <= 0.0f) {
-      continue;
-    }
-    const float heading = table.getAngleFromBin(a.theta);
-    const int gear = (dx * cosf(heading) + dy * sinf(heading)) < 0.0f ? -1 : 1;
-    const float normalized_cost = expansion[i].node->getCost() / 252.0f;
-    float step = length;
-    if (table.use_quadratic_cost_penalty) {
-      step *= 1.0f + table.cost_penalty * normalized_cost * normalized_cost;
-    } else {
-      step *= 1.0f + table.cost_penalty * normalized_cost;
-    }
-    if (gear < 0) {
-      step *= _search_info.reverse_penalty;
-    }
-    if (previous_gear != 0 && gear != previous_gear) {
-      step *= 1.0f + _search_info.change_penalty;
-      if (_search_info.analytic_score_cusp_cost) {
-        score += _search_info.change_penalty * table.min_turning_radius;
+  auto scoreStep = [&](const Coordinates & a, const Coordinates & b, float raw_cost) {
+      const float dx = b.x - a.x;
+      const float dy = b.y - a.y;
+      const float length = hypotf(dx, dy);
+      if (length <= 0.0f) {
+        return;
       }
-    }
-    previous_gear = gear;
-    score += step;
+      const float heading = table.getAngleFromBin(a.theta);
+      const int gear = (dx * cosf(heading) + dy * sinf(heading)) < 0.0f ? -1 : 1;
+      const float normalized_cost = raw_cost / 252.0f;
+      float step = length;
+      if (table.use_quadratic_cost_penalty) {
+        step *= 1.0f + table.cost_penalty * normalized_cost * normalized_cost;
+      } else {
+        step *= 1.0f + table.cost_penalty * normalized_cost;
+      }
+      if (gear < 0) {
+        step *= _search_info.reverse_penalty;
+      }
+      if (previous_gear != 0 && gear != previous_gear) {
+        step *= 1.0f + _search_info.change_penalty;
+        if (_search_info.analytic_score_cusp_cost) {
+          score += _search_info.change_penalty * table.min_turning_radius;
+        }
+      }
+      previous_gear = gear;
+      score += step;
+    };
+
+  if (start_coords != nullptr && !expansion.empty()) {
+    scoreStep(*start_coords, expansion[0].proposed_coords, expansion[0].node->getCost());
+  }
+  for (size_t i = 0; i + 1 < expansion.size(); ++i) {
+    scoreStep(
+      expansion[i].proposed_coords,
+      expansion[i + 1].proposed_coords,
+      expansion[i].node->getCost());
   }
   return score;
 }
 
 // Only the hybrid planner declares analytic_score; other node types never use this score.
 template<>
-float AnalyticExpansion<Node2D>::lengthDirectionScore(const AnalyticExpansionNodes &)
+float AnalyticExpansion<Node2D>::lengthDirectionScore(
+  const AnalyticExpansionNodes &, const Coordinates *)
 {
   return std::numeric_limits<float>::max();
 }
 
 template<>
-float AnalyticExpansion<NodeLattice>::lengthDirectionScore(const AnalyticExpansionNodes &)
+float AnalyticExpansion<NodeLattice>::lengthDirectionScore(
+  const AnalyticExpansionNodes &, const Coordinates *)
 {
   return std::numeric_limits<float>::max();
 }
