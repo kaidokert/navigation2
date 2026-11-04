@@ -340,15 +340,16 @@ ObstacleLayer::laserScanCallback(
   cloud.header = message->header;
 
   // project the scan into a point cloud
+  laser_geometry::LaserProjection projector;
   try {
-    projector_.transformLaserScanToPointCloud(message->header.frame_id, *message, cloud, *tf_);
+    projector.transformLaserScanToPointCloud(message->header.frame_id, *message, cloud, *tf_);
   } catch (tf2::TransformException & ex) {
     RCLCPP_WARN(
       logger_,
       "High fidelity enabled, but TF returned a transform exception to frame %s: %s",
       global_frame_.c_str(),
       ex.what());
-    projector_.projectLaser(*message, cloud);
+    projector.projectLaser(*message, cloud);
   } catch (std::runtime_error & ex) {
     RCLCPP_WARN(
       logger_,
@@ -384,14 +385,15 @@ ObstacleLayer::laserScanValidInfCallback(
   cloud.header = message.header;
 
   // project the scan into a point cloud
+  laser_geometry::LaserProjection projector;
   try {
-    projector_.transformLaserScanToPointCloud(message.header.frame_id, message, cloud, *tf_);
+    projector.transformLaserScanToPointCloud(message.header.frame_id, message, cloud, *tf_);
   } catch (tf2::TransformException & ex) {
     RCLCPP_WARN(
       logger_,
       "High fidelity enabled, but TF returned a transform exception to frame %s: %s",
       global_frame_.c_str(), ex.what());
-    projector_.projectLaser(message, cloud);
+    projector.projectLaser(message, cloud);
   } catch (std::runtime_error & ex) {
     RCLCPP_WARN(
       logger_,

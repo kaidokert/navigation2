@@ -229,8 +229,6 @@ protected:
   double min_obstacle_height_;  ///< @brief Max Obstacle Height
   double max_obstacle_height_;  ///< @brief Max Obstacle Height
 
-  /// @brief Used to project laser scans into point clouds
-  laser_geometry::LaserProjection projector_;
   /// @brief Used for the observation message filters
   std::vector<std::shared_ptr<message_filters::SubscriberBase<rclcpp_lifecycle::LifecycleNode>>>
   observation_subscribers_;
