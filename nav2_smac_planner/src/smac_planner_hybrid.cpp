@@ -568,6 +568,10 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     path_found = _a_star->createPath(
       path, num_iterations,
       _tolerance / static_cast<float>(costmap->getResolution()), cancel_checker, expansions.get());
+  } catch (const nav2_core::PlannerTimedOut &) {
+    trace_result = "failed";
+    trace_failure_reason = "planning_timeout";
+    throw;
   } catch (const nav2_core::GoalOccupied &) {
     trace_result = "failed";
     trace_failure_reason = "goal_occupied";
@@ -661,12 +665,9 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   steady_clock::time_point b = steady_clock::now();
   duration<double> time_span = duration_cast<duration<double>>(b - a);
   if (_max_planning_time > 0.0 && time_span.count() >= _max_planning_time) {
-    RCLCPP_FATAL(
-      _logger,
-      "CRITICAL TIMING FAILURE: SmacPlannerHybrid search exceeded hard planning ceiling of "
-      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
-      _max_planning_time * 1000.0, time_span.count() * 1000.0);
-    std::abort();
+    trace_result = "failed";
+    trace_failure_reason = "planning_timeout";
+    throw nav2_core::PlannerTimedOut("exceeded maximum planning time");
   }
   double time_remaining = _max_planning_time - static_cast<double>(time_span.count());
 
@@ -683,12 +684,9 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   steady_clock::time_point end_planning = steady_clock::now();
   duration<double> total_time_span = duration_cast<duration<double>>(end_planning - a);
   if (_max_planning_time > 0.0 && total_time_span.count() >= _max_planning_time) {
-    RCLCPP_FATAL(
-      _logger,
-      "CRITICAL TIMING FAILURE: SmacPlannerHybrid total planning exceeded hard ceiling of "
-      "%.1f ms (took %.1f ms)! Hard terminating planner to prevent inoperable navigation.",
-      _max_planning_time * 1000.0, total_time_span.count() * 1000.0);
-    std::abort();
+    trace_result = "failed";
+    trace_failure_reason = "planning_timeout";
+    throw nav2_core::PlannerTimedOut("exceeded maximum planning time");
   }
 
 #ifdef BENCHMARK_TESTING

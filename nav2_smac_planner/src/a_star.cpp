@@ -354,14 +354,7 @@ bool AStarAlgorithm<NodeT>::createPath(
       if (_max_planning_time > 0.0 &&
         static_cast<double>(planning_duration.count()) >= _max_planning_time)
       {
-        RCLCPP_FATAL(
-          rclcpp::get_logger("SmacPlannerHybrid"),
-          "CRITICAL TIMING FAILURE: SmacPlannerHybrid exceeded hard planning time ceiling of "
-          "%.1f ms (took %.1f ms)! Iterations: %i, Best heuristic dist: %.3f, "
-          "Queue size: %zu. Hard terminating planner.",
-          _max_planning_time * 1000.0, planning_duration.count() * 1000.0,
-          iterations, _best_heuristic_node.first, _queue.size());
-        std::abort();
+        throw nav2_core::PlannerTimedOut("exceeded maximum planning time");
       }
     }
 

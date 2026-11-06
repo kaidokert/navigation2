@@ -479,3 +479,39 @@ TEST(AStarTest, obstacle_heuristic_uses_collision_grid_and_invalidates_changed_v
   nav2_smac_planner::NodeHybrid::destroyStaticAssets();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
 }
+
+TEST(AStarTest, planning_timeout_is_recoverable_and_next_request_succeeds)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("timeout_recovery_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("timeout_recovery_map");
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto grid = costmap_ros->getCostmap();
+  grid->resizeMap(40, 40, 0.04, 0.0, 0.0);
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, 72, node);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 4.0;
+  nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeHybrid> planner(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info);
+  int max_iterations = 10000;
+  planner.initialize(true, max_iterations, 1000, 1, 1e-12, 11.0f, 72);
+  planner.setCollisionChecker(&checker);
+  planner.setStart(10.0f, 10.0f, 0);
+  planner.setGoal(20.0f, 10.0f, 0);
+  nav2_smac_planner::NodeHybrid::CoordinateVector path;
+  int iterations = 0;
+  EXPECT_THROW(planner.createPath(path, iterations, 0.0f, []() {return false;}),
+    nav2_core::PlannerTimedOut);
+  EXPECT_TRUE(path.empty());
+
+  planner.initialize(true, max_iterations, 1000, 1, 2.0, 11.0f, 72);
+  planner.setCollisionChecker(&checker);
+  planner.setStart(10.0f, 10.0f, 0);
+  planner.setGoal(20.0f, 10.0f, 0);
+  iterations = 0;
+  EXPECT_TRUE(planner.createPath(path, iterations, 0.0f, []() {return false;}));
+  EXPECT_FALSE(path.empty());
+  nav2_smac_planner::NodeHybrid::destroyStaticAssets();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
