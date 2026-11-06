@@ -442,7 +442,8 @@ public:
   static void resetObstacleHeuristic(
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros,
     const unsigned int & start_x, const unsigned int & start_y,
-    const unsigned int & goal_x, const unsigned int & goal_y);
+    const unsigned int & goal_x, const unsigned int & goal_y,
+    nav2_costmap_2d::Costmap2D * search_costmap = nullptr);
 
   /**
    * @brief Retrieve all valid neighbors of a node.
@@ -471,6 +472,7 @@ public:
     */
   static void destroyStaticAssets()
   {
+    obstacle_heuristic_costmap = nullptr;
     costmap_ros.reset();
   }
 
@@ -485,6 +487,9 @@ public:
   static ObstacleHeuristicQueue obstacle_heuristic_queue;
 
   static std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros;
+  // Search indices must address the same grid used for collision checking.
+  // The ROS costmap owns the original grid, which may have another resolution.
+  static nav2_costmap_2d::Costmap2D * obstacle_heuristic_costmap;
   // Dubin / Reeds-Shepp lookup and size for dereferencing
   static LookupTable dist_heuristic_lookup_table;
   static float size_lookup;

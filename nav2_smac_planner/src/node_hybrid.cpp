@@ -41,6 +41,7 @@ HybridMotionTable NodeHybrid::motion_table;
 float NodeHybrid::size_lookup = 25;
 LookupTable NodeHybrid::dist_heuristic_lookup_table;
 std::shared_ptr<nav2_costmap_2d::Costmap2DROS> NodeHybrid::costmap_ros = nullptr;
+nav2_costmap_2d::Costmap2D * NodeHybrid::obstacle_heuristic_costmap = nullptr;
 
 ObstacleHeuristicQueue NodeHybrid::obstacle_heuristic_queue;
 
@@ -492,14 +493,16 @@ inline float distanceHeuristic2D(
 void NodeHybrid::resetObstacleHeuristic(
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_i,
   const unsigned int & start_x, const unsigned int & start_y,
-  const unsigned int & goal_x, const unsigned int & goal_y)
+  const unsigned int & goal_x, const unsigned int & goal_y,
+  nav2_costmap_2d::Costmap2D * search_costmap)
 {
   // Downsample costmap 2x to compute a sparse obstacle heuristic. This speeds up
   // the planner considerably to search through 75% less cells with no detectable
   // erosion of path quality after even modest smoothing. The error would be no more
   // than 0.05 * normalized cost. Since this is just a search prior, there's no loss in generality
   costmap_ros = costmap_ros_i;
-  auto costmap = costmap_ros->getCostmap();
+  obstacle_heuristic_costmap = search_costmap ? search_costmap : costmap_ros->getCostmap();
+  auto costmap = obstacle_heuristic_costmap;
 
   // Clear lookup table
   unsigned int size = 0u;
@@ -551,7 +554,7 @@ float NodeHybrid::getObstacleHeuristic(
   const float & cost_penalty)
 {
   // If already expanded, return the cost
-  auto costmap = costmap_ros->getCostmap();
+  auto costmap = obstacle_heuristic_costmap;
   unsigned int size_x = 0u;
   unsigned int size_y = 0u;
   if (motion_table.downsample_obstacle_heuristic) {
