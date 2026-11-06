@@ -435,3 +435,47 @@ TEST(AStarTest, test_constants)
       "REEDS_SHEPP"), nav2_smac_planner::MotionModel::REEDS_SHEPP);
   EXPECT_EQ(nav2_smac_planner::fromString("NONE"), nav2_smac_planner::MotionModel::UNKNOWN);
 }
+
+TEST(AStarTest, obstacle_heuristic_uses_collision_grid_and_invalidates_changed_view)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("heuristic_grid_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("heuristic_grid_map");
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto original = costmap_ros->getCostmap();
+  original->resizeMap(40, 40, 0.02, 0.0, 0.0);
+  nav2_costmap_2d::Costmap2D search_grid(20, 20, 0.04, 0.0, 0.0, 0);
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, 72, node);
+  checker.setCostmap(&search_grid);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 4.0;
+  info.cache_obstacle_heuristic = true;
+  info.downsample_obstacle_heuristic = true;
+  nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeHybrid> planner(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info);
+  int max_iterations = 10000;
+  planner.initialize(true, max_iterations, 1000, 5000, 0.0, 11.0f, 72);
+  planner.setCollisionChecker(&checker);
+  planner.setStart(2.0f, 2.0f, 0);
+  planner.setGoal(15.0f, 15.0f, 0);
+
+  EXPECT_EQ(nav2_smac_planner::NodeHybrid::obstacle_heuristic_costmap, &search_grid);
+  EXPECT_DOUBLE_EQ(
+    nav2_smac_planner::NodeHybrid::obstacle_heuristic_costmap->getResolution(), 0.04);
+  EXPECT_EQ(nav2_smac_planner::NodeHybrid::obstacle_heuristic_lookup_table.size(), 100u);
+
+  // Same numeric goal on another grid must not reuse the previous grid's cache.
+  checker.setCostmap(original);
+  planner.setCollisionChecker(&checker);
+  planner.setStart(2.0f, 2.0f, 0);
+  planner.setGoal(15.0f, 15.0f, 0);
+  EXPECT_EQ(nav2_smac_planner::NodeHybrid::obstacle_heuristic_costmap, original);
+  EXPECT_DOUBLE_EQ(
+    nav2_smac_planner::NodeHybrid::obstacle_heuristic_costmap->getResolution(), 0.02);
+  EXPECT_EQ(nav2_smac_planner::NodeHybrid::obstacle_heuristic_lookup_table.size(), 400u);
+
+  nav2_smac_planner::NodeHybrid::destroyStaticAssets();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
