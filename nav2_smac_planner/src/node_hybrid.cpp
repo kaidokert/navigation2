@@ -516,18 +516,8 @@ void NodeHybrid::resetObstacleHeuristic(
     size = size_x * costmap->getSizeInCellsY();
   }
 
-  if (obstacle_heuristic_lookup_table.size() == size) {
-    // must reset all values
-    std::fill(
-      obstacle_heuristic_lookup_table.begin(),
-      obstacle_heuristic_lookup_table.end(), 0.0f);
-  } else {
-    unsigned int obstacle_size = obstacle_heuristic_lookup_table.size();
-    obstacle_heuristic_lookup_table.resize(size, 0.0f);
-    // must reset values for non-constructed indices
-    std::fill_n(
-      obstacle_heuristic_lookup_table.begin(), obstacle_size, 0.0f);
-  }
+  // Reinitialize exactly the new range, including when the active grid shrinks.
+  obstacle_heuristic_lookup_table.assign(size, 0.0f);
 
   obstacle_heuristic_queue.clear();
   obstacle_heuristic_queue.reserve(size);

@@ -257,8 +257,11 @@ void AStarAlgorithm<NodeT>::setGoal(
     continuous_dim_3 : static_cast<float>(dim_3);
   typename NodeT::Coordinates goal_coords(mx, my, angle_bin);
 
+  const unsigned int size_x = _costmap->getSizeInCellsX();
+  const unsigned int size_y = _costmap->getSizeInCellsY();
   if (!_search_info.cache_obstacle_heuristic || goal_coords != _goal_coordinates ||
-    _last_heuristic_costmap != _costmap)
+    _last_heuristic_costmap != _costmap ||
+    _last_heuristic_size_x != size_x || _last_heuristic_size_y != size_y)
   {
     if (!_start) {
       throw std::runtime_error("Start must be set before goal.");
@@ -267,6 +270,8 @@ void AStarAlgorithm<NodeT>::setGoal(
     NodeT::resetObstacleHeuristic(
       _collision_checker->getCostmapROS(), _start->pose.x, _start->pose.y, mx, my, _costmap);
     _last_heuristic_costmap = _costmap;
+    _last_heuristic_size_x = size_x;
+    _last_heuristic_size_y = size_y;
   }
 
   _goal_coordinates = goal_coords;
