@@ -26,6 +26,7 @@
 #include "nav2_util/node_utils.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_controller/controller_server.hpp"
+#include "nav2_controller/control_loop_clock.hpp"
 
 using namespace std::chrono_literals;
 using rcl_interfaces::msg::ParameterType;
@@ -560,7 +561,23 @@ void ControllerServer::computeControl()
       timing_cycle.outcome(nav2_util::ControlTiming::Outcome::Completed);
       timing_cycle.endMeasurement();
       auto cycle_duration = this->now() - start_time;
-      if (!loop_rate.sleep()) {
+      if (get_clock()->ros_time_is_active() && action_server_ &&
+        !action_server_->is_cancel_requested())
+      {
+        const auto period_ns = static_cast<int64_t>(1e9 / controller_frequency_);
+        timing_cycle.missed(cycle_duration.nanoseconds() > period_ns);
+        waitForSimControlPeriod(
+          start_time.nanoseconds(), period_ns,
+          [this]() {return now().nanoseconds();},
+          [this]() {
+            return !rclcpp::ok() || !action_server_ ||
+                   !action_server_->is_server_active() || action_server_->is_cancel_requested() ||
+                   action_server_->is_preempt_requested();
+          });
+        // Keep wall pacing ready for hardware time or a controller whose
+        // cancellation needs further iterations while the sim is paused.
+        loop_rate.reset();
+      } else if (!loop_rate.sleep()) {
         timing_cycle.missed(true);
         RCLCPP_WARN(
           get_logger(),
