@@ -655,14 +655,34 @@ TEST(AStarTest, timing_is_opt_in_and_preserves_path)
   EXPECT_EQ(std::stoull(samples[2].str()), timingNumber(records.back(), "sampled_expansions"));
   EXPECT_EQ(samples[3].str(), samples[4].str());
   EXPECT_LE(std::stoull(samples[3].str()), std::stoull(samples[2].str()));
+  for (size_t i = 1; i <= 4; ++i) {
+    EXPECT_GT(std::stoull(samples[i].str()), 0u) << "phase " << i - 1 << " was never sampled";
+  }
+  // Phase times are sums of a few sampled intervals (one pop in 64). A phase shorter than
+  // one steady_clock tick reads exactly 0: the RK3588's arch timer runs at 24 MHz (41.7 ns),
+  // so "> 0" failed there at random while ~1 ns clocks (x86, Thor) passed. Node2D's analytic
+  // expansion is a no-op, the usual zero. The count checks above prove every phase was sampled;
+  // per phase, require only sane values, and require the durations to accumulate in total.
+  std::smatch elapsed_match;
+  ASSERT_TRUE(std::regex_search(
+      records.back(), elapsed_match, std::regex("\"elapsed_ms\":([0-9.]+)")));
+  const double elapsed_ms = std::stod(elapsed_match[1].str());
+  EXPECT_GT(elapsed_ms, 0.0);
+  double phase_total_ms = 0.0;
   for (const char * phase : {"selection_ms", "analytic_ms", "neighbors_ms", "heuristic_queue_ms"}) {
     std::smatch duration;
     ASSERT_TRUE(std::regex_search(
         records.back(), duration, std::regex(std::string("\"") + phase + "\":([0-9.]+)")));
     const double value = std::stod(duration[1].str());
     EXPECT_TRUE(std::isfinite(value));
-    EXPECT_GT(value, 0.0);
+    EXPECT_GE(value, 0.0);
+    phase_total_ms += value;
   }
+  // Neighbor expansion alone (8 neighbors, collision checks, queue pushes) spans many ticks,
+  // so a zero total means add() stopped accumulating, not clock resolution.
+  EXPECT_GT(phase_total_ms, 0.0);
+  // Sampled phases are a subset of the search, so they cannot exceed its wall time.
+  EXPECT_LE(phase_total_ms, elapsed_ms);
   for (const auto & record : records) {
     if (record.find("\"event\":\"checkpoint\"") != std::string::npos) {
       EXPECT_GT(timingNumber(record, "iterations"), 0u);
