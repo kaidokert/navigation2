@@ -38,6 +38,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #endif
 
 #include "rclcpp/rclcpp.hpp"
@@ -71,6 +72,7 @@ public:
   const Queue & queue;
   const char * outcome = "exception";
   int sink = -1;
+  bool sink_is_socket = false;
 
   SearchTiming(Point start, double budget_s, const int & count, const Queue & open)
   : enabled(isEnabled()), begin(start), budget(budget_s * 1000.0),
@@ -78,21 +80,35 @@ public:
   {
 #ifdef __linux__
     if (enabled) {
-      // Reopen independently: dup()+F_SETFL would change shared stderr flags.
-      sink = ::open("/proc/self/fd/2", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+      // Snapshot the descriptor so later stderr redirection cannot change its type.
+      const int original = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 0);
       struct stat status{};
-      if (sink >= 0 && fstat(sink, &status) != 0) {
-        ::close(sink);
-        sink = -1;
+      if (original < 0) {
+        return;
       }
-      if (sink >= 0 && S_ISREG(status.st_mode)) {
-        // Regular files need the original shared offset to preserve interleaved logs.
-        // Disk I/O is not latency bounded; O_NONBLOCK only protects pipe backpressure.
-        ::close(sink);
-        sink = ::dup(STDERR_FILENO);
-        if (sink >= 0) {
-          fcntl(sink, F_SETFD, FD_CLOEXEC);
+      if (fstat(original, &status) != 0) {
+        ::close(original);
+        return;
+      }
+      sink_is_socket = S_ISSOCK(status.st_mode);
+      if (sink_is_socket || S_ISREG(status.st_mode)) {
+        // Socket send flags bound backpressure; files must preserve the shared offset.
+        // Regular-file filesystem latency remains unbounded.
+        sink = original;
+      } else {
+        // Reopen independently: dup()+F_SETFL would change shared stderr flags.
+        char descriptor_path[64];
+        std::snprintf(descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d", original);
+        sink = ::open(descriptor_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+        if (sink < 0) {
+          const int flags = fcntl(original, F_GETFL);
+          // Without /proc, dup is safe only if the existing stream is nonblocking.
+          if (flags >= 0 && (flags & O_NONBLOCK) != 0) {
+            sink = original;
+            return;
+          }
         }
+        ::close(original);
       }
     }
 #endif
@@ -132,6 +148,10 @@ public:
 #ifdef __linux__
     if (sink < 0) {
       return false;
+    }
+    if (sink_is_socket) {
+      const ssize_t written = ::send(sink, data, size, MSG_DONTWAIT | MSG_NOSIGNAL);
+      return written >= 0 && static_cast<size_t>(written) == size;
     }
     // A disappearing reader must not turn a diagnostic write into SIGPIPE.
     sigset_t blocked, previous, pending;

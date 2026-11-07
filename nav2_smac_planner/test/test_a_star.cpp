@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #endif
 
 #include "rcutils/env.h"
@@ -799,4 +800,55 @@ TEST(AStarTest, timing_does_not_block_on_full_or_closed_stderr_pipe)
       }, testing::ExitedWithCode(0), "");
   }
 }
+TEST(AStarTest, timing_supports_stderr_sockets_without_blocking_or_sigpipe)
+{
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (int mode : {0, 1, 2}) {
+    ASSERT_EXIT(
+    {
+      ScopedTimingEnvironment enabled("1");
+      TimingSearch search;
+      int descriptors[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, descriptors) != 0) {_exit(10);}
+      if (mode == 1) {
+        char buffer[4096] = {};
+        while (send(descriptors[1], buffer, sizeof(buffer), MSG_DONTWAIT | MSG_NOSIGNAL) > 0) {}
+      }
+      const int original_flags = fcntl(descriptors[1], F_GETFL);
+      const int saved = dup(STDERR_FILENO);
+      if (dup2(descriptors[1], STDERR_FILENO) < 0) {_exit(11);}
+      signal(SIGPIPE, SIG_DFL);
+      sigset_t pipe_signal;
+      sigemptyset(&pipe_signal);
+      sigaddset(&pipe_signal, SIGPIPE);
+      if (pthread_sigmask(SIG_UNBLOCK, &pipe_signal, nullptr) != 0) {_exit(13);}
+      alarm(2);
+      const bool found = search.search.createPath(
+          search.path, search.iterations, 0.0,
+        [&]() {
+          if (mode == 2 && descriptors[0] >= 0) {
+            close(descriptors[0]);
+            descriptors[0] = -1;
+          }
+          return false;
+          });
+      const bool flags_unchanged = fcntl(STDERR_FILENO, F_GETFL) == original_flags;
+      dup2(saved, STDERR_FILENO);
+      if (mode == 0) {
+        char buffer[65536];
+        const ssize_t size = recv(descriptors[0], buffer, sizeof(buffer), MSG_DONTWAIT);
+        if (size <= 0) {_exit(14);}
+        const auto records = timingRecords(std::string(buffer, static_cast<size_t>(size)));
+        if (records.size() < 2 ||
+        records.front().find("\"event\":\"start\"") == std::string::npos ||
+        records.back().find("\"event\":\"goal\"") == std::string::npos)
+        {
+          _exit(15);
+        }
+      }
+      _exit(found && flags_unchanged ? 0 : 12);
+      }, testing::ExitedWithCode(0), "");
+  }
+}
+
 #endif  // __linux__

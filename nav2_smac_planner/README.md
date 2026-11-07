@@ -232,7 +232,10 @@ sampled once per 64 heap pops, not full-search totals. `phase_samples` gives eac
 phase's own denominator; duplicate popped nodes do not execute expansion phases.
 `sampled_pops` and `sampled_expansions` must not be used interchangeably.
 
-Pipe output uses an independently opened nonblocking descriptor, never changes
+Unix socket output (including systemd/journald stderr) uses a descriptor snapshot
+and `send(MSG_DONTWAIT | MSG_NOSIGNAL)` to avoid backpressure and SIGPIPE without
+changing shared socket flags. Pipe output uses an independently opened
+nonblocking descriptor and `O_NOCTTY`, never changes
 stderr's shared file-status flags, and never retries a diagnostic write. Full or
 broken sinks may drop records. `dropped_records` reports earlier drops when a
 later record can be delivered; the final drop cannot report itself. Regular-file
@@ -242,3 +245,6 @@ latency is not bounded. This is best-effort diagnostics, not a hard realtime sin
 Instrumentation and logging overhead still count toward the unchanged planning
 wall-time budget. Enabling diagnostics can therefore affect measured performance;
 no logging duration is subtracted and no deadline or abort policy is relaxed.
+If `/proc` reopening fails, an already-nonblocking pipe/terminal can be duplicated
+safely; a blocking pipe/terminal is left unavailable rather than reintroducing
+blocking writes. Sockets and regular files do not require `/proc`.
