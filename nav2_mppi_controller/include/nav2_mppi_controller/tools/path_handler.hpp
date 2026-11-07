@@ -106,6 +106,17 @@ public:
    */
   geometry_msgs::msg::PoseStamped getTransformedGoal(const builtin_interfaces::msg::Time & stamp);
 
+  /**
+   * @brief Return active intermediate cusp segment direction (-1 reverse, +1 forward, 0 on final segment)
+   */
+  int getActiveCuspDirection() const
+  {
+    if (!enforce_path_inversion_ || inversion_locale_ == 0u || terminal_stub_aligned_) {
+      return 0;
+    }
+    return current_segment_is_reverse_ ? -1 : 1;
+  }
+
 protected:
   /**
     * @brief Transform a pose to another frame

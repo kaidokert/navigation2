@@ -104,7 +104,9 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
       stage_start);
   stage_start = nav2_util::ControlTiming::Clock::now();
   geometry_msgs::msg::TwistStamped cmd =
-    optimizer_.evalControl(robot_pose, robot_speed, transformed_plan, goal, goal_checker);
+    optimizer_.evalControl(
+    robot_pose, robot_speed, transformed_plan, goal, goal_checker,
+    path_handler_.getActiveCuspDirection());
 
   nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::Optimizer, stage_start);
 #ifdef BENCHMARK_TESTING

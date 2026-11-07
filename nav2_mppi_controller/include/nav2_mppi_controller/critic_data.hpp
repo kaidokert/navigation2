@@ -56,6 +56,7 @@ struct CriticData
   std::shared_ptr<MotionModel> motion_model;
   std::optional<std::vector<bool>> path_pts_valid;
   std::optional<size_t> furthest_reached_path_point;
+  int active_cusp_direction{0};
 };
 
 }  // namespace mppi

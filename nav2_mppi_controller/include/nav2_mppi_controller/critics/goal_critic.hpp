@@ -46,6 +46,7 @@ protected:
   unsigned int power_{0};
   float weight_{0};
   float threshold_to_consider_{0};
+  bool final_segment_only_{false};
 };
 
 }  // namespace mppi::critics
