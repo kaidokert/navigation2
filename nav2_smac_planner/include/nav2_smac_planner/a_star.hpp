@@ -285,6 +285,9 @@ protected:
 
   GridCollisionChecker * _collision_checker;
   nav2_costmap_2d::Costmap2D * _costmap;
+  nav2_costmap_2d::Costmap2D * _last_heuristic_costmap{nullptr};
+  unsigned int _last_heuristic_size_x{0u};
+  unsigned int _last_heuristic_size_y{0u};
   std::unique_ptr<AnalyticExpansion<NodeT>> _expander;
 };
 

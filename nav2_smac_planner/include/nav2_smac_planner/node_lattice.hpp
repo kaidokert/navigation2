@@ -362,10 +362,12 @@ public:
   static void resetObstacleHeuristic(
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros,
     const unsigned int & start_x, const unsigned int & start_y,
-    const unsigned int & goal_x, const unsigned int & goal_y)
+    const unsigned int & goal_x, const unsigned int & goal_y,
+    nav2_costmap_2d::Costmap2D * search_costmap = nullptr)
   {
     // State Lattice and Hybrid-A* share this heuristics
-    NodeHybrid::resetObstacleHeuristic(costmap_ros, start_x, start_y, goal_x, goal_y);
+    NodeHybrid::resetObstacleHeuristic(
+      costmap_ros, start_x, start_y, goal_x, goal_y, search_costmap);
   }
 
   /**
