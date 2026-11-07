@@ -211,3 +211,34 @@ As such, it is recommended if you have sparse SLAM maps, gaps or holes in your m
 One interesting thing to note from the second figure is that you see a number of expansions in open space. This is due to travel / heuristic values being so similar, tuning values of the penalty weights can have a decent impact there. The defaults are set as a good middle ground between large open spaces and confined aisles (environment specific tuning could be done to reduce the number of expansions for a specific map, speeding up the planner). The planner actually runs substantially faster the more confined the areas of search / environments are -- but still plenty fast for even wide open areas!
 
 Sometimes visualizing the expansions is very useful to debug potential concerns (why does this goal take longer to compute, why can't I find a path, etc), should you on rare occasion run into an issue. You can enable the publication of the expansions on the `/expansions` topic for SmacHybrid with the parameter `debug_visualizations: True`, beware that it should be used only for debug as it increases a lot the CPU usage.
+
+
+### Opt-in search timing diagnostics (Linux)
+
+Set `NAV2_SMAC_TIMING=1` in the planner process environment to emit `SMAC_TIMING`
+JSON records on stderr. Unset, empty, `0`, or any value other than `1` disables it.
+The sink is disabled on non-Linux builds. No extra steady-clock read is made at
+construction: the existing search-start timestamp is reused.
+
+Records describe `start`, periodic `checkpoint`, and terminal outcomes, including
+`invalid_input`, `cancelled`, `max_iterations`, `no_path`, `backtrace_failed`, and
+`deadline`. Normal goal/tolerance outcomes distinguish successful backtraces.
+Terminal records report the actual queue size. Cancellation and deadline checks
+run before checkpoint output; no checkpoint is emitted at iteration zero.
+
+Wall timestamps and elapsed time use `steady_clock`; thread CPU timestamps are
+absolute nanoseconds and are `null` when unavailable. Four phase durations are
+sampled once per 64 heap pops, not full-search totals. `phase_samples` gives each
+phase's own denominator; duplicate popped nodes do not execute expansion phases.
+`sampled_pops` and `sampled_expansions` must not be used interchangeably.
+
+Pipe output uses an independently opened nonblocking descriptor, never changes
+stderr's shared file-status flags, and never retries a diagnostic write. Full or
+broken sinks may drop records. `dropped_records` reports earlier drops when a
+later record can be delivered; the final drop cannot report itself. Regular-file
+stderr shares its original file offset to preserve other logs, but filesystem I/O
+latency is not bounded. This is best-effort diagnostics, not a hard realtime sink.
+
+Instrumentation and logging overhead still count toward the unchanged planning
+wall-time budget. Enabling diagnostics can therefore affect measured performance;
+no logging duration is subtracted and no deadline or abort policy is relaxed.
