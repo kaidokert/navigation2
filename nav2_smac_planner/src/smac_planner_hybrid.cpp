@@ -137,6 +137,9 @@ void SmacPlannerHybrid::configure(
     node, name + ".minimum_turning_radius", rclcpp::ParameterValue(0.4));
   node->get_parameter(name + ".minimum_turning_radius", _minimum_turning_radius_global_coords);
   nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_single_gear", rclcpp::ParameterValue(false));
+  node->get_parameter(name + ".analytic_single_gear", _search_info.analytic_single_gear);
+  nav2_util::declare_parameter_if_not_declared(
     node, name + ".allow_primitive_interpolation", rclcpp::ParameterValue(false));
   node->get_parameter(
     name + ".allow_primitive_interpolation", _search_info.allow_primitive_interpolation);
@@ -814,6 +817,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         _search_info.cache_obstacle_heuristic = parameter.as_bool();
       } else if (name == _name + ".allow_primitive_interpolation") {
         _search_info.allow_primitive_interpolation = parameter.as_bool();
+        reinit_a_star = true;
+      } else if (name == _name + ".analytic_single_gear") {
+        _search_info.analytic_single_gear = parameter.as_bool();
         reinit_a_star = true;
       } else if (name == _name + ".smooth_path") {
         if (parameter.as_bool()) {
