@@ -50,16 +50,26 @@ public:
   double budget;
   int last_checkpoint = -1;
   unsigned long pops = 0;
+  unsigned long sampled_pops = 0;
+  bool sampling = false;
   const int & iterations;
   const char * outcome = "exception";
 
   SearchTiming(double budget_s, const int & count)
   : budget(budget_s * 1000.0), iterations(count) {}
 
-  Point tick() const {return enabled ? Clock::now() : Point{};}
+  void sample_iteration()
+  {
+    if (enabled) {
+      ++pops;
+      sampling = (pops % 64 == 1);
+      if (sampling) {++sampled_pops;}
+    }
+  }
+  Point tick() const {return sampling ? Clock::now() : Point{};}
   void add(size_t phase, Point start)
   {
-    if (enabled) {phase_ms[phase] += std::chrono::duration<double, std::milli>(Clock::now() - start).count();}
+    if (sampling) {phase_ms[phase] += std::chrono::duration<double, std::milli>(Clock::now() - start).count();}
   }
   void emit(const char * event, size_t queue_size)
   {
@@ -71,11 +81,12 @@ public:
     std::fprintf(stderr,
       "SMAC_TIMING {\"event\":\"%s\",\"steady_ns\":%lld,\"thread_cpu_ns\":%lld,"
       "\"elapsed_ms\":%.6f,\"budget_ms\":%.3f,\"iterations\":%d,\"queue\":%zu,"
-      "\"pops\":%lu,\"selection_ms\":%.6f,\"analytic_ms\":%.6f,"
+      "\"pops\":%lu,\"phase_sampling_stride\":64,\"sampled_pops\":%lu,"
+      "\"phase_times_are_sampled\":true,\"selection_ms\":%.6f,\"analytic_ms\":%.6f,"
       "\"neighbors_ms\":%.6f,\"heuristic_queue_ms\":%.6f}\n",
       event, static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()),
       static_cast<long long>(cpu.tv_sec) * 1000000000LL + cpu.tv_nsec,
-      elapsed, budget, iterations, queue_size, pops,
+      elapsed, budget, iterations, queue_size, pops, sampled_pops,
       phase_ms[0], phase_ms[1], phase_ms[2], phase_ms[3]);
     std::fflush(stderr);
   }
@@ -432,9 +443,9 @@ bool AStarAlgorithm<NodeT>::createPath(
     }
 
     // 1) Pick Nbest from O s.t. min(f(Nbest)), remove from queue
+    timing.sample_iteration();
     auto phase_start = timing.tick();
     current_node = getNextNode();
-    if (timing.enabled) {++timing.pops;}
     timing.add(0, phase_start);
 
     // Save current node coordinates for debug
