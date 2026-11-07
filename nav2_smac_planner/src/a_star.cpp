@@ -25,6 +25,9 @@
 #include <utility>
 #include <vector>
 #include <cstdlib>
+#include <cstdio>
+#include <ctime>
+#include <array>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_smac_planner/a_star.hpp"
@@ -32,6 +35,54 @@ using namespace std::chrono;  // NOLINT
 
 namespace nav2_smac_planner
 {
+namespace
+{
+// Opt-in experiment instrumentation. Checkpoints go directly to stderr and are
+// flushed before the existing hard abort, independent of ROS topic delivery.
+class SearchTiming
+{
+public:
+  using Clock = std::chrono::steady_clock;
+  using Point = Clock::time_point;
+  bool enabled = std::getenv("NAV2_SMAC_TIMING") != nullptr;
+  std::array<double, 4> phase_ms{};
+  Point begin = Clock::now();
+  double budget;
+  int last_checkpoint = -1;
+  unsigned long pops = 0;
+  const int & iterations;
+  const char * outcome = "exception";
+
+  SearchTiming(double budget_s, const int & count)
+  : budget(budget_s * 1000.0), iterations(count) {}
+
+  Point tick() const {return enabled ? Clock::now() : Point{};}
+  void add(size_t phase, Point start)
+  {
+    if (enabled) {phase_ms[phase] += std::chrono::duration<double, std::milli>(Clock::now() - start).count();}
+  }
+  void emit(const char * event, size_t queue_size)
+  {
+    if (!enabled) {return;}
+    timespec cpu{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+    const auto now = Clock::now();
+    const double elapsed = std::chrono::duration<double, std::milli>(now - begin).count();
+    std::fprintf(stderr,
+      "SMAC_TIMING {\"event\":\"%s\",\"steady_ns\":%lld,\"thread_cpu_ns\":%lld,"
+      "\"elapsed_ms\":%.6f,\"budget_ms\":%.3f,\"iterations\":%d,\"queue\":%zu,"
+      "\"pops\":%lu,\"selection_ms\":%.6f,\"analytic_ms\":%.6f,"
+      "\"neighbors_ms\":%.6f,\"heuristic_queue_ms\":%.6f}\n",
+      event, static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()),
+      static_cast<long long>(cpu.tv_sec) * 1000000000LL + cpu.tv_nsec,
+      elapsed, budget, iterations, queue_size, pops,
+      phase_ms[0], phase_ms[1], phase_ms[2], phase_ms[3]);
+    std::fflush(stderr);
+  }
+  ~SearchTiming() {emit(outcome, 0);}
+};
+}  // namespace
+
 
 template<typename NodeT>
 AStarAlgorithm<NodeT>::AStarAlgorithm(
@@ -310,11 +361,14 @@ bool AStarAlgorithm<NodeT>::createPath(
   std::vector<std::tuple<float, float, float>> * expansions_log)
 {
   steady_clock::time_point start_time = steady_clock::now();
+  SearchTiming timing(_max_planning_time, iterations);
+  timing.emit("start", 0);
   _tolerance = tolerance;
   _best_heuristic_node = {std::numeric_limits<float>::max(), 0};
   clearQueue();
 
   if (!areInputsValid()) {
+    timing.outcome = "invalid_input";
     return false;
   }
 
@@ -349,6 +403,12 @@ bool AStarAlgorithm<NodeT>::createPath(
     };
 
   while (iterations < getMaxIterations() && !_queue.empty()) {
+    if (timing.enabled && iterations % _terminal_checking_interval == 0 &&
+      timing.last_checkpoint != iterations)
+    {
+      timing.emit("checkpoint", _queue.size());
+      timing.last_checkpoint = iterations;
+    }
     // Check for planning timeout and cancel only on every Nth iteration
     if (iterations % _terminal_checking_interval == 0) {
       if (cancel_checker()) {
@@ -366,12 +426,16 @@ bool AStarAlgorithm<NodeT>::createPath(
           "Queue size: %zu. Hard terminating planner.",
           _max_planning_time * 1000.0, planning_duration.count() * 1000.0,
           iterations, _best_heuristic_node.first, _queue.size());
+        timing.emit("deadline", _queue.size());
         std::abort();
       }
     }
 
     // 1) Pick Nbest from O s.t. min(f(Nbest)), remove from queue
+    auto phase_start = timing.tick();
     current_node = getNextNode();
+    if (timing.enabled) {++timing.pops;}
+    timing.add(0, phase_start);
 
     // Save current node coordinates for debug
     if (expansions_log) {
@@ -392,26 +456,33 @@ bool AStarAlgorithm<NodeT>::createPath(
 
     // 2.1) Use an analytic expansion (if available) to generate a path
     expansion_result = nullptr;
+    phase_start = timing.tick();
     expansion_result = _expander->tryAnalyticExpansion(
       current_node, getGoal(), neighborGetter, analytic_iterations, closest_distance);
+    timing.add(1, phase_start);
     if (expansion_result != nullptr) {
       current_node = expansion_result;
     }
 
     // 3) Check if we're at the goal, backtrace if required
     if (isGoal(current_node)) {
+      timing.outcome = "goal";
       return current_node->backtracePath(path);
     } else if (_best_heuristic_node.first < getToleranceHeuristic()) {
       // Optimization: Let us find when in tolerance and refine within reason
       approach_iterations++;
       if (approach_iterations >= getOnApproachMaxIterations()) {
+        timing.outcome = "tolerance";
         return _graph.at(_best_heuristic_node.second).backtracePath(path);
       }
     }
 
     // 4) Expand neighbors of Nbest not visited
     neighbors.clear();
+    phase_start = timing.tick();
     current_node->getNeighbors(neighborGetter, _collision_checker, _traverse_unknown, neighbors);
+    timing.add(2, phase_start);
+    phase_start = timing.tick();
 
     for (neighbor_iterator = neighbors.begin();
       neighbor_iterator != neighbors.end(); ++neighbor_iterator)
@@ -430,13 +501,16 @@ bool AStarAlgorithm<NodeT>::createPath(
         addNode(g_cost + getHeuristicCost(neighbor), neighbor);
       }
     }
+    timing.add(3, phase_start);
   }
 
   if (_best_heuristic_node.first < getToleranceHeuristic()) {
+    timing.outcome = "exhausted_tolerance";
     // If we run out of search options, return the path that is closest, if within tolerance.
     return _graph.at(_best_heuristic_node.second).backtracePath(path);
   }
 
+  timing.outcome = "no_path";
   return false;
 }
 
