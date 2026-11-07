@@ -25,6 +25,21 @@
 #include <utility>
 #include <vector>
 #include <cstdlib>
+#include <cstdio>
+#include <ctime>
+#include <array>
+#include <cinttypes>
+#include <cstring>
+#include <cerrno>
+
+#ifdef __linux__
+#include <fcntl.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#endif
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_smac_planner/a_star.hpp"
@@ -32,6 +47,190 @@ using namespace std::chrono;  // NOLINT
 
 namespace nav2_smac_planner
 {
+namespace
+{
+// Opt-in experiment instrumentation. Checkpoints go directly to stderr and are
+// flushed before the existing hard abort, independent of ROS topic delivery.
+template<typename Queue>
+class SearchTiming
+{
+public:
+  using Clock = std::chrono::steady_clock;
+  using Point = Clock::time_point;
+  bool enabled;
+  std::array<double, 4> phase_ms{};
+  std::array<uint64_t, 4> phase_samples{};
+  Point begin;
+  double budget;
+  int last_checkpoint = 0;
+  uint64_t pops = 0;
+  uint64_t sampled_pops = 0;
+  uint64_t sampled_expansions = 0;
+  uint64_t dropped_records = 0;
+  bool sampling = false;
+  const int & iterations;
+  const Queue & queue;
+  const char * outcome = "exception";
+  int sink = -1;
+  bool sink_is_socket = false;
+
+  SearchTiming(Point start, double budget_s, const int & count, const Queue & open)
+  : enabled(isEnabled()), begin(start), budget(budget_s * 1000.0),
+    iterations(count), queue(open)
+  {
+#ifdef __linux__
+    if (enabled) {
+      // Snapshot the descriptor so later stderr redirection cannot change its type.
+      const int original = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 0);
+      struct stat status{};
+      if (original < 0) {
+        return;
+      }
+      if (fstat(original, &status) != 0) {
+        ::close(original);
+        return;
+      }
+      sink_is_socket = S_ISSOCK(status.st_mode);
+      if (sink_is_socket || S_ISREG(status.st_mode)) {
+        // Socket send flags bound backpressure; files must preserve the shared offset.
+        // Regular-file filesystem latency remains unbounded.
+        sink = original;
+      } else {
+        // Reopen independently: dup()+F_SETFL would change shared stderr flags.
+        char descriptor_path[64];
+        std::snprintf(descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d", original);
+        sink = ::open(descriptor_path, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+        if (sink < 0) {
+          const int flags = fcntl(original, F_GETFL);
+          // Without /proc, dup is safe only if the existing stream is nonblocking.
+          if (flags >= 0 && (flags & O_NONBLOCK) != 0) {
+            sink = original;
+            return;
+          }
+        }
+        ::close(original);
+      }
+    }
+#endif
+  }
+
+  static bool isEnabled()
+  {
+#ifdef __linux__
+    const char * value = std::getenv("NAV2_SMAC_TIMING");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+#else
+    return false;
+#endif
+  }
+
+  void sample_iteration()
+  {
+    ++pops;
+    sampling = (pops % 64 == 1);
+    if (sampling) {
+      ++sampled_pops;
+    }
+  }
+
+  Point tick() const {return sampling ? Clock::now() : Point{};}
+
+  void add(size_t phase, Point start)
+  {
+    if (sampling) {
+      phase_ms[phase] += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+      ++phase_samples[phase];
+    }
+  }
+
+  bool writeRecord(const char * data, size_t size)
+  {
+#ifdef __linux__
+    if (sink < 0) {
+      return false;
+    }
+    if (sink_is_socket) {
+      const ssize_t written = ::send(sink, data, size, MSG_DONTWAIT | MSG_NOSIGNAL);
+      return written >= 0 && static_cast<size_t>(written) == size;
+    }
+    // A disappearing reader must not turn a diagnostic write into SIGPIPE.
+    sigset_t blocked, previous, pending;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &blocked, &previous) != 0) {
+      return false;
+    }
+    if (sigpending(&pending) != 0) {
+      pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+      return false;
+    }
+    const bool already_pending = sigismember(&pending, SIGPIPE) == 1;
+    const ssize_t written = ::write(sink, data, size);
+    const int error = errno;
+    if (written < 0 && error == EPIPE && !already_pending) {
+      timespec zero{};
+      // Drain only the signal from this write, preserving any earlier SIGPIPE.
+      while (sigtimedwait(&blocked, nullptr, &zero) < 0 && errno == EINTR) {}
+    }
+    pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    return written >= 0 && static_cast<size_t>(written) == size;
+#else
+    (void)data;
+    (void)size;
+    return false;
+#endif
+  }
+
+  void emit(const char * event, size_t queue_size)
+  {
+    if (!enabled) {
+      return;
+    }
+    char cpu_value[32] = "null";
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec cpu{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu) == 0) {
+      const int64_t cpu_ns = static_cast<int64_t>(cpu.tv_sec) * INT64_C(1000000000) + cpu.tv_nsec;
+      std::snprintf(cpu_value, sizeof(cpu_value), "%" PRId64, cpu_ns);
+    }
+#endif
+    const auto now = Clock::now();
+    const int64_t steady_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    const double elapsed = std::chrono::duration<double, std::milli>(now - begin).count();
+    char record[1536];  // Below Linux PIPE_BUF: no partial writes on a nonblocking pipe.
+    const int length = std::snprintf(
+      record, sizeof(record),
+      "SMAC_TIMING {\"event\":\"%s\",\"steady_ns\":%" PRId64 ",\"thread_cpu_ns\":%s,"
+      "\"elapsed_ms\":%.6f,\"budget_ms\":%.3f,\"iterations\":%d,\"queue\":%zu,"
+      "\"pops\":%" PRIu64 ",\"phase_sampling_stride\":64,\"sampled_pops\":%" PRIu64 ","
+      "\"sampled_expansions\":%" PRIu64 ",\"dropped_records\":%" PRIu64 ","
+      "\"phase_samples\":[%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "],"
+      "\"phase_times_are_sampled\":true,\"selection_ms\":%.6f,\"analytic_ms\":%.6f,"
+      "\"neighbors_ms\":%.6f,\"heuristic_queue_ms\":%.6f}\n",
+      event, steady_ns, cpu_value, elapsed, budget, iterations, queue_size,
+      pops, sampled_pops, sampled_expansions, dropped_records,
+      phase_samples[0], phase_samples[1], phase_samples[2], phase_samples[3],
+      phase_ms[0], phase_ms[1], phase_ms[2], phase_ms[3]);
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(record) ||
+      !writeRecord(record, static_cast<size_t>(length)))
+    {
+      ++dropped_records;
+    }
+  }
+
+  ~SearchTiming()
+  {
+    emit(outcome, queue.size());
+#ifdef __linux__
+    if (sink >= 0) {
+      ::close(sink);
+    }
+#endif
+  }
+};
+}  // namespace
+
 
 template<typename NodeT>
 AStarAlgorithm<NodeT>::AStarAlgorithm(
@@ -310,13 +509,18 @@ bool AStarAlgorithm<NodeT>::createPath(
   std::vector<std::tuple<float, float, float>> * expansions_log)
 {
   steady_clock::time_point start_time = steady_clock::now();
+  SearchTiming timing(start_time, _max_planning_time, iterations, _queue);
   _tolerance = tolerance;
   _best_heuristic_node = {std::numeric_limits<float>::max(), 0};
   clearQueue();
+  timing.emit("start", _queue.size());
 
+  timing.outcome = "invalid_input";
   if (!areInputsValid()) {
     return false;
   }
+
+  timing.outcome = "exception";
 
   // 0) Add starting point to the open set
   addNode(0.0, getStart());
@@ -352,6 +556,7 @@ bool AStarAlgorithm<NodeT>::createPath(
     // Check for planning timeout and cancel only on every Nth iteration
     if (iterations % _terminal_checking_interval == 0) {
       if (cancel_checker()) {
+        timing.outcome = "cancelled";
         throw nav2_core::PlannerCancelled("Planner was cancelled");
       }
       std::chrono::duration<double> planning_duration =
@@ -366,12 +571,25 @@ bool AStarAlgorithm<NodeT>::createPath(
           "Queue size: %zu. Hard terminating planner.",
           _max_planning_time * 1000.0, planning_duration.count() * 1000.0,
           iterations, _best_heuristic_node.first, _queue.size());
+        timing.emit("deadline", _queue.size());
         std::abort();
       }
     }
 
+    if (timing.enabled && iterations % _terminal_checking_interval == 0 &&
+      timing.last_checkpoint != iterations)
+    {
+      timing.emit("checkpoint", _queue.size());
+      timing.last_checkpoint = iterations;
+    }
+
     // 1) Pick Nbest from O s.t. min(f(Nbest)), remove from queue
+    if (timing.enabled) {
+      timing.sample_iteration();
+    }
+    auto phase_start = timing.tick();
     current_node = getNextNode();
+    timing.add(0, phase_start);
 
     // Save current node coordinates for debug
     if (expansions_log) {
@@ -386,32 +604,44 @@ bool AStarAlgorithm<NodeT>::createPath(
     }
 
     iterations++;
+    if (timing.sampling) {
+      ++timing.sampled_expansions;
+    }
 
     // 2) Mark Nbest as visited
     current_node->visited();
 
     // 2.1) Use an analytic expansion (if available) to generate a path
     expansion_result = nullptr;
+    phase_start = timing.tick();
     expansion_result = _expander->tryAnalyticExpansion(
       current_node, getGoal(), neighborGetter, analytic_iterations, closest_distance);
+    timing.add(1, phase_start);
     if (expansion_result != nullptr) {
       current_node = expansion_result;
     }
 
     // 3) Check if we're at the goal, backtrace if required
     if (isGoal(current_node)) {
-      return current_node->backtracePath(path);
+      const bool found = current_node->backtracePath(path);
+      timing.outcome = found ? "goal" : "backtrace_failed";
+      return found;
     } else if (_best_heuristic_node.first < getToleranceHeuristic()) {
       // Optimization: Let us find when in tolerance and refine within reason
       approach_iterations++;
       if (approach_iterations >= getOnApproachMaxIterations()) {
-        return _graph.at(_best_heuristic_node.second).backtracePath(path);
+        const bool found = _graph.at(_best_heuristic_node.second).backtracePath(path);
+        timing.outcome = found ? "tolerance" : "backtrace_failed";
+        return found;
       }
     }
 
     // 4) Expand neighbors of Nbest not visited
     neighbors.clear();
+    phase_start = timing.tick();
     current_node->getNeighbors(neighborGetter, _collision_checker, _traverse_unknown, neighbors);
+    timing.add(2, phase_start);
+    phase_start = timing.tick();
 
     for (neighbor_iterator = neighbors.begin();
       neighbor_iterator != neighbors.end(); ++neighbor_iterator)
@@ -430,13 +660,18 @@ bool AStarAlgorithm<NodeT>::createPath(
         addNode(g_cost + getHeuristicCost(neighbor), neighbor);
       }
     }
+    timing.add(3, phase_start);
   }
 
   if (_best_heuristic_node.first < getToleranceHeuristic()) {
-    // If we run out of search options, return the path that is closest, if within tolerance.
-    return _graph.at(_best_heuristic_node.second).backtracePath(path);
+    // Preserve the search result; report the cap separately from queue exhaustion.
+    const bool found = _graph.at(_best_heuristic_node.second).backtracePath(path);
+    timing.outcome = iterations >= getMaxIterations() ? "max_iterations" :
+      (found ? "exhausted_tolerance" : "backtrace_failed");
+    return found;
   }
 
+  timing.outcome = iterations >= getMaxIterations() ? "max_iterations" : "no_path";
   return false;
 }
 
