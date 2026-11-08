@@ -44,6 +44,11 @@ FootprintCollisionChecker<CostmapT>::FootprintCollisionChecker(
 {
 }
 
+/**
+ * @brief Rasterize a polygon footprint into the costmap and return the maximum edge cost
+ * @param footprint Oriented polygon vertices in world coordinates
+ * @return Maximum cost along the footprint perimeter, or LETHAL_OBSTACLE if out of bounds
+ */
 template<typename CostmapT>
 double FootprintCollisionChecker<CostmapT>::footprintCost(const Footprint & footprint)
 {
@@ -92,6 +97,14 @@ double FootprintCollisionChecker<CostmapT>::footprintCost(const Footprint & foot
   return std::max(lineCost(xstart, x1, ystart, y1), footprint_cost);
 }
 
+/**
+ * @brief Compute the maximum cost along a rasterized grid line segment
+ * @param x0 Starting cell X index
+ * @param x1 Ending cell X index
+ * @param y0 Starting cell Y index
+ * @param y1 Ending cell Y index
+ * @return Maximum cell cost along the segment, early-exiting on LETHAL_OBSTACLE
+ */
 template<typename CostmapT>
 double FootprintCollisionChecker<CostmapT>::lineCost(int x0, int x1, int y0, int y1) const
 {
@@ -136,6 +149,14 @@ void FootprintCollisionChecker<CostmapT>::setCostmap(CostmapT costmap)
   costmap_ = costmap;
 }
 
+/**
+ * @brief Transform an unoriented footprint to a pose and compute its maximum perimeter cost
+ * @param x Robot pose X in world coordinates
+ * @param y Robot pose Y in world coordinates
+ * @param theta Robot heading in radians
+ * @param footprint Unoriented polygon footprint relative to the robot base
+ * @return Maximum cost along the transformed footprint perimeter
+ */
 template<typename CostmapT>
 double FootprintCollisionChecker<CostmapT>::footprintCostAtPose(
   double x, double y, double theta, const Footprint & footprint)

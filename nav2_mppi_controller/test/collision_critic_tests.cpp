@@ -36,12 +36,39 @@ using mppi::critics::ObstaclesCritic;
 class FootprintWitness : public ObstaclesCritic
 {
 public:
+  /**
+   * @brief Return the cached possible_collision_cost_ threshold
+   * @return Circumscribed cost threshold
+   */
   float threshold() const {return possible_collision_cost_;}
+
+  /**
+   * @brief Return whether the 2D integral-image prefilter is ready
+   * @return true if prefilter_ready_ is set
+   */
   bool isPrefilterReady() const {return prefilter_ready_;}
+
+  /**
+   * @brief Return the number of times prepareScoreCache() has been executed
+   * @return Count of prepareScoreCache() invocations
+   */
+  size_t prepareScoreCacheCount() const {return prepare_score_cache_count_;}
+
+  /**
+   * @brief Evaluate costAtPose without an active score cache
+   * @param x Pose X in world coordinates
+   * @param y Pose Y in world coordinates
+   * @param yaw Pose heading in radians
+   * @return Evaluated CollisionCost
+   */
   mppi::critics::CollisionCost sample(float x, float y, float yaw)
   {
     return costAtPose(x, y, yaw);
   }
+
+  /**
+   * @brief Recompute possible_collision_cost_ and build the per-cycle score cache
+   */
   void buildScoreCache()
   {
     if (consider_footprint_ || collision_check_footprint_only_) {
@@ -49,6 +76,14 @@ public:
     }
     prepareScoreCache();
   }
+
+  /**
+   * @brief Evaluate costAtPose with the precomputed score cache enabled
+   * @param x Pose X in world coordinates
+   * @param y Pose Y in world coordinates
+   * @param yaw Pose heading in radians
+   * @return Evaluated CollisionCost
+   */
   mppi::critics::CollisionCost sampleCached(float x, float y, float yaw)
   {
     score_cache_active_ = true;
@@ -56,11 +91,23 @@ public:
     score_cache_active_ = false;
     return res;
   }
+
+  /**
+   * @brief Evaluate distanceToObstacle using the uncached log() formula
+   * @param c Evaluated CollisionCost
+   * @return Obstacle clearance distance in meters
+   */
   float distanceUncached(const mppi::critics::CollisionCost & c)
   {
     score_cache_active_ = false;
     return distanceToObstacle(c);
   }
+
+  /**
+   * @brief Evaluate distanceToObstacle using the 256-entry lookup table
+   * @param c Evaluated CollisionCost
+   * @return Obstacle clearance distance in meters
+   */
   float distanceCached(const mppi::critics::CollisionCost & c)
   {
     score_cache_active_ = true;
@@ -68,7 +115,14 @@ public:
     score_cache_active_ = false;
     return res;
   }
-  bool wouldPrefilterSkip(float x, float y, float theta = 0.0f)
+
+  /**
+   * @brief Check whether the Level-1 unoriented circumscribed square prefilter skips a pose
+   * @param x Pose X in world coordinates
+   * @param y Pose Y in world coordinates
+   * @return true if the unoriented square around (x, y) has zero disqualifying cells
+   */
+  bool wouldLevel1Skip(float x, float y)
   {
     unsigned int x_i = 0, y_i = 0;
     if (!prefilter_ready_ || !collision_checker_.worldToMap(x, y, x_i, y_i)) {
@@ -87,10 +141,25 @@ public:
         prefilter_integral_[static_cast<size_t>(y0) * stride + x1] -
         prefilter_integral_[static_cast<size_t>(y1) * stride + x0] +
         prefilter_integral_[static_cast<size_t>(y0) * stride + x0];
-      if (disqualifying == 0u) {
-        return true;
-      }
+      return disqualifying == 0u;
     }
+    return false;
+  }
+
+  /**
+   * @brief Check whether the Level-2 oriented footprint AABB prefilter skips a pose
+   * @param x Pose X in world coordinates
+   * @param y Pose Y in world coordinates
+   * @param theta Pose heading in radians
+   * @return true if the oriented footprint AABB has zero disqualifying cells
+   */
+  bool wouldLevel2Skip(float x, float y, float theta)
+  {
+    unsigned int x_i = 0, y_i = 0;
+    if (!prefilter_ready_ || !collision_checker_.worldToMap(x, y, x_i, y_i)) {
+      return false;
+    }
+    const unsigned int stride = prefilter_size_x_ + 1u;
     const size_t fp_size = cached_footprint_.size();
     if (fp_size < 2u || fp_size > 16u) {
       return false;
@@ -126,8 +195,25 @@ public:
       prefilter_integral_[static_cast<size_t>(min_y) * stride + min_x];
     return aabb_disqualifying == 0u;
   }
+
+  /**
+   * @brief Check whether either Level-1 or Level-2 prefilter skips full edge rasterization
+   * @param x Pose X in world coordinates
+   * @param y Pose Y in world coordinates
+   * @param theta Pose heading in radians
+   * @return true if the pose is skipped by Level-1 or Level-2 prefiltering
+   */
+  bool wouldPrefilterSkip(float x, float y, float theta = 0.0f)
+  {
+    return wouldLevel1Skip(x, y) || wouldLevel2Skip(x, y, theta);
+  }
 };
 
+/**
+ * @brief Extract the raw IEEE-754 uint32 bit pattern of a 32-bit float
+ * @param v Input float value
+ * @return Bit-exact uint32 representation
+ */
 uint32_t floatBits(float v)
 {
   uint32_t bits = 0;
@@ -435,14 +521,18 @@ TEST_F(CollisionCriticTest, PrefilterBitExactOn2cmGridWithFullFootprintSoftScori
   // FREE_SPACE but the front bumper touches inflation), lethal wall, and map borders.
   const float yaws[] = {0.0f, 0.35f, -0.78f, 1.57f, -2.40f};
   size_t skipped_poses = 0;
-  for (int ix = 0; ix < 150; ix += 5) {
-    for (int iy = 0; iy < 150; iy += 7) {
+  size_t level2_only_skipped_poses = 0;
+  for (int ix = 0; ix < 150; ix += 2) {
+    for (int iy = 0; iy < 150; iy += 5) {
       const float wx = -1.49f + 0.02f * static_cast<float>(ix);
       const float wy = -1.49f + 0.02f * static_cast<float>(iy);
-      if (critic.wouldPrefilterSkip(wx, wy)) {
+      if (critic.wouldLevel1Skip(wx, wy)) {
         ++skipped_poses;
       }
       for (const float yaw : yaws) {
+        if (!critic.wouldLevel1Skip(wx, wy) && critic.wouldLevel2Skip(wx, wy, yaw)) {
+          ++level2_only_skipped_poses;
+        }
         const auto expected = critic.sample(wx, wy, yaw);
         const auto actual = critic.sampleCached(wx, wy, yaw);
         EXPECT_EQ(floatBits(actual.cost), floatBits(expected.cost));
@@ -451,6 +541,7 @@ TEST_F(CollisionCriticTest, PrefilterBitExactOn2cmGridWithFullFootprintSoftScori
     }
   }
   EXPECT_GT(skipped_poses, 0u);
+  EXPECT_GT(level2_only_skipped_poses, 0u);
 
   // Specifically verify a pose at x = 0.19 m (0.51 m from the lethal wall at x = 0.70 m):
   // base_link cell is in FREE_SPACE (0), but front bumper (+0.182 m -> x = 0.372 m, cell 93)
@@ -621,6 +712,45 @@ TEST_F(CollisionCriticTest, PrefilterHandlesCostmapShrinkAndInPlaceMutation)
   cm->getCostmap()->setCost(px, py, nav2_costmap_2d::LETHAL_OBSTACLE);
   ASSERT_EQ(cm->getCostmap()->getCost(cx, cy), nav2_costmap_2d::FREE_SPACE);
   scoreWithReusedCritic({0.0f, 0.05f}, true);
+
+  // 4. Verify multi-iteration MPPI cache reuse: across 3 inner iterations of a single control
+  // cycle (reuse_obstacles_cache = true on iterations 1 and 2), prepareScoreCache() runs only
+  // ONCE, and a subsequent control cycle (reuse_obstacles_cache = false) rebuilds fresh.
+  std::fill(cm->getCostmap()->getCharMap(), cm->getCostmap()->getCharMap() + 60 * 60, 0);
+  const size_t count_before = critic.prepareScoreCacheCount();
+  {
+    mppi::models::State state;
+    state.reset(1, 2);
+    mppi::models::Trajectories trajectories;
+    trajectories.reset(1, 2);
+    trajectories.x(0, 0) = 0.0f;
+    trajectories.x(0, 1) = 0.05f;
+    trajectories.y.fill(0.0f);
+    trajectories.yaws.fill(0.0f);
+    mppi::models::Path path;
+    path.reset(3);
+    geometry_msgs::msg::Pose goal;
+    goal.position.x = 0.5;
+    goal.orientation.w = 1.0;
+    xt::xtensor<float, 1> costs = xt::zeros<float>({1});
+    float dt = 0.05f;
+    mppi::CriticData data{state, trajectories, path, goal, costs, dt,
+      false, nullptr, nullptr, std::nullopt, std::nullopt};
+    for (size_t iter = 0; iter < 3; ++iter) {
+      costs.fill(0.0f);
+      data.reuse_obstacles_cache = (iter > 0u);
+      critic.score(data);
+      EXPECT_FLOAT_EQ(costs(0), 0.0f);
+    }
+  }
+  EXPECT_EQ(critic.prepareScoreCacheCount(), count_before + 1u);
+
+  // 5. Verify dynamic InflationLayer parameter changes invalidate findCircumscribedCost()
+  // even when circumscribed_radius_ is unchanged.
+  const float old_threshold = critic.threshold();
+  cm->set_parameter(rclcpp::Parameter("inflation_layer.cost_scaling_factor", 3.0));
+  scoreWithReusedCritic({0.0f, 0.05f}, false);
+  EXPECT_NE(critic.threshold(), old_threshold);
 }
 
 TEST_F(CollisionCriticTest, Benchmark2cmGridOpenAndTightCorridor)
@@ -747,6 +877,7 @@ TEST_F(CollisionCriticTest, Benchmark2cmGridOpenAndTightCorridor)
           false, nullptr, nullptr, std::nullopt, std::nullopt};
         const auto t0 = std::chrono::steady_clock::now();
         for (int iter = 0; iter < 3; ++iter) {
+          data.reuse_obstacles_cache = (iter > 0);
           critic.score(data);
         }
         const double ms = std::chrono::duration<double, std::milli>(

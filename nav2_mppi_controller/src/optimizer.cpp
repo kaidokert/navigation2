@@ -255,6 +255,10 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   return control;
 }
 
+/**
+ * @brief Run MPPI optimization iterations to score trajectories and update controls
+ * @param diag Whether diagnostic logging is enabled for this control tick
+ */
 void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
@@ -280,7 +284,9 @@ void Optimizer::optimize(bool diag)
         static_cast<float>(xt::mean(cwz0)()), static_cast<float>(xt::mean(cwz1)()));
     }
 
+    critics_data_.reuse_obstacles_cache = (i > 0u) || (retry_attempt_counter_ > 0u);
     critic_manager_.evalTrajectoriesScores(critics_data_);
+    critics_data_.reuse_obstacles_cache = false;
 
     // [C] COSTS after critics (before control regularization + softmax)
     if (diag) {
