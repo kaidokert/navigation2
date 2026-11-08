@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cmath>
 #include <string>
 #include <vector>
 #include <memory>
@@ -249,4 +250,59 @@ TEST(collision_footprint, make_footprint_from_string_not_pairs) {
   bool result = nav2_costmap_2d::makeFootprintFromString(
     "[[1, 2.2], [.3, -4e4], [-.3, -4e4], [-1, 2.2, 5.6]]", footprint);
   EXPECT_EQ(result, false);
+}
+
+TEST(collision_footprint, footprint_cost_at_pose_matches_oriented_footprint_and_edge_cases)
+{
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2D>(150, 150, 0.02, -1.5, -1.5, 0);
+  costmap->setCost(80, 75, 128);
+  costmap->setCost(90, 82, 253);
+  costmap->setCost(110, 110, 254);
+
+  nav2_costmap_2d::FootprintCollisionChecker<std::shared_ptr<nav2_costmap_2d::Costmap2D>>
+  checker(costmap);
+
+  nav2_costmap_2d::Footprint empty_fp;
+  EXPECT_DOUBLE_EQ(checker.footprintCost(empty_fp), 0.0);
+  EXPECT_DOUBLE_EQ(checker.footprintCostAtPose(0.0, 0.0, 0.5, empty_fp), 0.0);
+
+  geometry_msgs::msg::Point single_pt;
+  single_pt.x = 0.1;
+  single_pt.y = 0.0;
+  nav2_costmap_2d::Footprint single_fp = {single_pt};
+  EXPECT_DOUBLE_EQ(checker.footprintCost(single_fp), 128.0);
+  EXPECT_DOUBLE_EQ(checker.footprintCostAtPose(0.0, 0.0, 0.0, single_fp), 128.0);
+  EXPECT_DOUBLE_EQ(checker.footprintCostAtPose(-1.45, 0.0, 3.141592653589793, single_fp), 254.0);
+
+  std::vector<geometry_msgs::msg::Point> rect_fp;
+  ASSERT_TRUE(nav2_costmap_2d::makeFootprintFromString(
+      "[[0.295, 0.145], [0.295, -0.145], [-0.142, -0.145], [-0.142, 0.145]]", rect_fp));
+
+  const double poses[][3] = {
+    {0.0, 0.0, 0.0},
+    {0.05, 0.02, 0.45},
+    {0.22, 0.10, -0.75},
+    {0.65, 0.65, 0.20},
+    {-1.35, 0.0, 0.0},
+    {1.30, -1.30, 1.10}
+  };
+
+  for (const auto & p : poses) {
+    const double x = p[0];
+    const double y = p[1];
+    const double theta = p[2];
+    const double cos_th = std::cos(theta);
+    const double sin_th = std::sin(theta);
+    nav2_costmap_2d::Footprint oriented;
+    oriented.reserve(rect_fp.size());
+    for (const auto & v : rect_fp) {
+      geometry_msgs::msg::Point pt;
+      pt.x = x + (v.x * cos_th - v.y * sin_th);
+      pt.y = y + (v.x * sin_th + v.y * cos_th);
+      oriented.push_back(pt);
+    }
+    EXPECT_DOUBLE_EQ(
+      checker.footprintCostAtPose(x, y, theta, rect_fp),
+      checker.footprintCost(oriented));
+  }
 }

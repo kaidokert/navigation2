@@ -15,8 +15,10 @@
 #ifndef NAV2_MPPI_CONTROLLER__CRITICS__OBSTACLES_CRITIC_HPP_
 #define NAV2_MPPI_CONTROLLER__CRITICS__OBSTACLES_CRITIC_HPP_
 
+#include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "nav2_costmap_2d/inflation_layer.hpp"
@@ -55,7 +57,7 @@ protected:
     * @param cost Costmap cost
     * @return bool if in collision
     */
-  inline bool inCollision(float cost) const;
+  bool inCollision(float cost) const;
 
   /**
     * @brief cost at a robot pose
@@ -71,7 +73,7 @@ protected:
     * @param cost Costmap cost
     * @return float Distance to the obstacle represented by cost
     */
-  inline float distanceToObstacle(const CollisionCost & cost);
+  float distanceToObstacle(const CollisionCost & cost);
 
   /**
     * @brief Find the min cost of the inflation decay function for which the robot MAY be
@@ -81,6 +83,11 @@ protected:
     * since some element of the robot could be in collision
     */
   float findCircumscribedCost(std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap);
+
+  /**
+    * @brief Precompute per-score-cycle footprint prefilter and distance lookup table
+    */
+  void prepareScoreCache();
 
 protected:
   nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>
@@ -106,6 +113,19 @@ protected:
   unsigned int power_{0};
   float repulsion_weight_, critical_weight_{0};
   std::string inflation_layer_name_;
+
+  nav2_costmap_2d::Footprint cached_footprint_;
+  std::vector<unsigned char> max_cost_h_;
+  std::vector<unsigned char> max_cost_in_radius_;
+  std::array<float, 256> dist_lut_footprint_{};
+  std::array<float, 256> dist_lut_point_{};
+  unsigned int prefilter_size_x_{0};
+  unsigned int prefilter_size_y_{0};
+  unsigned int prefilter_radius_{0};
+  bool cached_is_tracking_unknown_{false};
+  bool dist_lut_ready_{false};
+  bool prefilter_ready_{false};
+  bool score_cache_active_{false};
 };
 
 }  // namespace mppi::critics
