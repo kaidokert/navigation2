@@ -16,6 +16,7 @@
 #define NAV2_MPPI_CONTROLLER__CRITICS__OBSTACLES_CRITIC_HPP_
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -115,8 +116,7 @@ protected:
   std::string inflation_layer_name_;
 
   nav2_costmap_2d::Footprint cached_footprint_;
-  std::vector<unsigned char> max_cost_h_;
-  std::vector<unsigned char> max_cost_in_radius_;
+  std::vector<uint32_t> prefilter_integral_;
   std::array<float, 256> dist_lut_footprint_{};
   std::array<float, 256> dist_lut_point_{};
   unsigned int prefilter_size_x_{0};

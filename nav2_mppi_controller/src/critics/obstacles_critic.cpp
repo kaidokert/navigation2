@@ -173,7 +173,10 @@ void ObstaclesCritic::prepareScoreCache()
   dist_lut_ready_ = false;
   if (inflation_radius_ != 0.0f && inflation_scale_factor_ != 0.0f) {
     for (unsigned int c = 1; c < 256; ++c) {
-      const float c_f = static_cast<float>(c);
+      float c_f = static_cast<float>(c);
+#if defined(__GNUC__) || defined(__clang__)
+      asm volatile("" : "+r" (c_f));
+#endif
       dist_lut_footprint_[c] = distanceToObstacle(CollisionCost{c_f, true});
       dist_lut_point_[c] = distanceToObstacle(CollisionCost{c_f, false});
     }
@@ -216,42 +219,33 @@ void ObstaclesCritic::prepareScoreCache()
   prefilter_size_y_ = size_y;
   prefilter_radius_ = radius;
 
-  if (size_x / 2u <= radius || size_y / 2u <= radius) {
+  if (size_x / 2u <= radius || size_y / 2u <= radius ||
+    size_x > 65535u || size_y > 65535u)
+  {
     return;
   }
 
-  const size_t total_cells = static_cast<size_t>(size_x) * static_cast<size_t>(size_y);
-  max_cost_h_.resize(total_cells);
-  max_cost_in_radius_.assign(total_cells, nav2_costmap_2d::NO_INFORMATION);
-
-  const unsigned int x_end = size_x - radius;
-  const unsigned int y_end = size_y - radius;
-  const unsigned int win_len = 2u * radius + 1u;
+  const unsigned int stride = size_x + 1u;
+  const size_t integral_cells =
+    static_cast<size_t>(stride) * static_cast<size_t>(size_y + 1u);
+  prefilter_integral_.assign(integral_cells, 0u);
 
   for (unsigned int y = 0; y < size_y; ++y) {
     const unsigned char * const src_row = char_map + static_cast<size_t>(y) * size_x;
-    unsigned char * const dst_row = max_cost_h_.data() + static_cast<size_t>(y) * size_x;
-    for (unsigned int x = radius; x < x_end; ++x) {
-      unsigned char max_c = 0;
-      const unsigned char * const win = src_row + (x - radius);
-      for (unsigned int k = 0; k < win_len; ++k) {
-        max_c = std::max(max_c, win[k]);
+    const uint32_t * const prev_row =
+      prefilter_integral_.data() + static_cast<size_t>(y) * stride;
+    uint32_t * const cur_row =
+      prefilter_integral_.data() + static_cast<size_t>(y + 1u) * stride;
+    uint32_t row_sum = 0u;
+    if (consider_footprint_) {
+      for (unsigned int x = 0; x < size_x; ++x) {
+        row_sum += static_cast<uint32_t>(src_row[x] != nav2_costmap_2d::FREE_SPACE);
+        cur_row[x + 1u] = prev_row[x + 1u] + row_sum;
       }
-      dst_row[x] = max_c;
-    }
-  }
-
-  for (unsigned int y = radius; y < y_end; ++y) {
-    unsigned char * const dst_row =
-      max_cost_in_radius_.data() + static_cast<size_t>(y) * size_x;
-    const unsigned char * const first_row =
-      max_cost_h_.data() + static_cast<size_t>(y - radius) * size_x;
-    std::copy(first_row + radius, first_row + x_end, dst_row + radius);
-    for (unsigned int dy = 1u; dy < win_len; ++dy) {
-      const unsigned char * const h_row =
-        max_cost_h_.data() + static_cast<size_t>(y - radius + dy) * size_x;
-      for (unsigned int x = radius; x < x_end; ++x) {
-        dst_row[x] = std::max(dst_row[x], h_row[x]);
+    } else {
+      for (unsigned int x = 0; x < size_x; ++x) {
+        row_sum += static_cast<uint32_t>(src_row[x] >= nav2_costmap_2d::LETHAL_OBSTACLE);
+        cur_row[x + 1u] = prev_row[x + 1u] + row_sum;
       }
     }
   }
@@ -402,27 +396,103 @@ CollisionCost ObstaclesCritic::costAtPose(float x, float y, float theta)
   if (collision_check_footprint_only_ || (consider_footprint_ &&
     (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f)))
   {
-    if (score_cache_active_ && prefilter_ready_ &&
-      x_i >= prefilter_radius_ && x_i + prefilter_radius_ < prefilter_size_x_ &&
-      y_i >= prefilter_radius_ && y_i + prefilter_radius_ < prefilter_size_y_)
-    {
-      const unsigned char max_cost =
-        max_cost_in_radius_[static_cast<size_t>(y_i) * prefilter_size_x_ + x_i];
-      if (consider_footprint_) {
-        if (max_cost == nav2_costmap_2d::FREE_SPACE) {
-          cost = 0.0f;
-          collision_cost.using_footprint = true;
+    float footprint_cost = 0.0f;
+    if (score_cache_active_ && prefilter_ready_) {
+      const unsigned int stride = prefilter_size_x_ + 1u;
+      if (x_i >= prefilter_radius_ && x_i + prefilter_radius_ < prefilter_size_x_ &&
+        y_i >= prefilter_radius_ && y_i + prefilter_radius_ < prefilter_size_y_)
+      {
+        const unsigned int x0 = x_i - prefilter_radius_;
+        const unsigned int x1 = x_i + prefilter_radius_ + 1u;
+        const unsigned int y0 = y_i - prefilter_radius_;
+        const unsigned int y1 = y_i + prefilter_radius_ + 1u;
+        const uint32_t disqualifying_cells =
+          prefilter_integral_[static_cast<size_t>(y1) * stride + x1] -
+          prefilter_integral_[static_cast<size_t>(y0) * stride + x1] -
+          prefilter_integral_[static_cast<size_t>(y1) * stride + x0] +
+          prefilter_integral_[static_cast<size_t>(y0) * stride + x0];
+        if (disqualifying_cells == 0u) {
+          if (consider_footprint_) {
+            cost = 0.0f;
+            collision_cost.using_footprint = true;
+          }
           return collision_cost;
         }
-      } else if (max_cost < nav2_costmap_2d::LETHAL_OBSTACLE) {
-        return collision_cost;
       }
-    }
 
-    const auto & footprint =
-      score_cache_active_ ? cached_footprint_ : costmap_ros_->getRobotFootprint();
-    const float footprint_cost = static_cast<float>(collision_checker_.footprintCostAtPose(
-        x, y, theta, footprint));
+      const size_t fp_size = cached_footprint_.size();
+      if (fp_size >= 2u && fp_size <= 16u) {
+        const double xd = static_cast<double>(x);
+        const double yd = static_cast<double>(y);
+        const double thetad = static_cast<double>(theta);
+        const double cos_th = cos(thetad);
+        const double sin_th = sin(thetad);
+        unsigned int mx[16];
+        unsigned int my[16];
+        unsigned int min_x = prefilter_size_x_;
+        unsigned int max_x = 0u;
+        unsigned int min_y = prefilter_size_y_;
+        unsigned int max_y = 0u;
+        bool all_in_bounds = true;
+        for (size_t k = 0; k < fp_size; ++k) {
+          const double wx = xd + (cached_footprint_[k].x * cos_th -
+            cached_footprint_[k].y * sin_th);
+          const double wy = yd + (cached_footprint_[k].x * sin_th +
+            cached_footprint_[k].y * cos_th);
+          if (!collision_checker_.worldToMap(wx, wy, mx[k], my[k]) ||
+            mx[k] >= prefilter_size_x_ || my[k] >= prefilter_size_y_)
+          {
+            all_in_bounds = false;
+            break;
+          }
+          min_x = std::min(min_x, mx[k]);
+          max_x = std::max(max_x, mx[k]);
+          min_y = std::min(min_y, my[k]);
+          max_y = std::max(max_y, my[k]);
+        }
+        if (!all_in_bounds) {
+          footprint_cost = static_cast<float>(nav2_costmap_2d::LETHAL_OBSTACLE);
+        } else {
+          const unsigned int x1 = max_x + 1u;
+          const unsigned int y1 = max_y + 1u;
+          const uint32_t aabb_disqualifying =
+            prefilter_integral_[static_cast<size_t>(y1) * stride + x1] -
+            prefilter_integral_[static_cast<size_t>(min_y) * stride + x1] -
+            prefilter_integral_[static_cast<size_t>(y1) * stride + min_x] +
+            prefilter_integral_[static_cast<size_t>(min_y) * stride + min_x];
+          if (aabb_disqualifying == 0u) {
+            if (consider_footprint_) {
+              cost = 0.0f;
+              collision_cost.using_footprint = true;
+            }
+            return collision_cost;
+          }
+          double max_edge_cost = 0.0;
+          for (size_t k = 0; k < fp_size - 1u; ++k) {
+            max_edge_cost = std::max(
+              collision_checker_.lineCost(mx[k], mx[k + 1u], my[k], my[k + 1u]),
+              max_edge_cost);
+            if (max_edge_cost == static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE)) {
+              break;
+            }
+          }
+          if (max_edge_cost != static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE)) {
+            max_edge_cost = std::max(
+              collision_checker_.lineCost(mx[0], mx[fp_size - 1u], my[0], my[fp_size - 1u]),
+              max_edge_cost);
+          }
+          footprint_cost = static_cast<float>(max_edge_cost);
+        }
+      } else {
+        footprint_cost = static_cast<float>(
+          collision_checker_.footprintCostAtPose(x, y, theta, cached_footprint_));
+      }
+    } else {
+      footprint_cost = static_cast<float>(
+        score_cache_active_ ?
+        collision_checker_.footprintCostAtPose(x, y, theta, cached_footprint_) :
+        collision_checker_.footprintCostAtPose(x, y, theta, costmap_ros_->getRobotFootprint()));
+    }
     // Full-footprint soft scoring remains unchanged. In hard-only mode, preserve
     // the existing point cost unless the perimeter is lethal or outside the map.
     // An inscribed inflation cost on the perimeter is not a physical collision.
