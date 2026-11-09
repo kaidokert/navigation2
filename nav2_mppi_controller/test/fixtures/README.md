@@ -5,7 +5,10 @@ robot repository's existing `drive_nav2.py` FollowPath runner. It is installed t
 `share/nav2_mppi_controller/controller_test_fixtures/`. Consumers must record the
 file's SHA-256 and the native revision; do not maintain another hand-copied atlas.
 
-The geometry is a reduction of the [approach robustness atlas](http://prometheus-box.tailfa2b6e.ts.net:5244/artifacts/robots/sim/2026-11-09/approach-robustness/design_01/).
+The geometry reduces the 2026-11-09 approach-robustness design atlas into analytic
+straight and constant-curvature references, M8's complete F-R-F maneuver, box
+obstacles, and independent robot starts. All coordinates needed to reproduce these
+fixtures are in `approach_atlas.json`; no external artifact download is required.
 It is not a replay of the office bags and does not establish a controller fix.
 
 ## Contract

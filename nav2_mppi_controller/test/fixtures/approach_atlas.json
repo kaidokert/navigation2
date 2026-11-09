@@ -6,7 +6,7 @@
     "position": "m",
     "heading": "rad"
   },
-  "source_atlas": "http://prometheus-box.tailfa2b6e.ts.net:5244/artifacts/robots/sim/2026-11-09/approach-robustness/design_01/",
+  "source_atlas": "2026-11-09 approach-robustness design: analytic straight/constant-curvature references, complete M8 F-R-F maneuver, box obstacles, and independent robot starts; all geometry included here",
   "map": {
     "resolution": 0.02,
     "origin": [-2, -2],
