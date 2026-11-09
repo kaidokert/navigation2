@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "nav2_mppi_controller/critic_manager.hpp"
+#include "nav2_mppi_controller/tools/optimizer_snapshot.hpp"
 
 namespace mppi
 {
@@ -115,11 +116,16 @@ void CriticManager::evalTrajectoriesScores(
     }
 
     xt::xtensor<float, 1> costs_before;
-    if (publish_critics_stats_) {
+    if (publish_critics_stats_ || data.diagnostic_snapshot) {
       costs_before = data.costs;
     }
 
     critics_[i]->score(data);
+
+    if (data.diagnostic_snapshot) {
+      const xt::xtensor<float, 1> delta = data.costs - costs_before;
+      data.diagnostic_snapshot->values("critic." + critic_names_[i], delta);
+    }
 
     if (publish_critics_stats_) {
       auto delta = data.costs - costs_before;

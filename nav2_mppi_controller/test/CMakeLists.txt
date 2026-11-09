@@ -12,6 +12,7 @@ set(TEST_NAMES
   path_handler_test
   critic_manager_test
   optimizer_unit_tests
+  optimizer_snapshot_test
 )
 
 foreach(name IN LISTS TEST_NAMES)

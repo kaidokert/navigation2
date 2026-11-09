@@ -119,6 +119,11 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  getParam(snapshot_directory_, "optimizer_snapshot_directory", std::string(""),
+    ParameterType::Static);
+  getParam(snapshot_max_ticks_, "optimizer_snapshot_max_ticks", 0, ParameterType::Static);
+  getParam(snapshot_goal_distance_, "optimizer_snapshot_goal_distance", 0.35,
+    ParameterType::Static);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -203,6 +208,79 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 {
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
 
+  std::unique_ptr<OptimizerSnapshot> snapshot;
+  if (!snapshot_directory_.empty() && snapshot_ticks_ < snapshot_max_ticks_ &&
+    !isHolonomic() && robot_speed.linear.x > 0.03 && std::hypot(
+      robot_pose.pose.position.x - goal.position.x,
+      robot_pose.pose.position.y - goal.position.y) <= snapshot_goal_distance_)
+  {
+    snapshot = std::make_unique<OptimizerSnapshot>();
+    ++snapshot_ticks_;
+    snapshot->scalars("input", std::array<double, 10>{
+        static_cast<double>(robot_pose.header.stamp.sec),
+        static_cast<double>(robot_pose.header.stamp.nanosec),
+        robot_pose.pose.position.x, robot_pose.pose.position.y,
+        tf2::getYaw(robot_pose.pose.orientation), robot_speed.linear.x, robot_speed.angular.z,
+        goal.position.x, goal.position.y, tf2::getYaw(goal.orientation)});
+    snapshot->scalars("settings", std::array<double, 8>{
+        settings_.model_dt, settings_.temperature, settings_.gamma, settings_.sampling_std.vx,
+        settings_.sampling_std.wz, static_cast<double>(settings_.batch_size),
+        static_cast<double>(settings_.time_steps), settings_.shift_control_sequence ? 1.0 : 0.0});
+    snapshot->values("path.x", path_.x);
+    snapshot->values("path.y", path_.y);
+    snapshot->values("path.yaw", path_.yaws);
+    snapshot->values("frame.robot", std::vector<uint8_t>(
+      robot_pose.header.frame_id.begin(), robot_pose.header.frame_id.end()));
+    const std::string map_frame = costmap_ros_->getGlobalFrameID();
+    snapshot->values("frame.map", std::vector<uint8_t>(map_frame.begin(), map_frame.end()));
+    const auto & c = settings_.constraints;
+    snapshot->scalars("constraints", std::array<double, 9>{
+        c.vx_max, c.vx_min, c.vy, c.wz, c.ax_max, c.ax_min, c.ay_max, c.ay_min, c.az_max});
+    std::vector<double> footprint;
+    for (const auto & point : costmap_ros_->getRobotFootprint()) {
+      footprint.push_back(point.x);
+      footprint.push_back(point.y);
+    }
+    snapshot->values("footprint", footprint);
+    for (size_t i = 0; i < control_history_.size(); ++i) {
+      snapshot->scalars("history." + std::to_string(i), std::array<double, 3>{
+          control_history_[i].vx, control_history_[i].vy, control_history_[i].wz});
+    }
+    snapshot->scalars("map.geometry", std::array<double, 5>{
+        static_cast<double>(costmap_->getSizeInCellsX()),
+        static_cast<double>(costmap_->getSizeInCellsY()), costmap_->getResolution(),
+        costmap_->getOriginX(), costmap_->getOriginY()});
+    std::vector<uint8_t> cells(costmap_->getCharMap(), costmap_->getCharMap() +
+      costmap_->getSizeInCellsX() * costmap_->getSizeInCellsY());
+    snapshot->values("map.costs", cells);
+  }
+  critics_data_.diagnostic_snapshot = snapshot.get();
+  struct ResetSnapshot
+  {
+    CriticData & data;
+    std::unique_ptr<OptimizerSnapshot> & snapshot;
+    std::string filename;
+    const rclcpp::Logger & logger;
+    bool completed{false};
+    ~ResetSnapshot() noexcept
+    {
+      data.diagnostic_snapshot = nullptr;
+      if (!snapshot) {return;}
+      try {
+        snapshot->prefix("");
+        snapshot->scalars("completed", std::array<double, 1>{completed ? 1.0 : 0.0});
+        if (!snapshot->save(filename)) {
+          RCLCPP_ERROR(logger, "Failed writing optimizer diagnostic snapshot %s", filename.c_str());
+        }
+      } catch (...) {
+        // Diagnostic failure must not replace a native controller exception.
+      }
+    }
+  } reset_snapshot{critics_data_, snapshot, snapshot ? snapshot_directory_ + "/" +
+    std::to_string(robot_pose.header.stamp.sec) + "_" +
+    std::to_string(robot_pose.header.stamp.nanosec) + "_" +
+    std::to_string(snapshot_ticks_) + ".mppisnapshot" : "", logger_};
+
   bool diag = (diag_tick_++ % 4 == 0);
   const auto ts = settings_.time_steps;
 
@@ -229,6 +307,11 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   }
 
   utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
+  if (snapshot) {
+    snapshot->prefix("");
+    snapshot->values("post_sg.vx", control_sequence_.vx);
+    snapshot->values("post_sg.wz", control_sequence_.wz);
+  }
 
   // [F] POST-SG FILTER
   if (diag && ts >= 5) {
@@ -240,6 +323,13 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   }
 
   auto control = getValidatedControlFromSequenceAsTwist(plan.header.stamp);
+  if (snapshot) {
+    snapshot->values("validated.vx", control_sequence_.vx);
+    snapshot->values("validated.wz", control_sequence_.wz);
+    snapshot->scalars("emitted", std::array<double, 2>{
+        control.twist.linear.x, control.twist.angular.z});
+    reset_snapshot.completed = true;
+  }
 
   // [G] FINAL CMD_VEL
   if (diag) {
@@ -262,6 +352,13 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 void Optimizer::optimize(bool diag)
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    if (critics_data_.diagnostic_snapshot) {
+      auto & out = *critics_data_.diagnostic_snapshot;
+      out.prefix("retry." + std::to_string(retry_attempt_counter_) +
+        ".iter." + std::to_string(i) + ".");
+      out.values("prior.vx", control_sequence_.vx);
+      out.values("prior.wz", control_sequence_.wz);
+    }
     // Recentring changes each row's controls and rollout. Costs from an earlier
     // bank (including collision penalties) do not score this new trajectory.
     costs_.fill(0.0f);
@@ -287,6 +384,28 @@ void Optimizer::optimize(bool diag)
     critics_data_.reuse_obstacles_cache = (i > 0u) || (retry_attempt_counter_ > 0u);
     critic_manager_.evalTrajectoriesScores(critics_data_);
     critics_data_.reuse_obstacles_cache = false;
+    if (critics_data_.diagnostic_snapshot) {
+      auto & out = *critics_data_.diagnostic_snapshot;
+      out.values("cvx", state_.cvx);
+      out.values("cwz", state_.cwz);
+      out.values("predicted.vx", state_.vx);
+      out.values("predicted.wz", state_.wz);
+      out.values("trajectory.x", generated_trajectories_.x);
+      out.values("trajectory.y", generated_trajectories_.y);
+      out.values("trajectory.yaw", generated_trajectories_.yaws);
+      out.values("costs.critics", costs_);
+      out.scalars("fail_flag", std::array<double, 1>{critics_data_.fail_flag ? 1.0 : 0.0});
+      out.scalars("furthest", std::array<double, 1>{
+          critics_data_.furthest_reached_path_point ?
+          static_cast<double>(*critics_data_.furthest_reached_path_point) : -1.0});
+      if (critics_data_.path_pts_valid) {
+        std::vector<uint8_t> valid;
+        for (bool value : *critics_data_.path_pts_valid) {
+          valid.push_back(value ? 1 : 0);
+        }
+        out.values("path.valid", valid);
+      }
+    }
 
     // [C] COSTS after critics (before control regularization + softmax)
     if (diag) {
@@ -546,6 +665,10 @@ void Optimizer::updateControlSequence(bool diag)
   auto && exponents = xt::eval(xt::exp(-1 / settings_.temperature * costs_normalized));
   auto && softmaxes = xt::eval(exponents / xt::sum(exponents, immediate));
   auto && softmaxes_extened = xt::eval(xt::view(softmaxes, xt::all(), xt::newaxis()));
+  if (critics_data_.diagnostic_snapshot) {
+    critics_data_.diagnostic_snapshot->values("costs.regularized", costs_);
+    critics_data_.diagnostic_snapshot->values("weights", softmaxes);
+  }
 
   // [D] SOFTMAX: how concentrated are the weights?
   if (diag) {
@@ -569,6 +692,10 @@ void Optimizer::updateControlSequence(bool diag)
   }
 
   // [D2] POST-SOFTMAX (before accel constraints)
+  if (critics_data_.diagnostic_snapshot) {
+    critics_data_.diagnostic_snapshot->values("mean.vx", control_sequence_.vx);
+    critics_data_.diagnostic_snapshot->values("mean.wz", control_sequence_.wz);
+  }
   if (diag && settings_.time_steps >= 5) {
     RCLCPP_DEBUG(logger_,
       "[MPPI] D2.w-avg  ctrl[0..4]=(%.4f,%.4f,%.4f,%.4f,%.4f) wz(%.3f,%.3f,%.3f)",
@@ -578,6 +705,10 @@ void Optimizer::updateControlSequence(bool diag)
   }
 
   applyControlSequenceConstraints();
+  if (critics_data_.diagnostic_snapshot) {
+    critics_data_.diagnostic_snapshot->values("constrained.vx", control_sequence_.vx);
+    critics_data_.diagnostic_snapshot->values("constrained.wz", control_sequence_.wz);
+  }
 }
 
 bool Optimizer::controlSequenceFinite() const

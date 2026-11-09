@@ -35,6 +35,7 @@
 
 namespace mppi
 {
+class OptimizerSnapshot;
 
 /**
  * @struct mppi::CriticData
@@ -57,6 +58,7 @@ struct CriticData
   std::optional<std::vector<bool>> path_pts_valid;
   std::optional<size_t> furthest_reached_path_point;
   bool reuse_obstacles_cache{false};
+  OptimizerSnapshot * diagnostic_snapshot{nullptr};
 };
 
 }  // namespace mppi

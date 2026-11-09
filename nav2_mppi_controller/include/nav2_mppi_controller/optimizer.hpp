@@ -46,6 +46,7 @@
 #include "nav2_mppi_controller/tools/noise_generator.hpp"
 #include "nav2_mppi_controller/tools/parameters_handler.hpp"
 #include "nav2_mppi_controller/tools/utils.hpp"
+#include "nav2_mppi_controller/tools/optimizer_snapshot.hpp"
 
 namespace mppi
 {
@@ -274,6 +275,10 @@ protected:
   CriticManager critic_manager_;
   NoiseGenerator noise_generator_;
   int diag_tick_{0};
+  std::string snapshot_directory_;
+  int snapshot_max_ticks_{0};
+  double snapshot_goal_distance_{0.35};
+  int snapshot_ticks_{0};
   size_t retry_attempt_counter_{0};
 
   models::OptimizerSettings settings_;
