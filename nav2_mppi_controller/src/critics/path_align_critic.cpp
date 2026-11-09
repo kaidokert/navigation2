@@ -33,11 +33,12 @@ void PathAlignCritic::initialize()
     threshold_to_consider_,
     "threshold_to_consider", 0.5f);
   getParam(use_path_orientations_, "use_path_orientations", false);
+  getParam(orientation_weight_, "orientation_weight", 1.0f);
 
   RCLCPP_INFO(
     logger_,
-    "ReferenceTrajectoryCritic instantiated with %d power and %f weight",
-    power_, weight_);
+    "ReferenceTrajectoryCritic instantiated with %d power, %f weight, and %f orientation_weight",
+    power_, weight_, orientation_weight_);
 }
 
 void PathAlignCritic::score(CriticData & data)
@@ -175,7 +176,7 @@ void PathAlignCritic::score(CriticData & data)
         dy = pose.y - Ty;
         num_samples++;
         if (use_path_orientations_) {
-          dyaw = angles::shortest_angular_distance(pose.theta, T_yaw(t, p));
+          dyaw = angles::shortest_angular_distance(pose.theta, T_yaw(t, p)) * orientation_weight_;
           summed_path_dist += sqrtf(dx * dx + dy * dy + dyaw * dyaw);
         } else {
           summed_path_dist += sqrtf(dx * dx + dy * dy);

@@ -854,6 +854,88 @@ TEST(CriticTests, PathAlignCriticShortPath)
   EXPECT_NEAR(xt::sum(costs, immediate)(), 0.0, 1e-6);
 }
 
+TEST(CriticTests, PathAlignCriticOrientationWeight)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  node->declare_parameter("critic.use_path_orientations", rclcpp::ParameterValue(true));
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap", true);
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  models::State state;
+  state.reset(4, 30);
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(4, 30);
+  models::Path path;
+  geometry_msgs::msg::Pose goal;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({4});
+  float model_dt = 0.1f;
+  CriticData data =
+  {state, generated_trajectories, path, goal, costs, model_dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+  data.motion_model = std::make_shared<DiffDriveMotionModel>();
+  TestGoalChecker goal_checker;
+  data.goal_checker = &goal_checker;
+
+  PathAlignCritic critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+
+  // Two-point straight path along +x: (0, 0, yaw=0) -> (0.5, 0, yaw=0)
+  path.reset(2);
+  path.x(0) = 0.0f;
+  path.x(1) = 0.5f;
+  path.y(0) = 0.0f;
+  path.y(1) = 0.0f;
+  path.yaws(0) = 0.0f;
+  path.yaws(1) = 0.0f;
+  goal.position.x = 0.5;
+  goal.position.y = 0.0;
+  state.pose.pose.position.x = 0.0;
+  state.pose.pose.position.y = -0.12;
+  data.furthest_reached_path_point = 1;
+  data.path_pts_valid.reset();
+
+  // All 4 trajectories stay at x=0 so closest path point is path[0]=(0,0,yaw=0).
+  generated_trajectories.x = xt::zeros<float>({4, 30});
+  // Trajectory 0: recovering toward path (y = -0.04 m) with +0.20 rad intercept heading
+  xt::view(generated_trajectories.y, 0, xt::all()) = -0.04f;
+  xt::view(generated_trajectories.yaws, 0, xt::all()) = 0.20f;
+  // Trajectory 1: remaining displaced (y = -0.12 m) but parallel to path (yaw = 0.0 rad)
+  xt::view(generated_trajectories.y, 1, xt::all()) = -0.12f;
+  xt::view(generated_trajectories.yaws, 1, xt::all()) = 0.0f;
+  // Trajectory 2: on-track (y = 0.0 m) but misaligned in yaw (+0.20 rad)
+  xt::view(generated_trajectories.y, 2, xt::all()) = 0.0f;
+  xt::view(generated_trajectories.yaws, 2, xt::all()) = 0.20f;
+  // Trajectory 3: on-track (y = 0.0 m) and aligned in yaw (0.0 rad)
+  xt::view(generated_trajectories.y, 3, xt::all()) = 0.0f;
+  xt::view(generated_trajectories.yaws, 3, xt::all()) = 0.0f;
+
+  // With default orientation_weight = 1.0 m/rad, the 0.20 rad intercept angle
+  // makes Trajectory 0 costlier than staying 0.12 m off-path (Trajectory 1).
+  costs = xt::zeros<float>({4});
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 10.0f * std::sqrt(0.04f * 0.04f + 0.20f * 0.20f), 1e-4f);
+  EXPECT_NEAR(costs(1), 1.20f, 1e-4f);
+  EXPECT_GT(costs(0), costs(1));
+  EXPECT_NEAR(costs(2), 2.00f, 1e-4f);
+  EXPECT_NEAR(costs(3), 0.0f, 1e-6f);
+
+  // Scale orientation_weight to wheelbase lever arm 0.20 m/rad via dynamic parameters:
+  // recovering Trajectory 0 now scores strictly lower than displaced Trajectory 1,
+  // while on-track yaw error (Trajectory 2) still scores higher than aligned (Trajectory 3).
+  param_handler.dynamicParamsCallback({rclcpp::Parameter("critic.orientation_weight", 0.20)});
+  costs = xt::zeros<float>({4});
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 10.0f * std::sqrt(0.04f * 0.04f + 0.04f * 0.04f), 1e-4f);
+  EXPECT_NEAR(costs(1), 1.20f, 1e-4f);
+  EXPECT_LT(costs(0), costs(1));
+  EXPECT_NEAR(costs(2), 0.40f, 1e-4f);
+  EXPECT_NEAR(costs(3), 0.0f, 1e-6f);
+  EXPECT_GT(costs(2), costs(3));
+}
+
 TEST(CriticTests, VelocityDeadbandCritic)
 {
   // Standard preamble
