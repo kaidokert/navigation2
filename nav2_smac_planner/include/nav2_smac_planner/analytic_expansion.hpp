@@ -116,7 +116,8 @@ public:
    */
   AnalyticExpansionNodes getAnalyticPath(
     const NodePtr & node, const NodePtr & goal,
-    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space);
+    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space,
+    bool reverse_gear = false);
 
   /**
    * @brief Takes final analytic expansion and appends to current expanded node
@@ -137,6 +138,7 @@ public:
   void cleanNode(const NodePtr & nodes);
 
 protected:
+  int _gear_change_deferrals_used{0};
   MotionModel _motion_model;
   SearchInfo _search_info;
   bool _traverse_unknown;

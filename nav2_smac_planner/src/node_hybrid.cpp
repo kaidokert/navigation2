@@ -62,6 +62,7 @@ void HybridMotionTable::initDubin(
 {
   size_x = size_x_in;
   change_penalty = search_info.change_penalty;
+  gear_change_penalty = search_info.gear_change_penalty;
   non_straight_penalty = search_info.non_straight_penalty;
   cost_penalty = search_info.cost_penalty;
   reverse_penalty = search_info.reverse_penalty;
@@ -189,6 +190,7 @@ void HybridMotionTable::initReedsShepp(
 {
   size_x = size_x_in;
   change_penalty = search_info.change_penalty;
+  gear_change_penalty = search_info.gear_change_penalty;
   non_straight_penalty = search_info.non_straight_penalty;
   cost_penalty = search_info.cost_penalty;
   reverse_penalty = search_info.reverse_penalty;
@@ -441,6 +443,16 @@ float NodeHybrid::getTraversalCost(const NodePtr & child)
   {
     // reverse direction
     travel_cost *= motion_table.reverse_penalty;
+  }
+
+  if (motion_table.gear_change_penalty > 0.0f) {
+    const auto is_reverse = [](const TurnDirection & dir) {
+        return dir == TurnDirection::REV_RIGHT || dir == TurnDirection::REV_LEFT ||
+               dir == TurnDirection::REVERSE;
+      };
+    if (is_reverse(getTurnDirection()) != is_reverse(child_turn_dir)) {
+      travel_cost += motion_table.gear_change_penalty;
+    }
   }
 
   return travel_cost;

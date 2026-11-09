@@ -146,6 +146,14 @@ void SmacPlannerHybrid::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".reverse_penalty", rclcpp::ParameterValue(2.0));
   node->get_parameter(name + ".reverse_penalty", _search_info.reverse_penalty);
+  double gear_change_penalty_m = 0.0;
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".gear_change_penalty", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".gear_change_penalty", gear_change_penalty_m);
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_gear_change_deferrals", rclcpp::ParameterValue(0));
+  node->get_parameter(
+    name + ".analytic_gear_change_deferrals", _search_info.analytic_gear_change_deferrals);
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".change_penalty", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".change_penalty", _search_info.change_penalty);
@@ -238,6 +246,8 @@ void SmacPlannerHybrid::configure(
   }
   _search_info.minimum_turning_radius =
     _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+  _search_info.gear_change_penalty = static_cast<float>(
+    gear_change_penalty_m / (_costmap->getResolution() * _downsampling_factor));
   _lookup_table_dim =
     static_cast<float>(_lookup_table_size) /
     static_cast<float>(_costmap->getResolution() * _downsampling_factor);

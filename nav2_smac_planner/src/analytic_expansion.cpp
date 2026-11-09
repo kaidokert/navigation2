@@ -86,6 +86,9 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
     if (analytic_iterations <= 0) {
       // Reset the counter and try the analytic path expansion
       analytic_iterations = desired_iterations;
+      if (current_node->parent == nullptr) {
+        _gear_change_deferrals_used = 0;
+      }
       _trace_candidate_turning_radius = current_node->motion_table.min_turning_radius;
       AnalyticExpansionNodes analytic_nodes =
         getAnalyticPath(current_node, goal_node, getter, current_node->motion_table.state_space);
@@ -121,9 +124,49 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
         // So, we can attempt to refine it more by increasing the possible radius
         // higher than the minimum turning radius and use the best solution based on
         // a scoring function similar to that used in traveral cost estimation.
+        const float gear_change_penalty = _search_info.gear_change_penalty;
+        // Count direction reversals along the shot, from the sample-to-sample displacement
+        // measured against the heading at the start of each step.
+        auto countGearChanges = [&](const AnalyticExpansionNodes & expansion) {
+            int changes = 0;
+            int gear = 0;
+            float x = node->pose.x;
+            float y = node->pose.y;
+            float heading = node->motion_table.getAngleFromBin(node->pose.theta);
+            for (const auto & sample : expansion) {
+              const float dx = sample.proposed_coords.x - x;
+              const float dy = sample.proposed_coords.y - y;
+              if (hypotf(dx, dy) > 1e-3f) {
+                const int step_gear = (dx * cosf(heading) + dy * sinf(heading)) >= 0.0f ? 1 : -1;
+                changes += (gear != 0 && step_gear != gear) ? 1 : 0;
+                gear = step_gear;
+              }
+              x = sample.proposed_coords.x;
+              y = sample.proposed_coords.y;
+              heading = node->motion_table.getAngleFromBin(sample.proposed_coords.theta);
+            }
+            return changes;
+          };
+
         auto scoringFn = [&](const AnalyticExpansionNodes & expansion) {
             if (expansion.size() < 2) {
               return std::numeric_limits<float>::max();
+            }
+
+            if (gear_change_penalty > 0.0f) {
+              // Samples are not evenly spaced: integrate over the real step lengths.
+              float integrated = 0.0f;
+              float px = node->pose.x;
+              float py = node->pose.y;
+              const float & cost_weight = expansion[0].node->motion_table.cost_penalty;
+              for (const auto & sample : expansion) {
+                const float step = hypotf(
+                  sample.proposed_coords.x - px, sample.proposed_coords.y - py);
+                integrated += step * (1.0f + cost_weight * sample.node->getCost() / 252.0f);
+                px = sample.proposed_coords.x;
+                py = sample.proposed_coords.y;
+              }
+              return integrated + gear_change_penalty * countGearChanges(expansion);
             }
 
             float score = 0.0;
@@ -180,6 +223,43 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           }
         }
 
+        if (gear_change_penalty > 0.0f && countGearChanges(analytic_nodes) > 0) {
+          // Reeds-Shepp returns only the shortest curve, which may reverse. Offer
+          // forward-only and reverse-only curves over the same radius ladder.
+          const float base_radius = node->motion_table.min_turning_radius;
+          for (const bool reverse_gear : {false, true}) {
+            for (float radius = base_radius; radius < 4.0f * base_radius; radius += 0.5f) {
+              auto dubins_space = std::make_shared<ompl::base::DubinsStateSpace>(radius);
+              _trace_candidate_turning_radius = radius;
+              refined_analytic_nodes =
+                getAnalyticPath(node, goal_node, getter, dubins_space, reverse_gear);
+              score = scoringFn(refined_analytic_nodes);
+              const uint64_t attempt_id = _last_trace_attempt_id;
+              if (score <= best_score) {
+                analytic_nodes = refined_analytic_nodes;
+                best_score = score;
+                selected_attempt_id = attempt_id;
+              }
+              if (_trace_callback) {
+                std::ostringstream event;
+                event << std::setprecision(9)
+                      << "{\"schema\":1,\"event\":\"score\",\"request_id\":"
+                      << _trace_request_id << ",\"attempt_id\":" << attempt_id
+                      << ",\"score\":" << score << "}";
+                _trace_callback(event.str());
+              }
+            }
+          }
+          // Let the search try for a one-gear route before settling for a reversal.
+          if (countGearChanges(analytic_nodes) > 0 &&
+            _gear_change_deferrals_used < _search_info.analytic_gear_change_deferrals)
+          {
+            ++_gear_change_deferrals_used;
+            analytic_iterations--;
+            return NodePtr(nullptr);
+          }
+        }
+
         if (_trace_callback) {
           std::ostringstream event;
           event << std::setprecision(9)
@@ -209,7 +289,8 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   const NodePtr & node,
   const NodePtr & goal,
   const NodeGetter & node_getter,
-  const ompl::base::StateSpacePtr & state_space)
+  const ompl::base::StateSpacePtr & state_space,
+  bool reverse_gear)
 {
   const uint64_t attempt_id = ++_trace_attempt_id;
   _last_trace_attempt_id = attempt_id;
@@ -219,10 +300,12 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
   static ompl::base::ScopedState<> from(state_space), to(state_space), s(state_space);
   from[0] = node->pose.x;
   from[1] = node->pose.y;
-  from[2] = node->motion_table.getAngleFromBin(node->pose.theta);
+  // A reverse-only curve is a forward curve of the vehicle turned around.
+  const double gear_heading_offset = reverse_gear ? M_PI : 0.0;
+  from[2] = node->motion_table.getAngleFromBin(node->pose.theta) + gear_heading_offset;
   to[0] = goal->pose.x;
   to[1] = goal->pose.y;
-  to[2] = node->motion_table.getAngleFromBin(goal->pose.theta);
+  to[2] = node->motion_table.getAngleFromBin(goal->pose.theta) + gear_heading_offset;
   const float distance = state_space->distance(from(), to());
   std::string trace_segments = "[]";
   bool has_rejected_sample = false;
@@ -355,8 +438,8 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
           case ompl::base::DubinsStateSpace::DUBINS_RIGHT: type = "right"; break;
           default: break;
         }
-        segments << "{\"type\":\"" << type << "\",\"length\":"
-                 << dubins_path.length_[i] << "}";
+        segments << "{\"type\":\"" << type << "\",\"signed_length\":"
+                 << (reverse_gear ? -1.0 : 1.0) * dubins_path.length_[i] << "}";
       }
       segments << "]";
       trace_segments = segments.str();
@@ -418,6 +501,7 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     state_space->interpolate(from(), to(), interp_fraction, s());
     reals = s.reals();
     // Make sure in range [0, 2PI)
+    reals[2] -= gear_heading_offset;
     theta = (reals[2] < 0.0) ? (reals[2] + 2.0 * M_PI) : reals[2];
     theta = (theta > 2.0 * M_PI) ? (theta - 2.0 * M_PI) : theta;
     angle = node->motion_table.getAngle(theta);
@@ -586,7 +670,8 @@ getAnalyticPath(
   const NodePtr & node,
   const NodePtr & goal,
   const NodeGetter & node_getter,
-  const ompl::base::StateSpacePtr & state_space)
+  const ompl::base::StateSpacePtr & state_space,
+  bool /*reverse_gear*/)
 {
   return AnalyticExpansionNodes();
 }
