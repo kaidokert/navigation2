@@ -41,3 +41,18 @@ ament_target_dependencies(final_optimizer_under_test ${dependencies})
 ament_add_gtest(final_output_regressions ../final_output_collision_tests.cpp TIMEOUT 90)
 ament_target_dependencies(final_output_regressions ${dependencies})
 target_link_libraries(final_output_regressions final_optimizer_under_test)
+
+# Reuse this existing lightweight native build, without a Gazebo/planner stack.
+find_package(yaml_cpp_vendor REQUIRED)
+find_package(yaml-cpp REQUIRED)
+add_library(controller_scenario_code STATIC
+  "${mppi_dir}/src/critics/path_align_critic.cpp"
+  "${mppi_dir}/src/critics/path_follow_critic.cpp"
+  "${mppi_dir}/src/path_handler.cpp")
+target_link_libraries(controller_scenario_code final_optimizer_under_test)
+ament_target_dependencies(controller_scenario_code ${dependencies})
+ament_add_gtest(controller_scenario_tests ../controller_scenario_tests.cpp TIMEOUT 120)
+ament_target_dependencies(controller_scenario_tests ${dependencies})
+target_link_libraries(controller_scenario_tests controller_scenario_code yaml-cpp)
+target_compile_definitions(controller_scenario_tests PRIVATE
+  CONTROLLER_SCENARIO_FILE="${mppi_dir}/test/fixtures/approach_atlas.json")

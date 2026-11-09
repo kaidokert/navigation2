@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.5)
 project(nav2_mppi_controller)
 
+# One canonical reference geometry for native tests and external FollowPath gyms.
+install(DIRECTORY test/fixtures/
+  DESTINATION share/${PROJECT_NAME}/controller_test_fixtures)
+
 add_definitions(-DXTENSOR_ENABLE_XSIMD)
 add_definitions(-DXTENSOR_USE_XSIMD)
 
