@@ -65,6 +65,7 @@ void HybridMotionTable::initDubin(
   non_straight_penalty = search_info.non_straight_penalty;
   cost_penalty = search_info.cost_penalty;
   reverse_penalty = search_info.reverse_penalty;
+  gear_change_penalty = search_info.gear_change_penalty;
   travel_distance_reward = 1.0f - search_info.retrospective_penalty;
   downsample_obstacle_heuristic = search_info.downsample_obstacle_heuristic;
   use_quadratic_cost_penalty = search_info.use_quadratic_cost_penalty;
@@ -72,6 +73,7 @@ void HybridMotionTable::initDubin(
   // if nothing changed, no need to re-compute primitives
   if (num_angle_quantization_in == num_angle_quantization &&
     min_turning_radius == search_info.minimum_turning_radius &&
+    allow_primitive_interpolation == search_info.allow_primitive_interpolation &&
     motion_model == MotionModel::DUBIN)
   {
     return;
@@ -80,6 +82,7 @@ void HybridMotionTable::initDubin(
   num_angle_quantization = num_angle_quantization_in;
   num_angle_quantization_float = static_cast<float>(num_angle_quantization);
   min_turning_radius = search_info.minimum_turning_radius;
+  allow_primitive_interpolation = search_info.allow_primitive_interpolation;
   motion_model = MotionModel::DUBIN;
 
   // angle must meet 3 requirements:
@@ -192,6 +195,7 @@ void HybridMotionTable::initReedsShepp(
   non_straight_penalty = search_info.non_straight_penalty;
   cost_penalty = search_info.cost_penalty;
   reverse_penalty = search_info.reverse_penalty;
+  gear_change_penalty = search_info.gear_change_penalty;
   travel_distance_reward = 1.0f - search_info.retrospective_penalty;
   downsample_obstacle_heuristic = search_info.downsample_obstacle_heuristic;
   use_quadratic_cost_penalty = search_info.use_quadratic_cost_penalty;
@@ -199,6 +203,7 @@ void HybridMotionTable::initReedsShepp(
   // if nothing changed, no need to re-compute primitives
   if (num_angle_quantization_in == num_angle_quantization &&
     min_turning_radius == search_info.minimum_turning_radius &&
+    allow_primitive_interpolation == search_info.allow_primitive_interpolation &&
     motion_model == MotionModel::REEDS_SHEPP)
   {
     return;
@@ -207,6 +212,7 @@ void HybridMotionTable::initReedsShepp(
   num_angle_quantization = num_angle_quantization_in;
   num_angle_quantization_float = static_cast<float>(num_angle_quantization);
   min_turning_radius = search_info.minimum_turning_radius;
+  allow_primitive_interpolation = search_info.allow_primitive_interpolation;
   motion_model = MotionModel::REEDS_SHEPP;
 
   float angle = 2.0 * asin(sqrt(2.0) / (2 * min_turning_radius));
@@ -353,6 +359,7 @@ NodeHybrid::NodeHybrid(const uint64_t index)
   _index(index),
   _was_visited(false),
   _motion_primitive_index(std::numeric_limits<unsigned int>::max()),
+  _turn_dir(TurnDirection::UNKNOWN),
   _is_node_valid(false)
 {
 }
@@ -369,6 +376,7 @@ void NodeHybrid::reset()
   _accumulated_cost = std::numeric_limits<float>::max();
   _was_visited = false;
   _motion_primitive_index = std::numeric_limits<unsigned int>::max();
+  _turn_dir = TurnDirection::UNKNOWN;
   pose.x = 0.0f;
   pose.y = 0.0f;
   pose.theta = 0.0f;
@@ -441,6 +449,16 @@ float NodeHybrid::getTraversalCost(const NodePtr & child)
   {
     // reverse direction
     travel_cost *= motion_table.reverse_penalty;
+  }
+
+  if (motion_table.gear_change_penalty > 0.0f && getTurnDirection() != TurnDirection::UNKNOWN) {
+    const auto is_reverse = [](const TurnDirection & dir) {
+        return dir == TurnDirection::REV_RIGHT || dir == TurnDirection::REV_LEFT ||
+               dir == TurnDirection::REVERSE;
+      };
+    if (is_reverse(getTurnDirection()) != is_reverse(child_turn_dir)) {
+      travel_cost += motion_table.gear_change_penalty;
+    }
   }
 
   return travel_cost;

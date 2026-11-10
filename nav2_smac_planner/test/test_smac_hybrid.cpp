@@ -520,3 +520,134 @@ TEST(SmacTest, test_smac_costmap_mutation_throws)
   costmap_ros.reset();
   nodeSE2.reset();
 }
+
+TEST(SmacTest, dynamic_gear_change_penalty_and_downsampling_rescaling)
+{
+  using json = nlohmann::json;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacGearDynTest");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("gear_dyn_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(200, 200, 0.05, -5.0, -5.0);
+
+  node->declare_parameter("test.publish_analytic_expansion_trace", true);
+  node->declare_parameter("test.downsample_costmap", false);
+  node->declare_parameter("test.downsampling_factor", 2);
+  node->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  node->declare_parameter("test.minimum_turning_radius", 0.5);
+  node->declare_parameter("test.smooth_path", false);
+  node->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  node->declare_parameter("test.analytic_expansion_ratio", 2.0);
+  node->declare_parameter("test.lookup_table_size", 10.0);
+
+  auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner->configure(node, "test", nullptr, costmap_ros);
+  planner->activate();
+
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 0.0f);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("smac_gear_dyn_trace_sub");
+  std::vector<std::string> batches;
+  auto subscription = subscriber_node->create_subscription<std_msgs::msg::String>(
+    "/analytic_expansion_trace", rclcpp::QoS(10),
+    [&batches](std_msgs::msg::String::ConstSharedPtr message) {
+      batches.push_back(message->data);
+    });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(subscriber_node);
+  for (int i = 0; i < 20; ++i) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  auto wait_for_batch = [&executor, &batches](size_t expected_count) {
+      for (int i = 0; i < 100 && batches.size() < expected_count; ++i) {
+        executor.spin_some();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      return batches.size() >= expected_count;
+    };
+
+  auto make_pose = [](double x, double y, double yaw) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.frame_id = "map";
+      pose.pose.position.x = x;
+      pose.pose.position.y = y;
+      pose.pose.orientation.z = std::sin(yaw / 2.0);
+      pose.pose.orientation.w = std::cos(yaw / 2.0);
+      return pose;
+    };
+  const auto start = make_pose(-1.188, 0.843, 252.0 * M_PI / 180.0);
+  const auto goal = make_pose(-1.18, 0.90, 270.0 * M_PI / 180.0);
+  auto no_cancel = []() {return false;};
+
+  // 1. Default off-by-default (0.0, 0) -> gear_aware is false
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  ASSERT_TRUE(wait_for_batch(1));
+  const json batch0 = json::parse(batches[0]);
+  bool saw_gear_aware_false = false;
+  for (const auto & rec : batch0) {
+    if (rec["event"] == "score") {
+      EXPECT_FALSE(rec["gear_aware"].get<bool>());
+      saw_gear_aware_false = true;
+    }
+  }
+  EXPECT_TRUE(saw_gear_aware_false);
+
+  // 2. Dynamically enable gear_change_penalty = 0.5 m (10.0 cells at 0.05 m/cell) and deferrals = 2
+  const auto res_enable = node->set_parameters_atomically({
+    rclcpp::Parameter("test.gear_change_penalty", 0.5),
+    rclcpp::Parameter("test.analytic_gear_change_deferrals", 2)});
+  ASSERT_TRUE(res_enable.successful);
+
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 10.0f);
+  ASSERT_TRUE(wait_for_batch(2));
+  const json batch1 = json::parse(batches[1]);
+  bool saw_rs = false;
+  bool saw_dubins_fwd = false;
+  bool saw_dubins_rev = false;
+  bool saw_gear_aware_true = false;
+  for (const auto & rec : batch1) {
+    if (rec["event"] == "candidate") {
+      const std::string kind = rec["kind"].get<std::string>();
+      if (kind == "reeds_shepp") {saw_rs = true;}
+      if (kind == "single_gear_forward") {saw_dubins_fwd = true;}
+      if (kind == "single_gear_reverse") {saw_dubins_rev = true;}
+    } else if (rec["event"] == "score") {
+      EXPECT_TRUE(rec["gear_aware"].get<bool>());
+      saw_gear_aware_true = true;
+    }
+  }
+  EXPECT_TRUE(saw_rs);
+  EXPECT_TRUE(saw_dubins_fwd);
+  EXPECT_TRUE(saw_dubins_rev);
+  EXPECT_TRUE(saw_gear_aware_true);
+
+  // 3. Dynamically enable downsample_costmap = true (downsampling_factor = 2 -> 0.10 m/cell)
+  // gear_change_penalty in grid cells must rescale from 10.0f to 5.0f.
+  const auto res_ds_on = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", true),
+    rclcpp::Parameter("test.downsampling_factor", 2)});
+  ASSERT_TRUE(res_ds_on.successful);
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 5.0f);
+  ASSERT_TRUE(wait_for_batch(3));
+
+  // 4. Dynamically disable downsample_costmap = false -> must rescale back to 10.0f
+  const auto res_ds_off = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", false)});
+  ASSERT_TRUE(res_ds_off.successful);
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 10.0f);
+  ASSERT_TRUE(wait_for_batch(4));
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  executor.remove_node(subscriber_node->get_node_base_interface());
+  subscription.reset();
+  subscriber_node.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros.reset();
+  node.reset();
+}
+
