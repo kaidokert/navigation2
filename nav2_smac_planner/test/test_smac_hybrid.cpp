@@ -676,3 +676,105 @@ TEST(SmacTest, dynamic_gear_change_penalty_and_downsampling_rescaling)
   costmap_ros.reset();
   node.reset();
 }
+
+TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obstacle_heuristic)
+{
+  using Node = nav2_smac_planner::NodeHybrid;
+  auto node_a = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacMultiA");
+  auto node_b = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacMultiB");
+  auto costmap_ros_a = std::make_shared<nav2_costmap_2d::Costmap2DROS>("costmap_multi_a");
+  costmap_ros_a->on_configure(rclcpp_lifecycle::State());
+  costmap_ros_a->getCostmap()->resizeMap(100, 100, 0.05, 0.0, 0.0);
+
+  node_a->declare_parameter("a.cache_obstacle_heuristic", true);
+  node_a->declare_parameter("a.downsample_costmap", false);
+  node_a->declare_parameter("a.downsampling_factor", 2);
+  node_a->declare_parameter("a.minimum_turning_radius", 0.4);
+  node_a->declare_parameter("a.smooth_path", false);
+
+  node_b->declare_parameter("b.cache_obstacle_heuristic", true);
+  node_b->declare_parameter("b.downsample_costmap", true);
+  node_b->declare_parameter("b.downsampling_factor", 2);
+  node_b->declare_parameter("b.minimum_turning_radius", 0.4);
+  node_b->declare_parameter("b.smooth_path", false);
+
+  // Share the same Costmap2DROS instance between Planner A (undownsampled) and
+  // Planner B (downsampled) to exercise shared-_costmap ownership and cache revalidation.
+  auto planner_a = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  auto planner_b = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner_a->configure(node_a, "a", nullptr, costmap_ros_a);
+  planner_a->activate();
+  planner_b->configure(node_b, "b", nullptr, costmap_ros_a);
+  planner_b->activate();
+
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = "map";
+  start.pose.position.x = 0.5;
+  start.pose.position.y = 0.5;
+  start.pose.orientation.w = 1.0;
+  goal.header.frame_id = "map";
+  goal.pose.position.x = 3.5;
+  goal.pose.position.y = 3.5;
+  goal.pose.orientation.w = 1.0;
+  auto no_cancel = []() {return false;};
+
+  // 1. Planner A plans and caches its obstacle heuristic on costmap_ros_a->getCostmap().
+  ASSERT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 100u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 8.0f);
+
+  // Planner B (which has not downsampled yet and does not own obstacle_heuristic_costmap)
+  // reconfigures its downsampler; it must NOT clear Planner A's active obstacle_heuristic_costmap,
+  // and hot-path getObstacleHeuristic evaluation on an unexpanded cell must remain valid.
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", false)}).successful);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap())
+    << "Unrelated planner downsampler teardown must not null another planner's heuristic costmap";
+  EXPECT_GT(
+    Node::getObstacleHeuristic(
+      Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f),
+    0.0f);
+
+  // 2. Planner B re-enables downsampling, plans (taking ownership of the shared static pointer
+  // with its 50x50 downsampled grid), and then disables downsampling (which nulls
+  // NodeHybrid::obstacle_heuristic_costmap because Planner B owned it).
+  // When Planner A plans again to the SAME goal, AStarAlgorithm::setGoal and setCollisionChecker
+  // must rebuild the obstacle heuristic and restore motion_table for Planner A's 100x100 grid.
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", true),
+    rclcpp::Parameter("b.downsampling_factor", 2)}).successful);
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_NE(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 50u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 4.0f);
+
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", false)}).successful);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, nullptr);
+
+  EXPECT_NO_THROW({
+    EXPECT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  });
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 100u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 8.0f);
+  EXPECT_GT(
+    Node::getObstacleHeuristic(
+      Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f),
+    0.0f);
+
+  planner_b->deactivate();
+  planner_b->cleanup();
+  planner_b.reset();
+  planner_a->deactivate();
+  planner_a->cleanup();
+  planner_a.reset();
+  costmap_ros_a->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros_a.reset();
+  node_b.reset();
+  node_a.reset();
+}

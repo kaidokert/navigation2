@@ -939,7 +939,11 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     // Re-Initialize costmap downsampler
     if (reinit_downsampler) {
       if (_costmap_downsampler) {
-        NodeHybrid::obstacle_heuristic_costmap = nullptr;
+        if (_collision_checker.getCostmap() != _costmap &&
+          NodeHybrid::obstacle_heuristic_costmap == _collision_checker.getCostmap())
+        {
+          NodeHybrid::obstacle_heuristic_costmap = nullptr;
+        }
         _costmap_downsampler->on_cleanup();
         _costmap_downsampler.reset();
       }

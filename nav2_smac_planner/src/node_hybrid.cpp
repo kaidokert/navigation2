@@ -805,6 +805,11 @@ void NodeHybrid::precomputeDistanceHeuristic(
   const SearchInfo & search_info)
 {
   // Dubin or Reeds-Shepp shortest distances
+  if (motion_table.min_turning_radius != search_info.minimum_turning_radius ||
+    motion_table.motion_model != motion_model)
+  {
+    motion_table.motion_model = MotionModel::UNKNOWN;
+  }
   if (motion_model == MotionModel::DUBIN) {
     motion_table.state_space = std::make_shared<ompl::base::DubinsStateSpace>(
       search_info.minimum_turning_radius);

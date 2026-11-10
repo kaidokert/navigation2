@@ -1084,6 +1084,68 @@ TEST(AStarTest, analytic_handoff_gear_seeding_and_single_gear_fallback)
   ASSERT_NE(accepted_res, nullptr) << "Attempt 3 after exhausting 2 deferrals must succeed";
   EXPECT_TRUE(has_record_with(trace_records, "\"selected_by\":\"gear_aware_min_score\""));
 
+  // Case D: Consecutive plans on the same AnalyticExpansion instance with tracing disabled
+  // (setTraceCallback and setTraceRequestId never called).
+  // Exhaust the 2-deferral budget on Plan 1, then start Plan 2 from a root node
+  // (parent == nullptr) and verify that current_node->parent == nullptr resets
+  // _gear_change_deferrals_used = 0 so Plan 2 receives a fresh 2-deferral budget.
+  nav2_smac_planner::AnalyticExpansion<Node> untraced_expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  untraced_expansion.setCollisionChecker(&checker);
+
+  for (int plan_idx = 1; plan_idx <= 2; ++plan_idx) {
+    if (plan_idx == 2) {
+      graph.clear();
+      Node * plan2_root = nullptr;
+      Node * far_goal = nullptr;
+      getter(Node::getIndex(10u, 10u, 0u), plan2_root);
+      plan2_root->setPose(Node::Coordinates(10.0f, 10.0f, 0.0f));
+      plan2_root->parent = nullptr;
+      getter(Node::getIndex(90u, 90u, 0u), far_goal);
+      far_goal->setPose(Node::Coordinates(90.0f, 90.0f, 0.0f));
+      iterations = 1;
+      best_cost = 1000;
+      EXPECT_EQ(
+        untraced_expansion.tryAnalyticExpansion(
+          plan2_root, far_goal, getter, iterations, best_cost),
+        nullptr);
+    }
+
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+      graph.clear();
+      getter(Node::getIndex(49u, 50u, 0u), start_node);
+      start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+      getter(Node::getIndex(35u, 50u, 0u), goal_node);
+      goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+      getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+      fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+      fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+      fwd_node->parent = start_node;
+      iterations = 0;
+      best_cost = 1000;
+      Node * untraced_deferred = untraced_expansion.tryAnalyticExpansion(
+        fwd_node, goal_node, getter, iterations, best_cost);
+      EXPECT_EQ(untraced_deferred, nullptr)
+        << "Untraced plan " << plan_idx << " attempt " << attempt << " must be deferred";
+    }
+
+    graph.clear();
+    getter(Node::getIndex(49u, 50u, 0u), start_node);
+    start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(35u, 50u, 0u), goal_node);
+    goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+    fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+    fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+    fwd_node->parent = start_node;
+    iterations = 0;
+    best_cost = 1000;
+    Node * untraced_accepted = untraced_expansion.tryAnalyticExpansion(
+      fwd_node, goal_node, getter, iterations, best_cost);
+    ASSERT_NE(untraced_accepted, nullptr)
+      << "Untraced plan " << plan_idx << " attempt 3 after 2 deferrals must succeed";
+  }
+
   Node::destroyStaticAssets();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
 }
@@ -1464,6 +1526,54 @@ TEST(AStarTest, analytic_path_rejects_negative_and_upper_bounds_and_wraps_two_pi
     EXPECT_GE(n.proposed_coords.theta, 0.0f);
     EXPECT_LT(n.proposed_coords.theta, static_cast<float>(size_theta));
   }
+
+  // 4. Larger-radius candidate sampling density (Reeds-Shepp and Dubins):
+  // With minimum_turning_radius = 4.0 cells and a refined candidate state space of
+  // radius = 15.0 cells (3.75x R_min), a 20-cell straight segment from (5, 15, 0) to
+  // (25, 15, 0) has normalized OMPL length seg_len = 20 / 15 = 1.3333.
+  // Scaling seg_len by minimum_turning_radius (4.0) instead of candidate_radius (15.0)
+  // under-estimates seg_cell_dist as 5.333 cells (only 4 intervals -> samples at
+  // x = 10, 15, 20, 25), stepping right over a 2-cell lethal obstacle at x in [12, 13].
+  Node::destroyStaticAssets();
+  info.minimum_turning_radius = 4.0f;
+  Node::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
+  nav2_smac_planner::AnalyticExpansion<Node> wide_expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  wide_expansion.setCollisionChecker(&checker);
+
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+  costmap->setCost(12u, 15u, nav2_costmap_2d::LETHAL_OBSTACLE);
+  costmap->setCost(13u, 15u, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  ompl::base::StateSpacePtr wide_rs_space =
+    std::make_shared<ompl::base::ReedsSheppStateSpace>(15.0);
+  ompl::base::StateSpacePtr wide_dubins_space =
+    std::make_shared<ompl::base::DubinsStateSpace>(15.0);
+
+  graph.clear();
+  Node * wide_start = nullptr;
+  Node * wide_goal = nullptr;
+  getter(Node::getIndex(5u, 15u, 0u), wide_start);
+  wide_start->setPose(Node::Coordinates(5.0f, 15.0f, 0.0f));
+  getter(Node::getIndex(25u, 15u, 0u), wide_goal);
+  wide_goal->setPose(Node::Coordinates(25.0f, 15.0f, 0.0f));
+  const auto wide_rs_nodes =
+    wide_expansion.getAnalyticPath(wide_start, wide_goal, getter, wide_rs_space, false);
+  EXPECT_TRUE(wide_rs_nodes.empty())
+    << "Larger-radius Reeds-Shepp candidate must sample using its own radius and hit obstacle";
+
+  graph.clear();
+  getter(Node::getIndex(5u, 15u, 0u), wide_start);
+  wide_start->setPose(Node::Coordinates(5.0f, 15.0f, 0.0f));
+  getter(Node::getIndex(25u, 15u, 0u), wide_goal);
+  wide_goal->setPose(Node::Coordinates(25.0f, 15.0f, 0.0f));
+  const auto wide_dubins_nodes =
+    wide_expansion.getAnalyticPath(wide_start, wide_goal, getter, wide_dubins_space, false);
+  EXPECT_TRUE(wide_dubins_nodes.empty())
+    << "Larger-radius Dubins candidate must sample using its own radius and hit obstacle";
 
   Node::destroyStaticAssets();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());

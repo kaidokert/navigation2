@@ -132,7 +132,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
       analytic_iterations = desired_iterations;
       _trace_candidate_turning_radius = current_node->motion_table.min_turning_radius;
       _trace_candidate_kind =
-        _motion_model == MotionModel::DUBIN ? "dubins" : "reeds_shepp";
+        current_node->motion_table.motion_model == MotionModel::DUBIN ? "dubins" : "reeds_shepp";
       AnalyticExpansionNodes analytic_nodes =
         getAnalyticPath(current_node, goal_node, getter, current_node->motion_table.state_space);
       if (!analytic_nodes.empty()) {
@@ -299,7 +299,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
           }
         }
 
-        if (gear_aware && _motion_model != MotionModel::DUBIN &&
+        if (gear_aware && node->motion_table.motion_model != MotionModel::DUBIN &&
           countGearChanges(analytic_nodes) > 0)
         {
           // Reeds-Shepp returns only the shortest curve, which may reverse. Offer
@@ -504,16 +504,19 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     }
     double total_len = rs_path.totalLength_;
     if (total_len > 1e-6) {
+      const double candidate_radius = static_cast<double>(distance) / total_len;
+      const float candidate_spacing = std::min(
+        sqrt_2, static_cast<float>(candidate_radius) * max_dtheta);
       double t_accum = 0.0;
       for (int s_idx = 0; s_idx < 5; ++s_idx) {
         double seg_len = std::abs(rs_path.length_[s_idx]);
         if (seg_len < 1e-6) {
           continue;
         }
-        double seg_cell_dist = seg_len * node->motion_table.min_turning_radius;
+        double seg_cell_dist = seg_len * candidate_radius;
         const float seg_spacing =
           (rs_path.type_[s_idx] == ompl::base::ReedsSheppStateSpace::RS_STRAIGHT) ?
-          sqrt_2 : spacing;
+          sqrt_2 : candidate_spacing;
         unsigned int num_seg_intervals = std::max(
           1u, static_cast<unsigned int>(std::ceil(seg_cell_dist / seg_spacing)));
         for (unsigned int k = 1; k <= num_seg_intervals; ++k) {
@@ -545,16 +548,19 @@ typename AnalyticExpansion<NodeT>::AnalyticExpansionNodes AnalyticExpansion<Node
     }
     double total_len = dubins_path.length();
     if (total_len > 1e-6) {
+      const double candidate_radius = static_cast<double>(distance) / total_len;
+      const float candidate_spacing = std::min(
+        sqrt_2, static_cast<float>(candidate_radius) * max_dtheta);
       double t_accum = 0.0;
       for (int s_idx = 0; s_idx < 3; ++s_idx) {
         double seg_len = std::abs(dubins_path.length_[s_idx]);
         if (seg_len < 1e-6) {
           continue;
         }
-        double seg_cell_dist = seg_len * node->motion_table.min_turning_radius;
+        double seg_cell_dist = seg_len * candidate_radius;
         const float seg_spacing =
           ((*dubins_path.type_)[s_idx] == ompl::base::DubinsStateSpace::DUBINS_STRAIGHT) ?
-          sqrt_2 : spacing;
+          sqrt_2 : candidate_spacing;
         unsigned int num_seg_intervals = std::max(
           1u, static_cast<unsigned int>(std::ceil(seg_cell_dist / seg_spacing)));
         for (unsigned int k = 1; k <= num_seg_intervals; ++k) {
