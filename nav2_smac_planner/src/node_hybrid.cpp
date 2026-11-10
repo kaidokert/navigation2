@@ -45,6 +45,14 @@ nav2_costmap_2d::Costmap2D * NodeHybrid::obstacle_heuristic_costmap = nullptr;
 
 ObstacleHeuristicQueue NodeHybrid::obstacle_heuristic_queue;
 
+namespace
+{
+float g_dist_heuristic_size_lookup = 0.0f;
+MotionModel g_dist_heuristic_motion_model = MotionModel::UNKNOWN;
+unsigned int g_dist_heuristic_dim_3_size = 0u;
+float g_dist_heuristic_min_turning_radius = 0.0f;
+}  // namespace
+
 // Each of these tables are the projected motion models through
 // time and space applied to the search on the current node in
 // continuous map-coordinates (e.g. not meters but partial map cells)
@@ -497,6 +505,15 @@ void NodeHybrid::initMotionModel(
   }
 
   travel_distance_cost = motion_table.projections[0]._x;
+
+  if (!dist_heuristic_lookup_table.empty() &&
+    (g_dist_heuristic_size_lookup != size_lookup ||
+    g_dist_heuristic_motion_model != motion_model ||
+    g_dist_heuristic_dim_3_size != num_angle_quantization ||
+    g_dist_heuristic_min_turning_radius != search_info.minimum_turning_radius))
+  {
+    precomputeDistanceHeuristic(size_lookup, motion_model, num_angle_quantization, search_info);
+  }
 }
 
 inline float distanceHeuristic2D(
@@ -764,6 +781,7 @@ float NodeHybrid::getDistanceHeuristic(
   // to apply the distance heuristic. Since the lookup table is contains only the positive
   // X axis, we mirror the Y and theta values across the X axis to find the heuristic values.
   float motion_heuristic = 0.0;
+  bool in_window = false;
   const int floored_size = floor(size_lookup / 2.0);
   const int ceiling_size = ceil(size_lookup / 2.0);
   const float mirrored_relative_y = abs(node_coords_relative.y);
@@ -781,8 +799,12 @@ float NodeHybrid::getDistanceHeuristic(
       x_pos * ceiling_size * motion_table.num_angle_quantization +
       y_pos * motion_table.num_angle_quantization +
       theta_pos;
-    motion_heuristic = dist_heuristic_lookup_table[index];
-  } else if (obstacle_heuristic <= 0.0) {
+    if (index >= 0 && static_cast<size_t>(index) < dist_heuristic_lookup_table.size()) {
+      motion_heuristic = dist_heuristic_lookup_table[index];
+      in_window = true;
+    }
+  }
+  if (!in_window && obstacle_heuristic <= 0.0) {
     // If no obstacle heuristic value, must have some H to use
     // In nominal situations, this should never be called.
     static ompl::base::ScopedState<> from(motion_table.state_space), to(motion_table.state_space);
@@ -809,6 +831,15 @@ void NodeHybrid::precomputeDistanceHeuristic(
     motion_table.motion_model != motion_model)
   {
     motion_table.motion_model = MotionModel::UNKNOWN;
+  }
+  if (!dist_heuristic_lookup_table.empty() &&
+    g_dist_heuristic_size_lookup == lookup_table_dim &&
+    g_dist_heuristic_motion_model == motion_model &&
+    g_dist_heuristic_dim_3_size == dim_3_size &&
+    g_dist_heuristic_min_turning_radius == search_info.minimum_turning_radius)
+  {
+    size_lookup = lookup_table_dim;
+    return;
   }
   if (motion_model == MotionModel::DUBIN) {
     motion_table.state_space = std::make_shared<ompl::base::DubinsStateSpace>(
@@ -850,6 +881,10 @@ void NodeHybrid::precomputeDistanceHeuristic(
       }
     }
   }
+  g_dist_heuristic_size_lookup = lookup_table_dim;
+  g_dist_heuristic_motion_model = motion_model;
+  g_dist_heuristic_dim_3_size = dim_3_size;
+  g_dist_heuristic_min_turning_radius = search_info.minimum_turning_radius;
 }
 
 void NodeHybrid::getNeighbors(

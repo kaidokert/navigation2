@@ -767,6 +767,38 @@ TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obs
       Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f),
     0.0f);
 
+  // 3. Reconfigure Planner B to use fewer angle bins (36 vs 72) and a higher cost_penalty
+  // (10.0 vs 2.0) on the shared costmap with non-zero traversal cost. After Planner B plans,
+  // Planner A (72 bins, cost_penalty 2.0) must rebuild both the shared distance heuristic table
+  // and the shared obstacle heuristic table rather than indexing out of bounds or reusing
+  // Planner B's cost_penalty expansion.
+  for (unsigned int cx = 0; cx < 100; ++cx) {
+    for (unsigned int cy = 0; cy < 100; ++cy) {
+      costmap_ros_a->getCostmap()->setCost(cx, cy, 128);
+    }
+  }
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.angle_quantization_bins", 36),
+    rclcpp::Parameter("b.cost_penalty", 10.0)}).successful);
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 36u);
+  const float h_b = Node::getObstacleHeuristic(
+    Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 10.0f);
+
+  ASSERT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 72u);
+  EXPECT_EQ(
+    Node::dist_heuristic_lookup_table.size(),
+    static_cast<size_t>(Node::size_lookup * std::ceil(Node::size_lookup / 2.0f) * 72u));
+  EXPECT_GT(
+    Node::getDistanceHeuristic(
+      Node::Coordinates(68.0f, 68.0f, 71.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 1.0f),
+    0.0f);
+  const float h_a = Node::getObstacleHeuristic(
+    Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f);
+  EXPECT_LT(h_a, h_b);
+
   planner_b->deactivate();
   planner_b->cleanup();
   planner_b.reset();
