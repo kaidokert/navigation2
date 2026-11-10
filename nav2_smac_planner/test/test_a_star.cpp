@@ -1178,7 +1178,7 @@ TEST(AStarTest, analytic_reverse_only_dubins_and_strict_tie_break_and_quadratic_
   // 2. Strict '<' tie-breaking: from (50, 50, bin 0) to (50, 56, bin 36 = pi, dy = R = 6.0):
   // Reeds-Shepp uses a 1-gear-change cusp (penalized by gear_change_penalty = 100.0),
   // whereas forward_only Dubins and reverse_only Dubins are symmetric 0-gear-change curves
-  // with identical length and score. Strict '<' must keep single_gear_forward over single_gear_reverse.
+  // with identical length and score. Strict '<' must keep single_gear_forward over reverse.
   graph.clear();
   Node * sym_start = nullptr;
   Node * sym_goal = nullptr;
@@ -1273,6 +1273,52 @@ TEST(AStarTest, analytic_reverse_only_dubins_and_strict_tie_break_and_quadratic_
 
   EXPECT_NEAR(score_quad * 3.0, score_linear * 2.0, 1e-3)
     << "score_linear=" << score_linear << " score_quad=" << score_quad;
+
+  // 4. Default-off (gear_change_penalty = 0.0, analytic_gear_change_deferrals = 0) per-sample
+  // cell_cost preservation: when two samples in getAnalyticPath map to the same NodeHybrid*
+  // (e.g. a node alias / shared bin) and the second sample's isNodeValid overwrites node->_cost,
+  // scoringFn must still sum each sample's saved cell_cost rather than the final overwritten
+  // node->getCost().
+  info.gear_change_penalty = 0.0f;
+  info.analytic_gear_change_deferrals = 0;
+  info.use_quadratic_cost_penalty = false;
+  nav2_smac_planner::AnalyticExpansion<Node> exp_default_off(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  exp_default_off.setCollisionChecker(&checker);
+  trace_records.clear();
+  exp_default_off.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+  // Paint moderate cost (189 <= max_cost 250) on x in [36, 42] and free space (0) on x > 42,
+  // and alias all intermediate lookups to a single shared NodeHybrid instance so later
+  // free-space samples overwrite shared_node._cost = 0.
+  for (unsigned int x = 36u; x <= 42u; ++x) {
+    costmap->setCost(x, 50u, 189);
+  }
+  Node shared_node(Node::getIndex(36u, 50u, 0u));
+  Node start_35(Node::getIndex(35u, 50u, 0u));
+  start_35.setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  Node goal_50(Node::getIndex(50u, 50u, 0u));
+  goal_50.setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  auto aliasing_getter = [&shared_node](const uint64_t & /*index*/, Node * & node_rtn) -> bool {
+      node_rtn = &shared_node;
+      return true;
+    };
+  iterations = 0;
+  best_cost = 1000;
+  ASSERT_NE(
+    exp_default_off.tryAnalyticExpansion(
+      &start_35, &goal_50, aliasing_getter, iterations, best_cost),
+    nullptr);
+  EXPECT_FLOAT_EQ(shared_node.getCost(), 0.0f);
+  const double score_aliased = extract_first_score(trace_records);
+  // Pure distance score (if all samples had cost 0) is ~15.0; with 7 samples at cost 252
+  // (weight = 4.0), preserved cell_cost adds ~28.0 * step_distance (> 30.0 total).
+  EXPECT_GT(score_aliased, 30.0)
+    << "Default-off scoringFn must use per-sample saved cell_cost, not overwritten node->getCost()";
 
   Node::destroyStaticAssets();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
@@ -1422,4 +1468,3 @@ TEST(AStarTest, analytic_path_rejects_negative_and_upper_bounds_and_wraps_two_pi
   Node::destroyStaticAssets();
   costmap_ros->on_cleanup(rclcpp_lifecycle::State());
 }
-

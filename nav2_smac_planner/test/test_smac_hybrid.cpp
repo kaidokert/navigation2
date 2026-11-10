@@ -640,6 +640,32 @@ TEST(SmacTest, dynamic_gear_change_penalty_and_downsampling_rescaling)
   EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 10.0f);
   ASSERT_TRUE(wait_for_batch(4));
 
+  // 5. Verify analytic_expansion_max_length rescales with downsampling_factor on dynamic update:
+  // Enable downsample_costmap = true (factor 2 -> 0.10 m/cell) and set
+  // analytic_expansion_max_length = 1.2 m (12.0 downsampled cells; would be 24.0 cells if divided
+  // only by base resolution 0.05 m). For a 1.8 m straight shot (18.0 downsampled cells),
+  // 18.0 > 12.0 so the initial analytic shot from the start node MUST hit "distance_gate".
+  const auto res_maxlen_ds = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", true),
+    rclcpp::Parameter("test.downsampling_factor", 2),
+    rclcpp::Parameter("test.analytic_expansion_max_length", 1.2)});
+  ASSERT_TRUE(res_maxlen_ds.successful);
+  const auto far_start = make_pose(0.0, 0.0, 0.0);
+  const auto far_goal = make_pose(1.8, 0.0, 0.0);
+  EXPECT_GE(planner->createPlan(far_start, far_goal, no_cancel).poses.size(), 2u);
+  ASSERT_TRUE(wait_for_batch(5));
+  const json batch4 = json::parse(batches[4]);
+  bool first_candidate_checked = false;
+  for (const auto & rec : batch4) {
+    if (rec["event"] == "candidate") {
+      EXPECT_EQ(rec["outcome"].get<std::string>(), "distance_gate")
+        << "1.8 m shot (18 downsampled cells) must exceed 1.2 m (12 downsampled cells) max_length";
+      first_candidate_checked = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(first_candidate_checked);
+
   planner->deactivate();
   planner->cleanup();
   planner.reset();
@@ -650,4 +676,3 @@ TEST(SmacTest, dynamic_gear_change_penalty_and_downsampling_rescaling)
   costmap_ros.reset();
   node.reset();
 }
-

@@ -362,7 +362,7 @@ typename AnalyticExpansion<NodeT>::NodePtr AnalyticExpansion<NodeT>::tryAnalytic
                 << _trace_request_id << ",\"attempt_id\":" << selected_attempt_id
                 << ",\"score\":" << best_score << ",\"selected_by\":\""
                 << (used_single_gear_fallback ? "gear_aware_single_gear_fallback" :
-                   (gear_aware ? "gear_aware_min_score" : "legacy_min_score"))
+          (gear_aware ? "gear_aware_min_score" : "legacy_min_score"))
                 << "\"}";
           _trace_callback(event.str());
         }
