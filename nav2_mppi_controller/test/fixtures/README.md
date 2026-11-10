@@ -65,7 +65,17 @@ handoffs. The optimizer uses a fixed balanced 64-row noise bank, three iteration
 41 x 50 ms horizon, and R_min=0.558 m. These are a small deterministic test profile,
 not a claim to reproduce the robot's complete production configuration.
 
-The memory test compares carried state with deliberately erased tape/history.
+The broad PathAlign check requires positive scores and passes pruning probes
+through the production PathHandler before scoring. The wall witness keeps every
+rear-axle reference cell free while its footprint intersects the wall, so disabling
+footprint checks cannot pass the test.
+
+The sequential memory test compares carried state with deliberately erased tape/history.
+The complete M8 test independently checks history rotation and tape sensitivity at
+both handoffs (the comparison has identical history and only its tape erased).
+With the test profile's default 1.5 cm handoff tolerance, transitions occur one
+pose before the geometric cusps, at indices 7 and 24. Every active gear/endpoint,
+the returned post-handoff reference and final pruning state are asserted.
 Prescribed poses keep this a decision test: it does not predict a physical endpoint.
 Characterization exercises can remain green while tracking remains poor. Closed-loop
 qualification and any controller-default change require separate evidence.

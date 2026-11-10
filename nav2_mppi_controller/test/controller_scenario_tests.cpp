@@ -34,6 +34,7 @@ struct NoiseAccess : mppi::NoiseGenerator
 struct CriticAccess : mppi::CriticManager
 {
   static auto critics() {return &CriticAccess::critics_;}
+  static auto names() {return &CriticAccess::critic_names_;}
 };
 
 class ScenarioOptimizer : public mppi::Optimizer
@@ -52,6 +53,7 @@ public:
     critics.emplace_back(std::make_unique<mppi::critics::ObstaclesCritic>());
     const std::vector<std::string> names = {
       "PathFollowCritic", "PathAlignCritic", "ObstaclesCritic"};
+    critic_manager_.*CriticAccess::names() = names;
     for (size_t i = 0; i < critics.size(); ++i) {
       critics[i]->on_configure(node, "FollowPath", "FollowPath." + names[i], cm, params);
     }
@@ -68,12 +70,25 @@ public:
   }
   const auto & tape() const {return control_sequence_;}
   const auto & history() const {return control_history_;}
-  void eraseMemory()
+  void eraseTape()
   {
     control_sequence_.vx.fill(0.0f);
     control_sequence_.vy.fill(0.0f);
     control_sequence_.wz.fill(0.0f);
+  }
+  void eraseHistory()
+  {
     control_history_.fill({0.0f, 0.0f, 0.0f});
+  }
+  void eraseMemory()
+  {
+    eraseTape();
+    eraseHistory();
+  }
+  void copyMemoryFrom(const ScenarioOptimizer & other)
+  {
+    control_sequence_ = other.control_sequence_;
+    control_history_ = other.control_history_;
   }
 };
 
@@ -82,6 +97,8 @@ class ScenarioPathHandler : public mppi::PathHandler
 public:
   bool reverse() const {return current_segment_is_reverse_;}
   const auto & activeEndpoint() const {return global_plan_up_to_inversion_.poses.back().pose;}
+  size_t activeSize() const {return global_plan_up_to_inversion_.poses.size();}
+  unsigned int inversion() const {return inversion_locale_;}
 };
 
 class ControllerScenarios : public ::testing::Test
@@ -97,9 +114,9 @@ protected:
     cm->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
     std::string footprint_text = "[";
     for (const auto & p : atlas->document["footprint"]) {
+      const auto xy = controller_test::numbers<2>(p);
       if (footprint_text.size() > 1) {footprint_text += ",";}
-      footprint_text += "[" + std::to_string(p[0].as<double>()) + "," +
-        std::to_string(p[1].as<double>()) + "]";
+      footprint_text += "[" + std::to_string(xy[0]) + "," + std::to_string(xy[1]) + "]";
     }
     cm->set_parameter(rclcpp::Parameter("footprint", footprint_text + "]"));
     ASSERT_EQ(cm->on_configure(rclcpp_lifecycle::State{}), nav2_util::CallbackReturn::SUCCESS);
@@ -124,8 +141,8 @@ protected:
     const auto map = atlas->document["map"];
     cm->getLayeredCostmap()->resizeMap(
       map["size"][0].as<unsigned int>(), map["size"][1].as<unsigned int>(),
-      map["resolution"].as<double>(), map["origin"][0].as<double>(),
-      map["origin"][1].as<double>());
+      controller_test::number(map["resolution"]), controller_test::number(map["origin"][0]),
+      controller_test::number(map["origin"][1]));
     auto * map_ptr = cm->getCostmap();
     for (unsigned int y = 0; y < map_ptr->getSizeInCellsY(); ++y) {
       for (unsigned int x = 0; x < map_ptr->getSizeInCellsX(); ++x) {
@@ -244,16 +261,39 @@ TEST_F(ControllerScenarios, RealPathAlignScoresAllStartsAndRepresentations)
               yaw += wz * 0.05;
             }
           }
-          auto path = mppi::utils::toTensor(scenario.message());
+          auto local_path = scenario.message();
+          if (scenario.id.rfind("pruning_", 0) == 0) {
+            // Match the production pipeline: PathAlign sees the local reference
+            // after PathHandler has removed vertices behind this measured start.
+            auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+            ScenarioPathHandler handler;
+            handler.initialize(parent, "FollowPath", cm, buffer, &params);
+            handler.setPath(local_path);
+            local_path = handler.transformPath(state.pose);
+            const auto closest = std::min_element(scenario.path.begin(), scenario.path.end(),
+                [&start](const Pose & a, const Pose & b) {
+                  return std::hypot(a[0] - start.second[0], a[1] - start.second[1]) <
+                         std::hypot(b[0] - start.second[0], b[1] - start.second[1]);
+              });
+            ASSERT_NE(closest, scenario.path.begin());
+            ASSERT_GE(local_path.poses.size(), 2u);
+            EXPECT_NEAR(local_path.poses.front().pose.position.x, (*closest)[0], 1e-8);
+            EXPECT_NEAR(local_path.poses.front().pose.position.y, (*closest)[1], 1e-8);
+            EXPECT_LT(local_path.poses.size(), scenario.path.size());
+          }
+          auto path = mppi::utils::toTensor(local_path);
           auto goal = scenario.message().poses.back().pose;
           xt::xtensor<float, 1> costs = xt::zeros<float>({3});
           float dt = 0.05;
           mppi::CriticData data{state, trajectories, path, goal, costs, dt, false,
             nullptr, nullptr, std::nullopt, std::nullopt};
-          // Let production code compute furthest/valid caches, including zero-progress gates.
+          // Production code computes the caches. These witnesses must reach the
+          // scoring branch; a silent all-zero early return is not a passing test.
           critic.score(data);
+          ASSERT_TRUE(data.furthest_reached_path_point.has_value());
+          EXPECT_GT(*data.furthest_reached_path_point, 0u);
           for (size_t i = 0; i < 3; ++i) {
-            EXPECT_GE(costs(i), 0.0f);
+            EXPECT_GT(costs(i), 0.0f);
             EXPECT_LT(costs(i), 100.0f);
             if (!headings) {position_costs.push_back(costs(i));} else {
               EXPECT_GE(costs(i) + 1e-5f, position_costs[i]);
@@ -324,8 +364,14 @@ TEST_F(ControllerScenarios, WallFixtureExercisesHardCollisionScoring)
   for (size_t j = 0; j < count; ++j) {
     for (size_t i = 0; i < 2; ++i) {
       trajectories.x(i, j) = scenario.path[j][0];
-      trajectories.y(i, j) = scenario.path[j][1] + i * 0.3;
+      trajectories.y(i, j) = scenario.path[j][1] + i * 0.1;
       trajectories.yaws(i, j) = scenario.path[j][2];
+      // Both reference points are free at EVERY sample. Only the displaced
+      // body's perimeter intersects the wall; point-only collision must fail.
+      unsigned int mx, my;
+      ASSERT_TRUE(cm->getCostmap()->worldToMap(
+          trajectories.x(i, j), trajectories.y(i, j), mx, my));
+      ASSERT_EQ(cm->getCostmap()->getCost(mx, my), nav2_costmap_2d::FREE_SPACE);
     }
   }
   auto path = mppi::utils::toTensor(scenario.message());
@@ -392,29 +438,74 @@ TEST_F(ControllerScenarios, CompleteM8UsesProductionPathHandlerWithoutResetAtCus
   handler.setPath(scenario.message());
   ScenarioOptimizer optimizer;
   optimizer.configure(parent, cm, &params);
+  ScenarioOptimizer erased_at_cusps;
+  erased_at_cusps.configure(parent, cm, &params);
+  const auto goal = scenario.message().poses.back().pose;
+  std::vector<size_t> handoffs;
+  auto expected_history = optimizer.history();
   size_t commands = 0;
   // Prescribed poses exercise the actual segment handoff and carried optimizer
-  // state. FollowPath in Gazebo supplies the separate physical tracking test.
+  // state. Default 1.5 cm along-track tolerance accepts the 1.27/1.22 cm
+  // pre-cusp edges at indices 7 and 24; these are not exact-cusp pose arrivals.
+  // FollowPath in Gazebo supplies the separate physical tracking test.
   for (size_t i = 0; i + 1 < scenario.path.size(); ++i) {
+    SCOPED_TRACE(i);
     const auto actual = pose(scenario.path[i]);
+    const bool was_reverse = handler.reverse();
     auto segment = handler.transformPath(actual);
     ASSERT_GE(segment.poses.size(), 2u);
-    if (i == 0 || i == 8 || i == 25) {
-      const size_t endpoint = i == 0 ? 8 : (i == 8 ? 25 : scenario.path.size() - 1);
-      EXPECT_EQ(handler.reverse(), i == 8);
-      EXPECT_NEAR(handler.activeEndpoint().position.x, scenario.path[endpoint][0], 1e-8);
-      EXPECT_NEAR(handler.activeEndpoint().position.y, scenario.path[endpoint][1], 1e-8);
+    EXPECT_EQ(handler.reverse(), i >= 7 && i < 24);
+    const size_t endpoint = i < 7 ? 8 : (i < 24 ? 25 : scenario.path.size() - 1);
+    EXPECT_NEAR(handler.activeEndpoint().position.x, scenario.path[endpoint][0], 1e-8);
+    EXPECT_NEAR(handler.activeEndpoint().position.y, scenario.path[endpoint][1], 1e-8);
+    const bool handoff = handler.reverse() != was_reverse;
+    if (handoff) {
+      handoffs.push_back(i);
+      // Check the returned optimizer reference, not just the handler's internals:
+      // stale pre-handoff output must not survive a correct internal transition.
       EXPECT_NEAR(segment.poses.back().pose.position.x, scenario.path[endpoint][0], 1e-8);
       EXPECT_NEAR(segment.poses.back().pose.position.y, scenario.path[endpoint][1], 1e-8);
+      const auto & a = segment.poses[0].pose;
+      const auto & b = segment.poses[1].pose;
+      const double yaw = tf2::getYaw(a.orientation);
+      const double along_body = (b.position.x - a.position.x) * std::cos(yaw) +
+        (b.position.y - a.position.y) * std::sin(yaw);
+      EXPECT_GT(along_body * (handler.reverse() ? -1 : 1), 0.0);
+      EXPECT_GT(xt::sum(xt::abs(optimizer.tape().vx) + xt::abs(optimizer.tape().wz))(),
+        0.001f);
+      // Identical SG history isolates tape carry. History carry is independently
+      // asserted below, so either kind of unintended reset must fail this test.
+      erased_at_cusps.copyMemoryFrom(optimizer);
+      erased_at_cusps.eraseTape();
     }
     geometry_msgs::msg::Twist speed;
-    speed.linear.x = scenario.gears[i] * 0.1;
-    EXPECT_NO_THROW(optimizer.evalControl(
-        actual, speed, segment, scenario.message().poses.back().pose, nullptr));
+    // This prescribed-state probe follows the active segment, including the
+    // tolerance-accepted early switches, instead of injecting the previous gear.
+    speed.linear.x = handler.reverse() ? -0.1 : 0.1;
+    const auto command = optimizer.evalControl(actual, speed, segment, goal, nullptr);
+    for (size_t h = 0; h + 1 < expected_history.size(); ++h) {
+      EXPECT_FLOAT_EQ(optimizer.history()[h].vx, expected_history[h + 1].vx);
+      EXPECT_FLOAT_EQ(optimizer.history()[h].vy, expected_history[h + 1].vy);
+      EXPECT_FLOAT_EQ(optimizer.history()[h].wz, expected_history[h + 1].wz);
+    }
+    EXPECT_NEAR(optimizer.history().back().vx, command.twist.linear.x, 1e-6);
+    EXPECT_NEAR(optimizer.history().back().wz, command.twist.angular.z, 1e-6);
+    if (handoff) {
+      erased_at_cusps.evalControl(actual, speed, segment, goal, nullptr);
+      const double tape_delta = xt::sum(
+        xt::abs(optimizer.tape().vx - erased_at_cusps.tape().vx) +
+        xt::abs(optimizer.tape().wz - erased_at_cusps.tape().wz))();
+      EXPECT_GT(tape_delta, 1e-5);
+    }
+    expected_history = optimizer.history();
     ++commands;
   }
   EXPECT_EQ(commands, scenario.path.size() - 1);
-  EXPECT_NEAR(handler.getPath().poses.back().pose.position.y, 0.4, 1e-8);
+  EXPECT_EQ(handoffs, (std::vector<size_t>{7, 24}));
+  EXPECT_FALSE(handler.reverse());
+  EXPECT_EQ(handler.inversion(), 0u);
+  EXPECT_EQ(handler.getPath().poses.size(), scenario.path.size() - 26);
+  EXPECT_EQ(handler.activeSize(), 2u);
 }
 }  // namespace
 
