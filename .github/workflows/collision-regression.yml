@@ -18,7 +18,8 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential cmake libxtensor-dev libxsimd-dev \
             ros-jazzy-nav2-costmap-2d ros-jazzy-nav2-core ros-jazzy-nav2-util \
-            ros-jazzy-tf2-eigen ros-jazzy-ament-cmake-gtest
+            ros-jazzy-tf2-eigen ros-jazzy-ament-cmake-gtest ros-jazzy-yaml-cpp-vendor \
+            ros-jazzy-nav2-mppi-controller
       - name: Compile production collision code and regressions
         shell: bash
         run: |
