@@ -185,7 +185,9 @@ protected:
   }
   rclcpp_lifecycle::LifecycleNode::SharedPtr node(
     bool headings, int batch_size = 64, double min_turning_r = 0.558, int pfc_offset = 6,
-    bool terminal_capture = false)
+    bool terminal_capture = false, double replan_drift = 0.020,
+    double max_residual_y = 0.040, double pullthrough_length = 0.10,
+    double pullthrough_release = 0.015)
   {
     rclcpp::NodeOptions options;
     options.parameter_overrides({
@@ -213,7 +215,11 @@ protected:
         rclcpp::Parameter("FollowPath.ObstaclesCritic.collision_cost", 1e9),
         rclcpp::Parameter("FollowPath.enforce_path_inversion", true),
         rclcpp::Parameter("FollowPath.terminal_stub_max_length", 0.0),
-        rclcpp::Parameter("FollowPath.terminal_capture_enabled", terminal_capture)});
+        rclcpp::Parameter("FollowPath.terminal_capture_enabled", terminal_capture),
+        rclcpp::Parameter("FollowPath.terminal_capture_replan_drift", replan_drift),
+        rclcpp::Parameter("FollowPath.terminal_capture_max_residual_y", max_residual_y),
+        rclcpp::Parameter("FollowPath.terminal_capture_pullthrough_length", pullthrough_length),
+        rclcpp::Parameter("FollowPath.terminal_capture_pullthrough_release", pullthrough_release)});
     return std::make_shared<rclcpp_lifecycle::LifecycleNode>("scenario_controller", options);
   }
   geometry_msgs::msg::PoseStamped pose(const Pose & p)
@@ -540,19 +546,34 @@ struct ClosedLoopOutcome
   double e_right{0.0};
   double dth_rad{0.0};
   double xy_err{0.0};
+  double final_vx{0.0};
   bool collision_free{true};
   bool latched_capture{false};
   size_t ticks{0u};
 };
 
+struct CaptureCandidateConfig
+{
+  std::string name{"C3"};
+  bool enable_capture{true};
+  double replan_drift{0.020};
+  double max_residual_y{0.040};
+  double pullthrough_length{0.10};
+  double pullthrough_release{0.015};
+  bool use_stopped_goal_checker{true};
+  std::optional<std::pair<size_t, std::array<double, 3>>> inject_deflection{std::nullopt};
+};
+
 TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
 {
-  auto run_scenario_closed_loop = [&](
+  auto run_scenario_closed_loop_cfg = [&](
     const Scenario & scenario, const std::string & label,
-    const std::string & start_key, bool enable_capture)
+    const std::string & start_key, const CaptureCandidateConfig & cfg)
     {
       grid(scenario);
-      auto parent = node(true, 500, 0.325, 7, enable_capture);
+      auto parent = node(
+        true, 500, 0.325, 7, cfg.enable_capture,
+        cfg.replan_drift, cfg.max_residual_y, cfg.pullthrough_length, cfg.pullthrough_release);
       mppi::ParametersHandler params(parent);
       auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
       ScenarioPathHandler handler;
@@ -592,7 +613,13 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
       best.dth_rad = init_tf[2];
       best.xy_err = std::hypot(init_tf[0], init_tf[1]);
 
+      const double stopped_vx_thresh = cfg.use_stopped_goal_checker ? 0.05 : 0.002;
+      const double stopped_wz_thresh = cfg.use_stopped_goal_checker ? 0.25 : 0.02;
+
       for (size_t tick = 0; tick < 180; ++tick) {
+        if (cfg.inject_deflection.has_value() && tick == cfg.inject_deflection->first) {
+          actual = pose(cfg.inject_deflection->second);
+        }
         const double cur_yaw = tf2::getYaw(actual.pose.orientation);
         const double fp_cost = checker.footprintCostAtPose(
           actual.pose.position.x, actual.pose.position.y, cur_yaw, footprint);
@@ -601,9 +628,7 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
         }
 
         auto segment = handler.transformPath(actual);
-        if (handler.latchedCapture()) {
-          best.latched_capture = true;
-        }
+        best.latched_capture = handler.latchedCapture();
         const auto cmd = optimizer.evalControl(actual, speed, segment, goal_msg, nullptr);
         double vx = cmd.twist.linear.x;
         double wz = cmd.twist.angular.z;
@@ -627,12 +652,13 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
         best.e_right = tf[1];
         best.dth_rad = tf[2];
         best.xy_err = std::hypot(tf[0], tf[1]);
+        best.final_vx = vx;
         best.ticks = tick + 1;
 
         if (handler.inversion() == 0u &&
           (tf[0] * scenario.gears.back() >= 0.0 ||
-          (tick >= 20 && best.xy_err < 0.10 && std::abs(best.dth_rad) < 0.25 &&
-          std::abs(vx) < 0.002 && std::abs(wz) < 0.02)))
+          (tick >= 10 && best.xy_err <= 0.10 && std::abs(best.dth_rad) <= 0.25 &&
+          std::abs(vx) <= stopped_vx_thresh && std::abs(wz) <= stopped_wz_thresh)))
         {
           break;
         }
@@ -644,13 +670,24 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
         best.collision_free = false;
       }
       printf(
-        "[CLOSED_LOOP][%s] %-22s / %-10s -> ticks=%3zu x_lon=%+6.1fmm e_right=%+6.1fmm "
-        "dth=%+5.2fdeg xy=%5.1fmm coll_free=%d latched=%d\n",
-        enable_capture ? "CAPTURE " : "BASELINE",
+        "[CLOSED_LOOP][%-8s] %-22s / %-12s -> ticks=%3zu x_lon=%+6.1fmm e_right=%+6.1fmm "
+        "dth=%+5.2fdeg xy=%5.1fmm vx=%+5.3fm/s coll_free=%d latched=%d\n",
+        cfg.name.c_str(),
         label.c_str(), start_key.c_str(), best.ticks,
         best.x_lon * 1000.0, best.e_right * 1000.0, best.dth_rad * 180.0 / M_PI,
-        best.xy_err * 1000.0, best.collision_free ? 1 : 0, best.latched_capture ? 1 : 0);
+        best.xy_err * 1000.0, best.final_vx,
+        best.collision_free ? 1 : 0, best.latched_capture ? 1 : 0);
       return best;
+    };
+
+  auto run_scenario_closed_loop = [&](
+    const Scenario & scenario, const std::string & label,
+    const std::string & start_key, bool enable_capture)
+    {
+      CaptureCandidateConfig cfg;
+      cfg.name = enable_capture ? "C3_CAP" : "BASELINE";
+      cfg.enable_capture = enable_capture;
+      return run_scenario_closed_loop_cfg(scenario, label, start_key, cfg);
     };
 
   auto run_closed_loop = [&](
@@ -662,7 +699,8 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
   constexpr double kMaxYawErrRad = 5.0 * M_PI / 180.0;
 
   // 1. Nominal starts: cross-track offset is 0 (< 25 mm deadband), so terminal capture
-  // must not latch and must be bit-for-bit identical to baseline.
+  // must not latch and must be bit-for-bit identical to baseline (both under StoppedGoalChecker
+  // and when run to full rest).
   for (const auto & [id, key] : std::vector<std::pair<std::string, std::string>>{
       {"curved_capture", "nominal"},
       {"wall_capture", "nominal"},
@@ -675,13 +713,23 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     const auto cap = run_closed_loop(id, key, true);
     EXPECT_FALSE(cap.latched_capture);
     EXPECT_TRUE(cap.collision_free);
-    EXPECT_LT(std::abs(cap.x_lon), 0.025);
-    EXPECT_LT(std::abs(cap.e_right), 0.010);
-    EXPECT_LT(cap.xy_err, 0.025);
-    EXPECT_LT(std::abs(cap.dth_rad), kMaxYawErrRad);
     EXPECT_DOUBLE_EQ(cap.x_lon, base.x_lon);
     EXPECT_DOUBLE_EQ(cap.e_right, base.e_right);
     EXPECT_DOUBLE_EQ(cap.dth_rad, base.dth_rad);
+
+    CaptureCandidateConfig rest_base{"BASE_RST", false, 0.020, 0.040, 0.10, 0.015, false, {}};
+    CaptureCandidateConfig rest_cap{"CAP_RST ", true, 0.020, 0.040, 0.10, 0.015, false, {}};
+    const auto base_rest = run_scenario_closed_loop_cfg(atlas->at(id), id, key, rest_base);
+    const auto cap_rest = run_scenario_closed_loop_cfg(atlas->at(id), id, key, rest_cap);
+    EXPECT_FALSE(cap_rest.latched_capture);
+    EXPECT_TRUE(cap_rest.collision_free);
+    EXPECT_LT(std::abs(cap_rest.x_lon), 0.025);
+    EXPECT_LT(std::abs(cap_rest.e_right), 0.010);
+    EXPECT_LT(cap_rest.xy_err, 0.025);
+    EXPECT_LT(std::abs(cap_rest.dth_rad), kMaxYawErrRad);
+    EXPECT_DOUBLE_EQ(cap_rest.x_lon, base_rest.x_lon);
+    EXPECT_DOUBLE_EQ(cap_rest.e_right, base_rest.e_right);
+    EXPECT_DOUBLE_EQ(cap_rest.dth_rad, base_rest.dth_rad);
   }
 
   // 2. Displaced starts: baseline fails to close lateral offset (|e_right| > 35 mm, P1),
@@ -870,6 +918,86 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     EXPECT_LT(std::abs(cap_rev.e_right), 0.025);
     EXPECT_LT(cap_rev.xy_err, 0.025);
     EXPECT_LT(std::abs(cap_rev.dth_rad), kMaxYawErrRad);
+  }
+
+  // 7. Narrowing lane candidate screening (C0, C1, C2, C3) under StoppedGoalChecker
+  // on undisturbed displaced approaches and mid_approach_deflection (post-hazard states
+  // measured in Start -> WP1 .mcap bags at x_lon = -0.391 m and x_lon = -0.299 m):
+  {
+    const CaptureCandidateConfig cfg_c0{"C0_BASE", true, 0.045, 0.000, 0.00, 0.015, true, {}};
+    const CaptureCandidateConfig cfg_c1{"C1_M1M2", true, 0.020, 0.040, 0.00, 0.015, true, {}};
+    const CaptureCandidateConfig cfg_c2{"C2_M3  ", true, 0.045, 0.000, 0.10, 0.015, true, {}};
+    const CaptureCandidateConfig cfg_c3{"C3_ALL ", true, 0.020, 0.040, 0.10, 0.015, true, {}};
+
+    const auto & early = atlas->at("early_lateral_capture");
+    const auto c0_early =
+      run_scenario_closed_loop_cfg(early, "early_lateral_capture", "offset", cfg_c0);
+    const auto c1_early =
+      run_scenario_closed_loop_cfg(early, "early_lateral_capture", "offset", cfg_c1);
+    const auto c2_early =
+      run_scenario_closed_loop_cfg(early, "early_lateral_capture", "offset", cfg_c2);
+    const auto c3_early =
+      run_scenario_closed_loop_cfg(early, "early_lateral_capture", "offset", cfg_c3);
+
+    // Without M3 (tangent pull-through), StoppedGoalChecker terminates early near the 100 mm rim:
+    EXPECT_GT(std::abs(c0_early.x_lon), 0.025);
+    EXPECT_GT(std::abs(c1_early.x_lon), 0.025);
+    // With M3, C2 and C3 drive through to |x_lon| < 25 mm:
+    EXPECT_LT(std::abs(c2_early.x_lon), 0.025);
+    EXPECT_LT(std::abs(c3_early.x_lon), 0.025);
+
+    // (a) mid_deflect_500mm: 31 mm cross-track drift (> 20 mm M1 threshold, < 45 mm C0 threshold)
+    // at x_lon = -0.500 m, y = -0.112 m, theta = 0.0 deg, where an exact Y_end = 0 curve
+    // still exists (R = 0.586 m >= 0.561 m) if re-latched immediately (M1), whereas deferring
+    // until drift > 45 mm leaves the robot displaced:
+    // (b) mid_deflect_299mm: post-hazard state (-0.299 m, -0.1016 m, +15.0 deg) where exact
+    // Y_end = 0 requires R = 0.318 m < 0.561 m, testing M2 bounded-R_min fallback:
+    const std::array<double, 3> deflect_500{-0.500, -0.112, 0.0};
+    const std::array<double, 3> deflect_299{-0.299, -0.1016, 15.0 * M_PI / 180.0};
+
+    for (const auto & [sub_label, deflect_pose] :
+      std::vector<std::pair<std::string, std::array<double, 3>>>{
+        {"mid_deflect_500mm", deflect_500},
+        {"mid_deflect_299mm", deflect_299}})
+    {
+      SCOPED_TRACE(sub_label);
+      auto d_c0 = cfg_c0;
+      d_c0.inject_deflection = std::make_pair(size_t{1u}, deflect_pose);
+      auto d_c1 = cfg_c1;
+      d_c1.inject_deflection = std::make_pair(size_t{1u}, deflect_pose);
+      auto d_c2 = cfg_c2;
+      d_c2.inject_deflection = std::make_pair(size_t{1u}, deflect_pose);
+      auto d_c3 = cfg_c3;
+      d_c3.inject_deflection = std::make_pair(size_t{1u}, deflect_pose);
+
+      const auto out_c0 = run_scenario_closed_loop_cfg(early, sub_label, "offset", d_c0);
+      const auto out_c1 = run_scenario_closed_loop_cfg(early, sub_label, "offset", d_c1);
+      const auto out_c2 = run_scenario_closed_loop_cfg(early, sub_label, "offset", d_c2);
+      const auto out_c3 = run_scenario_closed_loop_cfg(early, sub_label, "offset", d_c3);
+
+      // Without M1+M2, C0 and C2 fail to recover from mid-approach deflection (|e_right| > 50 mm):
+      EXPECT_GT(std::abs(out_c0.e_right), 0.050);
+      EXPECT_GT(std::abs(out_c2.e_right), 0.050);
+      if (sub_label == "mid_deflect_299mm") {
+        EXPECT_FALSE(out_c0.latched_capture);
+        EXPECT_FALSE(out_c2.latched_capture);
+      }
+      // C1 recovers laterally relative to C0/C2, but stops longitudinally short without M3
+      // (so its projected goal-line lateral error is < 38 mm while |x_lon| > 25 mm):
+      const double c1_projected_e_right =
+        out_c1.e_right + out_c1.x_lon * std::tan(out_c1.dth_rad);
+      EXPECT_TRUE(out_c1.latched_capture);
+      EXPECT_LT(std::abs(c1_projected_e_right), 0.038);
+      EXPECT_GT(std::abs(out_c1.x_lon), 0.025);
+      // C3 (M1 + M2 + M3) recovers both laterally (|e_right| < 38 mm) and longitudinally
+      // (|x_lon| < 25 mm, xy_err < 42 mm, |dth| < 5 deg):
+      EXPECT_TRUE(out_c3.latched_capture);
+      EXPECT_TRUE(out_c3.collision_free);
+      EXPECT_LT(std::abs(out_c3.x_lon), 0.025);
+      EXPECT_LT(std::abs(out_c3.e_right), 0.038);
+      EXPECT_LT(out_c3.xy_err, 0.042);
+      EXPECT_LT(std::abs(out_c3.dth_rad), kMaxYawErrRad);
+    }
   }
 }
 }  // namespace

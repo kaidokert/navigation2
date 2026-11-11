@@ -238,6 +238,18 @@ protected:
   void updateCurrentSegmentDirection();
 
   /**
+   * @brief Apply terminal 1-gear capture curve latching, drift re-latching,
+   * and longitudinal-gated tangent pull-through on the final segment.
+   * @param global_pose Current robot pose in global plan frame
+   * @param prev_pose_before_prune Optional vertex immediately preceding the pruned plan
+   * @param transformed_plan In/out local plan in costmap frame
+   */
+  void applyTerminalCapture(
+    const geometry_msgs::msg::PoseStamped & global_pose,
+    std::optional<geometry_msgs::msg::PoseStamped> & prev_pose_before_prune,
+    nav_msgs::msg::Path & transformed_plan);
+
+  /**
    * @brief Solve a 1-gear C/CC capture curve of radius R >= terminal_capture_min_turning_r_
    * from the robot's current pose to the terminal goal pose, verified collision-free
    * against the local costmap footprint.
@@ -329,15 +341,20 @@ protected:
   double terminal_capture_max_distance_{1.00};
   double terminal_capture_min_distance_{0.22};
   double terminal_capture_min_cross_track_{0.025};
-  double terminal_capture_replan_drift_{0.045};
+  double terminal_capture_replan_drift_{0.020};
   double terminal_capture_min_turning_r_{0.561};
   double terminal_capture_point_spacing_{0.03};
+  double terminal_capture_max_residual_y_{0.040};
+  double terminal_capture_pullthrough_length_{0.10};
+  double terminal_capture_pullthrough_release_{0.015};
   bool has_latched_terminal_capture_{false};
   double latched_capture_max_distance_{1.00};
   double latched_capture_min_distance_{0.22};
   double latched_capture_min_cross_track_{0.025};
+  double latched_capture_replan_drift_{0.020};
   double latched_capture_min_turning_r_{0.561};
   double latched_capture_point_spacing_{0.03};
+  double latched_capture_max_residual_y_{0.040};
   nav_msgs::msg::Path nominal_terminal_plan_;
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
