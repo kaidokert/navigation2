@@ -333,6 +333,11 @@ protected:
   double terminal_capture_min_turning_r_{0.561};
   double terminal_capture_point_spacing_{0.03};
   bool has_latched_terminal_capture_{false};
+  double latched_capture_max_distance_{1.00};
+  double latched_capture_min_distance_{0.22};
+  double latched_capture_min_cross_track_{0.025};
+  double latched_capture_min_turning_r_{0.561};
+  double latched_capture_point_spacing_{0.03};
   nav_msgs::msg::Path nominal_terminal_plan_;
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as

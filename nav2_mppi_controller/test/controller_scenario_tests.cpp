@@ -98,10 +98,16 @@ public:
     std::normal_distribution<float> dwz(0.0f, 0.101f);
     auto & vx = noise_generator_.*NoiseAccess::vx();
     auto & wz = noise_generator_.*NoiseAccess::wz();
-    for (size_t i = 0; i < vx.shape(0); ++i) {
+    for (size_t i = 0; i < vx.shape(0); i += 2) {
       for (size_t j = 0; j < vx.shape(1); ++j) {
-        vx(i, j) = dvx(gen);
-        wz(i, j) = dwz(gen);
+        const float nvx = dvx(gen);
+        const float nwz = dwz(gen);
+        vx(i, j) = nvx;
+        wz(i, j) = nwz;
+        if (i + 1 < vx.shape(0)) {
+          vx(i + 1, j) = -nvx;
+          wz(i + 1, j) = -nwz;
+        }
       }
     }
   }
@@ -586,7 +592,7 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
       best.dth_rad = init_tf[2];
       best.xy_err = std::hypot(init_tf[0], init_tf[1]);
 
-      for (size_t tick = 0; tick < 120; ++tick) {
+      for (size_t tick = 0; tick < 180; ++tick) {
         const double cur_yaw = tf2::getYaw(actual.pose.orientation);
         const double fp_cost = checker.footprintCostAtPose(
           actual.pose.position.x, actual.pose.position.y, cur_yaw, footprint);
@@ -626,7 +632,7 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
         if (handler.inversion() == 0u &&
           (tf[0] * scenario.gears.back() >= 0.0 ||
           (tick >= 20 && best.xy_err < 0.10 && std::abs(best.dth_rad) < 0.25 &&
-          std::abs(vx) < 0.02 && std::abs(wz) < 0.08)))
+          std::abs(vx) < 0.002 && std::abs(wz) < 0.02)))
         {
           break;
         }
@@ -669,15 +675,19 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     const auto cap = run_closed_loop(id, key, true);
     EXPECT_FALSE(cap.latched_capture);
     EXPECT_TRUE(cap.collision_free);
+    EXPECT_LT(std::abs(cap.x_lon), 0.025);
     EXPECT_LT(std::abs(cap.e_right), 0.010);
+    EXPECT_LT(cap.xy_err, 0.025);
     EXPECT_LT(std::abs(cap.dth_rad), kMaxYawErrRad);
+    EXPECT_DOUBLE_EQ(cap.x_lon, base.x_lon);
     EXPECT_DOUBLE_EQ(cap.e_right, base.e_right);
     EXPECT_DOUBLE_EQ(cap.dth_rad, base.dth_rad);
   }
 
   // 2. Displaced starts: baseline fails to close lateral offset (|e_right| > 35 mm, P1),
   // whereas terminal capture latches a collision-free 1-gear curve and achieves
-  // |e_right| < 25.0 mm and |dth| < 5.0 deg with zero footprint collisions (P2 & P3).
+  // |x_lon| < 25.0 mm, |e_right| < 25.0 mm, xy_err < 25.0 mm, and |dth| < 5.0 deg
+  // with zero footprint collisions (P2 & P3).
   for (const auto & [id, key] : std::vector<std::pair<std::string, std::string>>{
       {"curved_capture", "inside"},
       {"curved_capture", "outside"},
@@ -691,26 +701,76 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     EXPECT_GT(std::abs(base.e_right), 0.035);
     EXPECT_TRUE(cap.latched_capture);
     EXPECT_TRUE(cap.collision_free);
+    EXPECT_LT(std::abs(cap.x_lon), 0.025);
     EXPECT_LT(std::abs(cap.e_right), 0.025);
+    EXPECT_LT(cap.xy_err, 0.025);
     EXPECT_LT(std::abs(cap.dth_rad), kMaxYawErrRad);
   }
 
-  // 3. Infeasible 1-gear capture (short_cusp_exit / stress requires R = 0.118 m < 0.561 m):
-  // terminal capture must reject the infeasible 1-gear curve and leave behavior unchanged.
+  // 3a. Short-segment gate (short_cusp_exit has segment length 0.25 m < 0.40 m):
+  // terminal capture must not activate on short post-cusp segments and must leave
+  // behavior bit-for-bit identical to baseline.
   {
     const auto base = run_closed_loop("short_cusp_exit", "stress", false);
     const auto cap = run_closed_loop("short_cusp_exit", "stress", true);
     EXPECT_FALSE(cap.latched_capture);
+    EXPECT_DOUBLE_EQ(cap.x_lon, base.x_lon);
     EXPECT_DOUBLE_EQ(cap.e_right, base.e_right);
     EXPECT_DOUBLE_EQ(cap.dth_rad, base.dth_rad);
   }
 
-  // 4. Obstacle-blocked capture rejection, dynamic-obstacle unlatching & nominal restore,
-  // drift-triggered replanning, and dynamic parameter disable verification:
+  // 3b. Falsifiable minimum-turning-radius (R < terminal_capture_min_turning_r) rejection
+  // inside solveTerminalCapturePath on a >= 0.40 m segment (early_lateral_capture = 1.00 m),
+  // plus dynamic-parameter latch invalidation when terminal_capture_min_turning_r increases:
+  {
+    const auto & clean = atlas->at("early_lateral_capture");
+    grid(clean);
+    auto parent = node(true, 500, 0.325, 7, true);
+    mppi::ParametersHandler params(parent);
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    handler.initialize(parent, "FollowPath", cm, buffer, &params);
+    params.start();
+    handler.setPath(clean.message());
+
+    // At (-0.45, -0.22, 0.0), goal_dist = 0.501 m in [0.22, 1.00] m and cross_track = 0.22 m
+    // (>= 0.025 m), so transformPath invokes solveTerminalCapturePath. The required symmetric
+    // 1-gear S-curve radius is R = (0.45^2 + 0.22^2) / (4 * 0.22) = 0.2851 m < 0.561 m,
+    // which must be rejected.
+    const std::array<double, 3> tight_pose{-0.45, -0.22, 0.0};
+    auto rejected_seg = handler.transformPath(pose(tight_pose));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(rejected_seg.poses.empty());
+    EXPECT_NEAR(rejected_seg.poses.front().pose.position.y, 0.0, 1e-6);
+
+    // Lowering terminal_capture_min_turning_r to 0.25 m (< 0.2851 m) on the exact same pose
+    // proves that R < min_turning_r was the sole rejection gate:
+    parent->set_parameter(rclcpp::Parameter("FollowPath.terminal_capture_min_turning_r", 0.25));
+    auto accepted_seg = handler.transformPath(pose(tight_pose));
+    EXPECT_TRUE(handler.latchedCapture());
+    ASSERT_FALSE(accepted_seg.poses.empty());
+    EXPECT_LT(accepted_seg.poses.front().pose.position.y, -0.15);
+
+    // Raising terminal_capture_min_turning_r back to 0.561 m while latched at the exact same
+    // pose (zero positional drift) must immediately invalidate the tighter latched curve and
+    // restore the nominal centerline plan:
+    parent->set_parameter(rclcpp::Parameter("FollowPath.terminal_capture_min_turning_r", 0.561));
+    auto invalidated_seg = handler.transformPath(pose(tight_pose));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(invalidated_seg.poses.empty());
+    EXPECT_NEAR(invalidated_seg.poses.front().pose.position.y, 0.0, 1e-6);
+  }
+
+  // 4. Obstacle-blocked capture rejection (perimeter-only collision where all rear-axle
+  // center cells are FREE_SPACE), dynamic-obstacle unlatching & nominal restore,
+  // drift-triggered replanning (both feasible re-latch and infeasible unlatch),
+  // and dynamic parameter disable verification:
   {
     Scenario blocked = atlas->at("early_lateral_capture");
-    // Place an obstacle box right across the S-curve capture corridor
-    blocked.obstacles.push_back(controller_test::Box{-0.55, -0.05, -0.35, 0.12, 0.15});
+    // Place an obstacle box strictly at y in [0.05, 0.14] so every point (wx, wy) on the
+    // capture curve from (-0.75, -0.11, 0) to (0, 0, 0) has wy in [-0.11, 0.00] in FREE_SPACE,
+    // while only the left footprint perimeter (wy + 0.163 m) intersects the box:
+    blocked.obstacles.push_back(controller_test::Box{-0.55, 0.05, -0.35, 0.14, 0.15});
     grid(blocked);
     auto parent = node(true, 500, 0.325, 7, true);
     mppi::ParametersHandler params(parent);
@@ -733,7 +793,7 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     ASSERT_FALSE(latched_seg.poses.empty());
     EXPECT_LT(latched_seg.poses.front().pose.position.y, -0.05);
 
-    // Paint an obstacle on the latched capture path and verify unlatching + nominal restore
+    // Paint the perimeter-only obstacle and verify unlatching + nominal restore
     grid(blocked);
     auto restored_seg = handler.transformPath(pose(clean.starts.at("offset")));
     EXPECT_FALSE(handler.latchedCapture());
@@ -753,7 +813,17 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     ASSERT_FALSE(drifted_cap.poses.empty());
     EXPECT_GT(drifted_cap.poses.front().pose.position.y, 0.05);
 
-    // Test dynamic disabling of FollowPath.terminal_capture_enabled while latched:
+    // Test drift to an infeasible pose (-0.45, -0.22, 0.0 where R = 0.2851 m < 0.561 m):
+    // must unlatch the stale pre-drift curve and restore the nominal centerline plan:
+    auto unlatched_drift_seg = handler.transformPath(pose({-0.45, -0.22, 0.0}));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(unlatched_drift_seg.poses.empty());
+    EXPECT_NEAR(unlatched_drift_seg.poses.front().pose.position.y, 0.0, 1e-6);
+
+    // Re-latch on clean start, then test dynamic disabling of FollowPath.terminal_capture_enabled:
+    handler.setPath(clean.message());
+    ASSERT_GE(handler.transformPath(pose({-0.75, 0.11, 0.0})).poses.size(), 2u);
+    EXPECT_TRUE(handler.latchedCapture());
     parent->set_parameter(rclcpp::Parameter("FollowPath.terminal_capture_enabled", false));
     auto disabled_seg = handler.transformPath(pose({-0.75, 0.11, 0.0}));
     EXPECT_FALSE(handler.latchedCapture());
@@ -796,7 +866,9 @@ TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
     EXPECT_GT(std::abs(base_rev.e_right), 0.035);
     EXPECT_TRUE(cap_rev.latched_capture);
     EXPECT_TRUE(cap_rev.collision_free);
+    EXPECT_LT(std::abs(cap_rev.x_lon), 0.025);
     EXPECT_LT(std::abs(cap_rev.e_right), 0.025);
+    EXPECT_LT(cap_rev.xy_err, 0.025);
     EXPECT_LT(std::abs(cap_rev.dth_rad), kMaxYawErrRad);
   }
 }

@@ -339,7 +339,13 @@ nav_msgs::msg::Path PathHandler::transformPath(
     stranded_cycles_ = 0u;
   }
 
-  if (!terminal_capture_enabled_ && has_latched_terminal_capture_) {
+  const bool capture_params_changed = has_latched_terminal_capture_ && (
+    std::fabs(terminal_capture_max_distance_ - latched_capture_max_distance_) > 1e-9 ||
+    std::fabs(terminal_capture_min_distance_ - latched_capture_min_distance_) > 1e-9 ||
+    std::fabs(terminal_capture_min_cross_track_ - latched_capture_min_cross_track_) > 1e-9 ||
+    std::fabs(terminal_capture_min_turning_r_ - latched_capture_min_turning_r_) > 1e-9 ||
+    std::fabs(terminal_capture_point_spacing_ - latched_capture_point_spacing_) > 1e-9);
+  if ((!terminal_capture_enabled_ || capture_params_changed) && has_latched_terminal_capture_) {
     if (!nominal_terminal_plan_.poses.empty()) {
       global_plan_up_to_inversion_ = nominal_terminal_plan_;
     }
@@ -368,7 +374,7 @@ nav_msgs::msg::Path PathHandler::transformPath(
     !global_plan_up_to_inversion_.poses.empty())
   {
     const double min_dist = std::max(terminal_capture_min_distance_, 0.05);
-    const double max_dist = std::max(terminal_capture_max_distance_, min_dist);
+    const double max_dist = std::max(terminal_capture_max_distance_, 0.0);
     const double min_cross_track = std::max(terminal_capture_min_cross_track_, 0.0);
     const double replan_drift = std::max(terminal_capture_replan_drift_, min_cross_track);
 
@@ -436,14 +442,51 @@ nav_msgs::msg::Path PathHandler::transformPath(
     double cross_track_dist = minDistToPlan(
       global_plan_up_to_inversion_, global_pose, prev_pose_before_prune);
 
+    bool skip_initial_latch = false;
     if (has_latched_terminal_capture_) {
       bool latched_blocked = false;
-      for (auto p : global_plan_up_to_inversion_.poses) {
+      std::vector<geometry_msgs::msg::PoseStamped> check_poses;
+      check_poses.reserve(global_plan_up_to_inversion_.poses.size() + 1u);
+      if (prev_pose_before_prune.has_value()) {
+        check_poses.push_back(*prev_pose_before_prune);
+      }
+      for (const auto & p : global_plan_up_to_inversion_.poses) {
+        check_poses.push_back(p);
+      }
+      for (size_t i = 0; i < check_poses.size() && !latched_blocked; ++i) {
+        auto p = check_poses[i];
         p.header.frame_id = global_plan_.header.frame_id;
         p.header.stamp = global_pose.header.stamp;
         if (!isFootprintCollisionFreeInPlanFrame(p)) {
           latched_blocked = true;
           break;
+        }
+        if (i + 1 < check_poses.size()) {
+          const auto & a = check_poses[i].pose;
+          const auto & b = check_poses[i + 1].pose;
+          const double seg_len = std::hypot(
+            b.position.x - a.position.x, b.position.y - a.position.y);
+          if (seg_len > 0.025) {
+            const size_t steps = static_cast<size_t>(std::ceil(seg_len / 0.025));
+            const double yaw_a = tf2::getYaw(a.orientation);
+            const double dyaw = angles::shortest_angular_distance(
+              yaw_a, tf2::getYaw(b.orientation));
+            for (size_t s = 1; s < steps; ++s) {
+              const double alpha = static_cast<double>(s) / static_cast<double>(steps);
+              geometry_msgs::msg::PoseStamped mid;
+              mid.header.frame_id = global_plan_.header.frame_id;
+              mid.header.stamp = global_pose.header.stamp;
+              mid.pose.position.x = a.position.x + alpha * (b.position.x - a.position.x);
+              mid.pose.position.y = a.position.y + alpha * (b.position.y - a.position.y);
+              mid.pose.position.z = a.position.z;
+              mid.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
+                angles::normalize_angle(yaw_a + alpha * dyaw));
+              if (!isFootprintCollisionFreeInPlanFrame(mid)) {
+                latched_blocked = true;
+                break;
+              }
+            }
+          }
         }
       }
       if (latched_blocked) {
@@ -463,30 +506,56 @@ nav_msgs::msg::Path PathHandler::transformPath(
         prunePlan(global_plan_up_to_inversion_, restored_bound);
         cross_track_dist = minDistToPlan(
           global_plan_up_to_inversion_, global_pose, prev_pose_before_prune);
-      } else {
-        if (cross_track_dist > replan_drift &&
-          goal_dist >= min_dist &&
-          goal_dist <= max_dist)
+      } else if (cross_track_dist > replan_drift) {
+        nav_msgs::msg::Path re_capture_plan;
+        if (goal_dist >= min_dist &&
+          goal_dist <= max_dist &&
+          solveTerminalCapturePath(global_pose, goal_pose, re_capture_plan))
         {
-          nav_msgs::msg::Path re_capture_plan;
-          if (solveTerminalCapturePath(global_pose, goal_pose, re_capture_plan)) {
-            global_plan_up_to_inversion_ = std::move(re_capture_plan);
-            auto [cap_plan, cap_bound] =
-              getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
-            transformed_plan = std::move(cap_plan);
-            prev_pose_before_prune.reset();
-            if (cap_bound != global_plan_up_to_inversion_.poses.begin() &&
-              cap_bound <= global_plan_up_to_inversion_.poses.end())
-            {
-              prev_pose_before_prune = *(cap_bound - 1);
-            }
-            prunePlan(global_plan_up_to_inversion_, cap_bound);
+          global_plan_up_to_inversion_ = std::move(re_capture_plan);
+          latched_capture_max_distance_ = terminal_capture_max_distance_;
+          latched_capture_min_distance_ = terminal_capture_min_distance_;
+          latched_capture_min_cross_track_ = terminal_capture_min_cross_track_;
+          latched_capture_min_turning_r_ = terminal_capture_min_turning_r_;
+          latched_capture_point_spacing_ = terminal_capture_point_spacing_;
+          auto [cap_plan, cap_bound] =
+            getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
+          transformed_plan = std::move(cap_plan);
+          prev_pose_before_prune.reset();
+          if (cap_bound != global_plan_up_to_inversion_.poses.begin() &&
+            cap_bound <= global_plan_up_to_inversion_.poses.end())
+          {
+            prev_pose_before_prune = *(cap_bound - 1);
           }
+          prunePlan(global_plan_up_to_inversion_, cap_bound);
+          if (clock_) {
+            RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
+              "[TERMINAL_CAPTURE] Re-latched 1-gear capture path after drift: pts=%zu "
+              "goal_dist=%.3fm cross_track=%.3fm",
+              global_plan_up_to_inversion_.poses.size(), goal_dist, cross_track_dist);
+          }
+        } else {
+          if (!nominal_terminal_plan_.poses.empty()) {
+            global_plan_up_to_inversion_ = nominal_terminal_plan_;
+          }
+          has_latched_terminal_capture_ = false;
+          skip_initial_latch = true;
+          auto [restored_plan, restored_bound] =
+            getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
+          transformed_plan = std::move(restored_plan);
+          prev_pose_before_prune.reset();
+          if (restored_bound != global_plan_up_to_inversion_.poses.begin() &&
+            restored_bound <= global_plan_up_to_inversion_.poses.end())
+          {
+            prev_pose_before_prune = *(restored_bound - 1);
+          }
+          prunePlan(global_plan_up_to_inversion_, restored_bound);
         }
       }
     }
 
     if (!has_latched_terminal_capture_ &&
+      !skip_initial_latch &&
       goal_dist >= min_dist &&
       goal_dist <= max_dist &&
       cross_track_dist >= min_cross_track)
@@ -500,6 +569,11 @@ nav_msgs::msg::Path PathHandler::transformPath(
         }
         global_plan_up_to_inversion_ = std::move(capture_plan);
         has_latched_terminal_capture_ = true;
+        latched_capture_max_distance_ = terminal_capture_max_distance_;
+        latched_capture_min_distance_ = terminal_capture_min_distance_;
+        latched_capture_min_cross_track_ = terminal_capture_min_cross_track_;
+        latched_capture_min_turning_r_ = terminal_capture_min_turning_r_;
+        latched_capture_point_spacing_ = terminal_capture_point_spacing_;
         auto [cap_plan, cap_bound] =
           getGlobalPlanConsideringBoundsInCostmapFrame(global_pose);
         transformed_plan = std::move(cap_plan);
@@ -1103,13 +1177,6 @@ void PathHandler::absorbTerminalGoalSnapMicroStub()
     return;
   }
 
-  if (has_latched_terminal_capture_) {
-    if (!nominal_terminal_plan_.poses.empty()) {
-      global_plan_up_to_inversion_ = nominal_terminal_plan_;
-    }
-    has_latched_terminal_capture_ = false;
-  }
-
   if (has_cusp_original_orientation_) {
     global_plan_.poses[inversion_locale_ - 1u].pose.orientation = cusp_original_orientation_;
     if (!global_plan_up_to_inversion_.poses.empty()) {
@@ -1597,7 +1664,9 @@ bool PathHandler::solveTerminalCapturePath(
       return p;
     };
 
-  const double spacing = std::max(0.01, terminal_capture_point_spacing_);
+  const double min_spacing = (costmap_ && costmap_->getCostmap()) ?
+    std::max(0.01, static_cast<double>(costmap_->getCostmap()->getResolution())) : 0.01;
+  const double spacing = std::max(min_spacing, terminal_capture_point_spacing_);
   const double check_spacing = std::min(0.025, spacing);
 
   for (const auto & cand : candidates) {
