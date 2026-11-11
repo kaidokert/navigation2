@@ -690,12 +690,14 @@ TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obs
   node_a->declare_parameter("a.downsample_costmap", false);
   node_a->declare_parameter("a.downsampling_factor", 2);
   node_a->declare_parameter("a.minimum_turning_radius", 0.4);
+  node_a->declare_parameter("a.lookup_table_size", 2.0);
   node_a->declare_parameter("a.smooth_path", false);
 
   node_b->declare_parameter("b.cache_obstacle_heuristic", true);
   node_b->declare_parameter("b.downsample_costmap", true);
   node_b->declare_parameter("b.downsampling_factor", 2);
   node_b->declare_parameter("b.minimum_turning_radius", 0.4);
+  node_b->declare_parameter("b.lookup_table_size", 2.0);
   node_b->declare_parameter("b.smooth_path", false);
 
   // Share the same Costmap2DROS instance between Planner A (undownsampled) and
@@ -769,9 +771,20 @@ TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obs
 
   // 3. Reconfigure Planner B to use fewer angle bins (36 vs 72) and a higher cost_penalty
   // (10.0 vs 2.0) on the shared costmap with non-zero traversal cost. After Planner B plans,
-  // Planner A (72 bins, cost_penalty 2.0) must rebuild both the shared distance heuristic table
-  // and the shared obstacle heuristic table rather than indexing out of bounds or reusing
-  // Planner B's cost_penalty expansion.
+  // Planner A (72 bins, cost_penalty 2.0) must restore its cached 72-bin distance heuristic
+  // table in O(1) without recomputing OMPL distances and must rebuild the shared obstacle
+  // heuristic table rather than reusing Planner B's cost_penalty expansion.
+  const float * dist_table_ptr_a = Node::dist_heuristic_lookup_table.data();
+  const int floored_a = static_cast<int>(std::floor(Node::size_lookup / 2.0f));
+  const int ceiling_a = static_cast<int>(std::ceil(Node::size_lookup / 2.0f));
+  const int probe_idx_a =
+    ((-2 + floored_a) * ceiling_a * 72) + (2 * 72) + 1;
+  ASSERT_LT(static_cast<size_t>(probe_idx_a), Node::dist_heuristic_lookup_table.size());
+  Node::dist_heuristic_lookup_table[probe_idx_a] += 0.125f;
+  const float expected_dist_h_a = Node::getDistanceHeuristic(
+    Node::Coordinates(68.0f, 68.0f, 71.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 1.0f);
+  EXPECT_GT(expected_dist_h_a, 0.0f);
+
   for (unsigned int cx = 0; cx < 100; ++cx) {
     for (unsigned int cy = 0; cy < 100; ++cy) {
       costmap_ros_a->getCostmap()->setCost(cx, cy, 128);
@@ -783,6 +796,8 @@ TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obs
     rclcpp::Parameter("b.cost_penalty", 10.0)}).successful);
   ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
   EXPECT_EQ(Node::motion_table.num_angle_quantization, 36u);
+  const float * dist_table_ptr_b = Node::dist_heuristic_lookup_table.data();
+  EXPECT_NE(dist_table_ptr_b, dist_table_ptr_a);
   const float h_b = Node::getObstacleHeuristic(
     Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 10.0f);
 
@@ -791,13 +806,22 @@ TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obs
   EXPECT_EQ(
     Node::dist_heuristic_lookup_table.size(),
     static_cast<size_t>(Node::size_lookup * std::ceil(Node::size_lookup / 2.0f) * 72u));
-  EXPECT_GT(
+  EXPECT_EQ(Node::dist_heuristic_lookup_table.data(), dist_table_ptr_a)
+    << "Alternating back to Planner A must reuse its cached distance heuristic buffer via swap";
+  EXPECT_FLOAT_EQ(
     Node::getDistanceHeuristic(
       Node::Coordinates(68.0f, 68.0f, 71.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 1.0f),
-    0.0f);
+    expected_dist_h_a)
+    << "Alternating back to Planner A must preserve cached distance heuristic values";
+  Node::dist_heuristic_lookup_table[probe_idx_a] -= 0.125f;
   const float h_a = Node::getObstacleHeuristic(
     Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f);
   EXPECT_LT(h_a, h_b);
+
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 36u);
+  EXPECT_EQ(Node::dist_heuristic_lookup_table.data(), dist_table_ptr_b)
+    << "Alternating back to Planner B must reuse its cached distance heuristic buffer via swap";
 
   planner_b->deactivate();
   planner_b->cleanup();

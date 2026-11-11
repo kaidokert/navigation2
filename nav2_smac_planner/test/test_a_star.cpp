@@ -912,7 +912,7 @@ TEST(AStarTest, analytic_handoff_gear_seeding_and_single_gear_fallback)
   Node::initMotionModel(
     nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
   Node::precomputeDistanceHeuristic(
-    401.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
+    25.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
   Node::resetObstacleHeuristic(costmap_ros, 50u, 50u, 35u, 50u, costmap);
   EXPECT_FLOAT_EQ(Node::motion_table.gear_change_penalty, 15.0f);
 
@@ -1185,7 +1185,7 @@ TEST(AStarTest, analytic_reverse_only_dubins_and_strict_tie_break_and_quadratic_
   Node::initMotionModel(
     nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
   Node::precomputeDistanceHeuristic(
-    401.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
+    25.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
   Node::resetObstacleHeuristic(costmap_ros, 50u, 50u, 50u, 56u, costmap);
 
   nav2_smac_planner::AStarAlgorithm<Node>::Graph graph;
@@ -1484,6 +1484,37 @@ TEST(AStarTest, analytic_path_rejects_negative_and_upper_bounds_and_wraps_two_pi
     expansion.getAnalyticPath(neg_y_start, neg_y_goal, getter, dubins_space, false);
   EXPECT_TRUE(neg_y_nodes.empty())
     << "Curve dipping into negative y (-0.45) must be rejected before unsigned cast";
+  EXPECT_EQ(graph.size(), 2u);
+
+  // 2b. Upper-bound x >= max_x (30.0) and y >= max_y (30.0) excursions:
+  // Without reals[0] >= max_x, static_cast<unsigned int>(30.45) == 30u wraps into row y + 1
+  // inside Node::getIndex(30u, y, bin) < max_index and allocates an aliased node in graph.
+  graph.clear();
+  Node * pos_x_start = nullptr;
+  Node * pos_x_goal = nullptr;
+  getter(Node::getIndex(29u, 10u, 9u), pos_x_start);
+  pos_x_start->setPose(Node::Coordinates(29.7f, 10.0f, 9.0f));
+  getter(Node::getIndex(29u, 15u, 27u), pos_x_goal);
+  pos_x_goal->setPose(Node::Coordinates(29.7f, 15.0f, 27.0f));
+  const auto pos_x_nodes =
+    expansion.getAnalyticPath(pos_x_start, pos_x_goal, getter, dubins_space, false);
+  EXPECT_TRUE(pos_x_nodes.empty())
+    << "Curve bulging past max_x (30.45 >= 30.0) must be rejected before getIndex row-wrap";
+  EXPECT_EQ(graph.size(), 2u)
+    << "No wrapped graph nodes may be allocated when reals[0] >= max_x";
+
+  graph.clear();
+  Node * pos_y_start = nullptr;
+  Node * pos_y_goal = nullptr;
+  getter(Node::getIndex(10u, 29u, 9u), pos_y_start);
+  pos_y_start->setPose(Node::Coordinates(10.0f, 29.7f, 9.0f));
+  getter(Node::getIndex(15u, 29u, 63u), pos_y_goal);
+  pos_y_goal->setPose(Node::Coordinates(15.0f, 29.7f, 63.0f));
+  const auto pos_y_nodes =
+    expansion.getAnalyticPath(pos_y_start, pos_y_goal, getter, dubins_space, false);
+  EXPECT_TRUE(pos_y_nodes.empty())
+    << "Curve bulging past max_y (30.45 >= 30.0) must be rejected before getIndex";
+  EXPECT_EQ(graph.size(), 2u);
 
   // 3. Heading wrap across 2 * M_PI (bin 71 = 355 deg -> bin 1 = 5 deg, and reverse_only +M_PI):
   // Ensure every node's orientation bin is strictly < size_theta (72) and in [0, size_theta).

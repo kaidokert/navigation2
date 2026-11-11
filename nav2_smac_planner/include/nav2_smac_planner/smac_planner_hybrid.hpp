@@ -104,6 +104,7 @@ protected:
   rclcpp::Clock::SharedPtr _clock;
   rclcpp::Logger _logger{rclcpp::get_logger("SmacPlannerHybrid")};
   nav2_costmap_2d::Costmap2D * _costmap;
+  nav2_costmap_2d::Costmap2D * _downsampled_costmap{nullptr};
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> _costmap_ros;
   std::unique_ptr<CostmapDownsampler> _costmap_downsampler;
   double _configured_resolution{0.0};

@@ -390,6 +390,7 @@ void SmacPlannerHybrid::cleanup()
     _costmap_downsampler->on_cleanup();
     _costmap_downsampler.reset();
   }
+  _downsampled_costmap = nullptr;
   _raw_plan_publisher.reset();
   if (_debug_visualizations) {
     _expansions_publisher.reset();
@@ -471,7 +472,10 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   nav2_costmap_2d::Costmap2D * costmap = _costmap;
   if (_costmap_downsampler) {
     costmap = _costmap_downsampler->downsample(_downsampling_factor);
+    _downsampled_costmap = costmap;
     _collision_checker.setCostmap(costmap);
+  } else {
+    _downsampled_costmap = nullptr;
   }
 
   // Set collision checker and costmap information
@@ -939,14 +943,18 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     // Re-Initialize costmap downsampler
     if (reinit_downsampler) {
       if (_costmap_downsampler) {
-        if (_collision_checker.getCostmap() != _costmap &&
-          NodeHybrid::obstacle_heuristic_costmap == _collision_checker.getCostmap())
+        if ((_downsampled_costmap != nullptr &&
+          NodeHybrid::obstacle_heuristic_costmap == _downsampled_costmap) ||
+          (_collision_checker.getCostmap() != _costmap &&
+          NodeHybrid::obstacle_heuristic_costmap == _collision_checker.getCostmap()))
         {
           NodeHybrid::obstacle_heuristic_costmap = nullptr;
         }
         _costmap_downsampler->on_cleanup();
         _costmap_downsampler.reset();
+        _downsampled_costmap = nullptr;
       }
+      _collision_checker.setCostmap(_costmap);
       if (_downsample_costmap && _downsampling_factor > 1) {
         std::string topic_name = "downsampled_costmap";
         _costmap_downsampler = std::make_unique<CostmapDownsampler>();
@@ -955,8 +963,6 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         if (_raw_plan_publisher && _raw_plan_publisher->is_activated()) {
           _costmap_downsampler->on_activate();
         }
-      } else {
-        _collision_checker.setCostmap(_costmap);
       }
     }
 

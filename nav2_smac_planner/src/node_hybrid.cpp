@@ -47,10 +47,25 @@ ObstacleHeuristicQueue NodeHybrid::obstacle_heuristic_queue;
 
 namespace
 {
-float g_dist_heuristic_size_lookup = 0.0f;
-MotionModel g_dist_heuristic_motion_model = MotionModel::UNKNOWN;
-unsigned int g_dist_heuristic_dim_3_size = 0u;
-float g_dist_heuristic_min_turning_radius = 0.0f;
+struct DistHeuristicCacheKey
+{
+  float size_lookup{0.0f};
+  MotionModel motion_model{MotionModel::UNKNOWN};
+  unsigned int dim_3_size{0u};
+  float min_turning_radius{0.0f};
+
+  bool operator==(const DistHeuristicCacheKey & other) const
+  {
+    return size_lookup == other.size_lookup &&
+           motion_model == other.motion_model &&
+           dim_3_size == other.dim_3_size &&
+           min_turning_radius == other.min_turning_radius;
+  }
+};
+
+constexpr size_t kMaxDistHeuristicCacheEntries = 8u;
+DistHeuristicCacheKey g_active_dist_heuristic_key{};
+std::vector<std::pair<DistHeuristicCacheKey, LookupTable>> g_dist_heuristic_cache;
 }  // namespace
 
 // Each of these tables are the projected motion models through
@@ -506,12 +521,9 @@ void NodeHybrid::initMotionModel(
 
   travel_distance_cost = motion_table.projections[0]._x;
 
-  if (!dist_heuristic_lookup_table.empty() &&
-    (g_dist_heuristic_size_lookup != size_lookup ||
-    g_dist_heuristic_motion_model != motion_model ||
-    g_dist_heuristic_dim_3_size != num_angle_quantization ||
-    g_dist_heuristic_min_turning_radius != search_info.minimum_turning_radius))
-  {
+  const DistHeuristicCacheKey requested_key{
+    size_lookup, motion_model, num_angle_quantization, search_info.minimum_turning_radius};
+  if (!dist_heuristic_lookup_table.empty() && !(g_active_dist_heuristic_key == requested_key)) {
     precomputeDistanceHeuristic(size_lookup, motion_model, num_angle_quantization, search_info);
   }
 }
@@ -827,30 +839,87 @@ void NodeHybrid::precomputeDistanceHeuristic(
   const SearchInfo & search_info)
 {
   // Dubin or Reeds-Shepp shortest distances
+  if (motion_model != MotionModel::DUBIN && motion_model != MotionModel::REEDS_SHEPP) {
+    throw std::runtime_error(
+            "Node attempted to precompute distance heuristics "
+            "with invalid motion model!");
+  }
   if (motion_table.min_turning_radius != search_info.minimum_turning_radius ||
     motion_table.motion_model != motion_model)
   {
     motion_table.motion_model = MotionModel::UNKNOWN;
   }
-  if (!dist_heuristic_lookup_table.empty() &&
-    g_dist_heuristic_size_lookup == lookup_table_dim &&
-    g_dist_heuristic_motion_model == motion_model &&
-    g_dist_heuristic_dim_3_size == dim_3_size &&
-    g_dist_heuristic_min_turning_radius == search_info.minimum_turning_radius)
+
+  const auto compute_expected_size = [](float table_dim, unsigned int bins) -> size_t {
+      if (table_dim <= 0.0f || bins == 0u) {
+        return 0u;
+      }
+      return static_cast<size_t>(
+        table_dim * std::ceil(table_dim / 2.0) * static_cast<int>(bins));
+    };
+
+  const DistHeuristicCacheKey requested_key{
+    lookup_table_dim, motion_model, dim_3_size, search_info.minimum_turning_radius};
+  const size_t expected_size = compute_expected_size(lookup_table_dim, dim_3_size);
+
+  if (expected_size > 0u &&
+    dist_heuristic_lookup_table.size() == expected_size &&
+    g_active_dist_heuristic_key == requested_key)
   {
+    if (!motion_table.state_space || motion_table.motion_model == MotionModel::UNKNOWN) {
+      if (motion_model == MotionModel::DUBIN) {
+        motion_table.state_space = std::make_shared<ompl::base::DubinsStateSpace>(
+          search_info.minimum_turning_radius);
+      } else {
+        motion_table.state_space = std::make_shared<ompl::base::ReedsSheppStateSpace>(
+          search_info.minimum_turning_radius);
+      }
+    }
     size_lookup = lookup_table_dim;
     return;
   }
+
   if (motion_model == MotionModel::DUBIN) {
     motion_table.state_space = std::make_shared<ompl::base::DubinsStateSpace>(
       search_info.minimum_turning_radius);
-  } else if (motion_model == MotionModel::REEDS_SHEPP) {
+  } else {
     motion_table.state_space = std::make_shared<ompl::base::ReedsSheppStateSpace>(
       search_info.minimum_turning_radius);
-  } else {
-    throw std::runtime_error(
-            "Node attempted to precompute distance heuristics "
-            "with invalid motion model!");
+  }
+
+  const size_t active_expected_size = compute_expected_size(
+    g_active_dist_heuristic_key.size_lookup, g_active_dist_heuristic_key.dim_3_size);
+  if (g_active_dist_heuristic_key.motion_model != MotionModel::UNKNOWN &&
+    active_expected_size > 0u &&
+    dist_heuristic_lookup_table.size() == active_expected_size)
+  {
+    auto existing_it = std::find_if(
+      g_dist_heuristic_cache.begin(), g_dist_heuristic_cache.end(),
+      [](const auto & entry) {return entry.first == g_active_dist_heuristic_key;});
+    if (existing_it != g_dist_heuristic_cache.end()) {
+      existing_it->second.swap(dist_heuristic_lookup_table);
+    } else {
+      if (g_dist_heuristic_cache.size() >= kMaxDistHeuristicCacheEntries) {
+        g_dist_heuristic_cache.erase(g_dist_heuristic_cache.begin());
+      }
+      g_dist_heuristic_cache.emplace_back(
+        g_active_dist_heuristic_key, std::move(dist_heuristic_lookup_table));
+    }
+    dist_heuristic_lookup_table.clear();
+  }
+
+  auto cache_it = std::find_if(
+    g_dist_heuristic_cache.begin(), g_dist_heuristic_cache.end(),
+    [&requested_key](const auto & entry) {return entry.first == requested_key;});
+  if (cache_it != g_dist_heuristic_cache.end()) {
+    if (expected_size > 0u && cache_it->second.size() == expected_size) {
+      dist_heuristic_lookup_table.swap(cache_it->second);
+      g_dist_heuristic_cache.erase(cache_it);
+      size_lookup = lookup_table_dim;
+      g_active_dist_heuristic_key = requested_key;
+      return;
+    }
+    g_dist_heuristic_cache.erase(cache_it);
   }
 
   ompl::base::ScopedState<> from(motion_table.state_space), to(motion_table.state_space);
@@ -868,7 +937,7 @@ void NodeHybrid::precomputeDistanceHeuristic(
   // Heuristic space, we need to only store 2 of the 4 quadrants and simply mirror
   // around the X axis any relative node lookup. This reduces memory overhead and increases
   // the size of a window a platform can store in memory.
-  dist_heuristic_lookup_table.resize(size_lookup * ceil(size_lookup / 2.0) * dim_3_size_int);
+  dist_heuristic_lookup_table.resize(expected_size);
   for (float x = ceil(-size_lookup / 2.0); x <= floor(size_lookup / 2.0); x += 1.0) {
     for (float y = 0.0; y <= floor(size_lookup / 2.0); y += 1.0) {
       for (int heading = 0; heading != dim_3_size_int; heading++) {
@@ -881,10 +950,7 @@ void NodeHybrid::precomputeDistanceHeuristic(
       }
     }
   }
-  g_dist_heuristic_size_lookup = lookup_table_dim;
-  g_dist_heuristic_motion_model = motion_model;
-  g_dist_heuristic_dim_3_size = dim_3_size;
-  g_dist_heuristic_min_turning_radius = search_info.minimum_turning_radius;
+  g_active_dist_heuristic_key = requested_key;
 }
 
 void NodeHybrid::getNeighbors(
