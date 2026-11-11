@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -90,6 +91,20 @@ public:
     control_sequence_ = other.control_sequence_;
     control_history_ = other.control_history_;
   }
+  void setSeededGaussianBank(uint32_t seed = 42u)
+  {
+    std::mt19937 gen(seed);
+    std::normal_distribution<float> dvx(0.0f, 0.033f);
+    std::normal_distribution<float> dwz(0.0f, 0.101f);
+    auto & vx = noise_generator_.*NoiseAccess::vx();
+    auto & wz = noise_generator_.*NoiseAccess::wz();
+    for (size_t i = 0; i < vx.shape(0); ++i) {
+      for (size_t j = 0; j < vx.shape(1); ++j) {
+        vx(i, j) = dvx(gen);
+        wz(i, j) = dwz(gen);
+      }
+    }
+  }
 };
 
 class ScenarioPathHandler : public mppi::PathHandler
@@ -99,6 +114,7 @@ public:
   const auto & activeEndpoint() const {return global_plan_up_to_inversion_.poses.back().pose;}
   size_t activeSize() const {return global_plan_up_to_inversion_.poses.size();}
   unsigned int inversion() const {return inversion_locale_;}
+  bool latchedCapture() const {return has_latched_terminal_capture_;}
 };
 
 class ControllerScenarios : public ::testing::Test
@@ -161,7 +177,9 @@ protected:
       }
     }
   }
-  rclcpp_lifecycle::LifecycleNode::SharedPtr node(bool headings)
+  rclcpp_lifecycle::LifecycleNode::SharedPtr node(
+    bool headings, int batch_size = 64, double min_turning_r = 0.558, int pfc_offset = 6,
+    bool terminal_capture = false)
   {
     rclcpp::NodeOptions options;
     options.parameter_overrides({
@@ -169,25 +187,27 @@ protected:
         rclcpp::Parameter("FollowPath.motion_model", "Ackermann"),
         rclcpp::Parameter("FollowPath.critics", std::vector<std::string>{}),
         rclcpp::Parameter("FollowPath.model_dt", 0.05),
-        rclcpp::Parameter("FollowPath.batch_size", 64),
+        rclcpp::Parameter("FollowPath.batch_size", batch_size),
         rclcpp::Parameter("FollowPath.time_steps", 41),
         rclcpp::Parameter("FollowPath.iteration_count", 3),
         rclcpp::Parameter("FollowPath.regenerate_noises", false),
         rclcpp::Parameter("FollowPath.retry_attempt_limit", 0),
         rclcpp::Parameter("FollowPath.vx_std", 0.033),
         rclcpp::Parameter("FollowPath.wz_std", 0.101),
-        rclcpp::Parameter("FollowPath.AckermannConstraints.min_turning_r", 0.558),
+        rclcpp::Parameter("FollowPath.AckermannConstraints.min_turning_r", min_turning_r),
         rclcpp::Parameter("FollowPath.PathAlignCritic.threshold_to_consider", 0.01),
         rclcpp::Parameter("FollowPath.PathAlignCritic.offset_from_furthest", 1),
         rclcpp::Parameter("FollowPath.PathAlignCritic.cost_weight", 28.0),
         rclcpp::Parameter("FollowPath.PathAlignCritic.use_path_orientations", headings),
         rclcpp::Parameter("FollowPath.PathFollowCritic.threshold_to_consider", 0.01),
+        rclcpp::Parameter("FollowPath.PathFollowCritic.offset_from_furthest", pfc_offset),
         rclcpp::Parameter("FollowPath.PathFollowCritic.cost_weight", 66.05),
         rclcpp::Parameter("FollowPath.ObstaclesCritic.consider_footprint", true),
         rclcpp::Parameter("FollowPath.ObstaclesCritic.collision_check_footprint_only", true),
         rclcpp::Parameter("FollowPath.ObstaclesCritic.collision_cost", 1e9),
         rclcpp::Parameter("FollowPath.enforce_path_inversion", true),
-        rclcpp::Parameter("FollowPath.terminal_stub_max_length", 0.0)});
+        rclcpp::Parameter("FollowPath.terminal_stub_max_length", 0.0),
+        rclcpp::Parameter("FollowPath.terminal_capture_enabled", terminal_capture)});
     return std::make_shared<rclcpp_lifecycle::LifecycleNode>("scenario_controller", options);
   }
   geometry_msgs::msg::PoseStamped pose(const Pose & p)
@@ -202,7 +222,7 @@ protected:
 
 TEST_F(ControllerScenarios, GeometryGearAndMirrorContracts)
 {
-  ASSERT_EQ(atlas->cases.size(), 15u);
+  ASSERT_EQ(atlas->cases.size(), 16u);
   for (const auto & scenario : atlas->cases) {
     SCOPED_TRACE(scenario.id);
     for (bool reverse : {false, true}) {
@@ -506,6 +526,279 @@ TEST_F(ControllerScenarios, CompleteM8UsesProductionPathHandlerWithoutResetAtCus
   EXPECT_EQ(handler.inversion(), 0u);
   EXPECT_EQ(handler.getPath().poses.size(), scenario.path.size() - 26);
   EXPECT_EQ(handler.activeSize(), 2u);
+}
+
+struct ClosedLoopOutcome
+{
+  double x_lon{0.0};
+  double e_right{0.0};
+  double dth_rad{0.0};
+  double xy_err{0.0};
+  bool collision_free{true};
+  bool latched_capture{false};
+  size_t ticks{0u};
+};
+
+TEST_F(ControllerScenarios, ClosedLoopTerminalApproachBaselineAndCapture)
+{
+  auto run_scenario_closed_loop = [&](
+    const Scenario & scenario, const std::string & label,
+    const std::string & start_key, bool enable_capture)
+    {
+      grid(scenario);
+      auto parent = node(true, 500, 0.325, 7, enable_capture);
+      mppi::ParametersHandler params(parent);
+      auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+      ScenarioPathHandler handler;
+      handler.initialize(parent, "FollowPath", cm, buffer, &params);
+      handler.setPath(scenario.message());
+      ScenarioOptimizer optimizer;
+      optimizer.configure(parent, cm, &params);
+      optimizer.setSeededGaussianBank(42u);
+
+      const auto goal_pose = scenario.path.back();
+      const auto goal_msg = scenario.message().poses.back().pose;
+      auto actual = pose(scenario.starts.at(start_key));
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = scenario.gears.front() * 0.15;
+      speed.angular.z = 0.0;
+
+      const auto footprint = cm->getRobotFootprint();
+      nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *> checker(
+        cm->getCostmap());
+
+      auto to_target_frame = [&](const geometry_msgs::msg::PoseStamped & p) {
+          const double dx = p.pose.position.x - goal_pose[0];
+          const double dy = p.pose.position.y - goal_pose[1];
+          const double c = std::cos(-goal_pose[2]);
+          const double s = std::sin(-goal_pose[2]);
+          const double x_lon = c * dx - s * dy;
+          const double y_lat = s * dx + c * dy;
+          const double yaw = tf2::getYaw(p.pose.orientation);
+          const double dth = controller_test::wrap(yaw - goal_pose[2]);
+          return std::array<double, 3>{x_lon, -y_lat, dth};
+        };
+
+      ClosedLoopOutcome best;
+      auto init_tf = to_target_frame(actual);
+      best.x_lon = init_tf[0];
+      best.e_right = init_tf[1];
+      best.dth_rad = init_tf[2];
+      best.xy_err = std::hypot(init_tf[0], init_tf[1]);
+
+      for (size_t tick = 0; tick < 120; ++tick) {
+        const double cur_yaw = tf2::getYaw(actual.pose.orientation);
+        const double fp_cost = checker.footprintCostAtPose(
+          actual.pose.position.x, actual.pose.position.y, cur_yaw, footprint);
+        if (fp_cost < 0.0 || fp_cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+          best.collision_free = false;
+        }
+
+        auto segment = handler.transformPath(actual);
+        if (handler.latchedCapture()) {
+          best.latched_capture = true;
+        }
+        const auto cmd = optimizer.evalControl(actual, speed, segment, goal_msg, nullptr);
+        double vx = cmd.twist.linear.x;
+        double wz = cmd.twist.angular.z;
+        const double max_wz = std::abs(vx) / 0.558;
+        if (std::abs(wz) > max_wz) {
+          wz = std::copysign(max_wz, wz);
+        }
+
+        const double dt = 0.05;
+        const double mid_yaw = cur_yaw + 0.5 * wz * dt;
+        actual.pose.position.x += vx * std::cos(mid_yaw) * dt;
+        actual.pose.position.y += vx * std::sin(mid_yaw) * dt;
+        const double next_yaw = controller_test::wrap(cur_yaw + wz * dt);
+        actual.pose.orientation.z = std::sin(next_yaw / 2.0);
+        actual.pose.orientation.w = std::cos(next_yaw / 2.0);
+        speed.linear.x = vx;
+        speed.angular.z = wz;
+
+        const auto tf = to_target_frame(actual);
+        best.x_lon = tf[0];
+        best.e_right = tf[1];
+        best.dth_rad = tf[2];
+        best.xy_err = std::hypot(tf[0], tf[1]);
+        best.ticks = tick + 1;
+
+        if (handler.inversion() == 0u &&
+          (tf[0] * scenario.gears.back() >= 0.0 ||
+          (tick >= 20 && best.xy_err < 0.10 && std::abs(best.dth_rad) < 0.25 &&
+          std::abs(vx) < 0.02 && std::abs(wz) < 0.08)))
+        {
+          break;
+        }
+      }
+      const double final_yaw = tf2::getYaw(actual.pose.orientation);
+      const double final_fp_cost = checker.footprintCostAtPose(
+        actual.pose.position.x, actual.pose.position.y, final_yaw, footprint);
+      if (final_fp_cost < 0.0 || final_fp_cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+        best.collision_free = false;
+      }
+      printf(
+        "[CLOSED_LOOP][%s] %-22s / %-10s -> ticks=%3zu x_lon=%+6.1fmm e_right=%+6.1fmm "
+        "dth=%+5.2fdeg xy=%5.1fmm coll_free=%d latched=%d\n",
+        enable_capture ? "CAPTURE " : "BASELINE",
+        label.c_str(), start_key.c_str(), best.ticks,
+        best.x_lon * 1000.0, best.e_right * 1000.0, best.dth_rad * 180.0 / M_PI,
+        best.xy_err * 1000.0, best.collision_free ? 1 : 0, best.latched_capture ? 1 : 0);
+      return best;
+    };
+
+  auto run_closed_loop = [&](
+    const std::string & id, const std::string & start_key, bool enable_capture)
+    {
+      return run_scenario_closed_loop(atlas->at(id), id, start_key, enable_capture);
+    };
+
+  constexpr double kMaxYawErrRad = 5.0 * M_PI / 180.0;
+
+  // 1. Nominal starts: cross-track offset is 0 (< 25 mm deadband), so terminal capture
+  // must not latch and must be bit-for-bit identical to baseline.
+  for (const auto & [id, key] : std::vector<std::pair<std::string, std::string>>{
+      {"curved_capture", "nominal"},
+      {"wall_capture", "nominal"},
+      {"early_lateral_capture", "nominal"},
+      {"local_hazard_capture", "nominal"},
+      {"short_cusp_exit", "nominal"}})
+  {
+    SCOPED_TRACE(id + "/" + key);
+    const auto base = run_closed_loop(id, key, false);
+    const auto cap = run_closed_loop(id, key, true);
+    EXPECT_FALSE(cap.latched_capture);
+    EXPECT_TRUE(cap.collision_free);
+    EXPECT_LT(std::abs(cap.e_right), 0.010);
+    EXPECT_LT(std::abs(cap.dth_rad), kMaxYawErrRad);
+    EXPECT_DOUBLE_EQ(cap.e_right, base.e_right);
+    EXPECT_DOUBLE_EQ(cap.dth_rad, base.dth_rad);
+  }
+
+  // 2. Displaced starts: baseline fails to close lateral offset (|e_right| > 35 mm, P1),
+  // whereas terminal capture latches a collision-free 1-gear curve and achieves
+  // |e_right| < 25.0 mm and |dth| < 5.0 deg with zero footprint collisions (P2 & P3).
+  for (const auto & [id, key] : std::vector<std::pair<std::string, std::string>>{
+      {"curved_capture", "inside"},
+      {"curved_capture", "outside"},
+      {"wall_capture", "inside"},
+      {"early_lateral_capture", "offset"},
+      {"local_hazard_capture", "displaced"}})
+  {
+    SCOPED_TRACE(id + "/" + key);
+    const auto base = run_closed_loop(id, key, false);
+    const auto cap = run_closed_loop(id, key, true);
+    EXPECT_GT(std::abs(base.e_right), 0.035);
+    EXPECT_TRUE(cap.latched_capture);
+    EXPECT_TRUE(cap.collision_free);
+    EXPECT_LT(std::abs(cap.e_right), 0.025);
+    EXPECT_LT(std::abs(cap.dth_rad), kMaxYawErrRad);
+  }
+
+  // 3. Infeasible 1-gear capture (short_cusp_exit / stress requires R = 0.118 m < 0.561 m):
+  // terminal capture must reject the infeasible 1-gear curve and leave behavior unchanged.
+  {
+    const auto base = run_closed_loop("short_cusp_exit", "stress", false);
+    const auto cap = run_closed_loop("short_cusp_exit", "stress", true);
+    EXPECT_FALSE(cap.latched_capture);
+    EXPECT_DOUBLE_EQ(cap.e_right, base.e_right);
+    EXPECT_DOUBLE_EQ(cap.dth_rad, base.dth_rad);
+  }
+
+  // 4. Obstacle-blocked capture rejection, dynamic-obstacle unlatching & nominal restore,
+  // drift-triggered replanning, and dynamic parameter disable verification:
+  {
+    Scenario blocked = atlas->at("early_lateral_capture");
+    // Place an obstacle box right across the S-curve capture corridor
+    blocked.obstacles.push_back(controller_test::Box{-0.55, -0.05, -0.35, 0.12, 0.15});
+    grid(blocked);
+    auto parent = node(true, 500, 0.325, 7, true);
+    mppi::ParametersHandler params(parent);
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    handler.initialize(parent, "FollowPath", cm, buffer, &params);
+    params.start();
+    handler.setPath(blocked.message());
+    auto blocked_seg = handler.transformPath(pose(blocked.starts.at("offset")));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(blocked_seg.poses.empty());
+    EXPECT_NEAR(blocked_seg.poses.front().pose.position.y, 0.0, 1e-6);
+
+    // Now test dynamic obstacle appearing after latching on early_lateral_capture:
+    const auto & clean = atlas->at("early_lateral_capture");
+    grid(clean);
+    handler.setPath(clean.message());
+    auto latched_seg = handler.transformPath(pose(clean.starts.at("offset")));
+    EXPECT_TRUE(handler.latchedCapture());
+    ASSERT_FALSE(latched_seg.poses.empty());
+    EXPECT_LT(latched_seg.poses.front().pose.position.y, -0.05);
+
+    // Paint an obstacle on the latched capture path and verify unlatching + nominal restore
+    grid(blocked);
+    auto restored_seg = handler.transformPath(pose(clean.starts.at("offset")));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(restored_seg.poses.empty());
+    EXPECT_NEAR(restored_seg.poses.front().pose.position.y, 0.0, 1e-6);
+
+    // Test drift-triggered replanning when displaced beyond terminal_capture_replan_drift_:
+    grid(clean);
+    handler.setPath(clean.message());
+    auto first_cap = handler.transformPath(pose(clean.starts.at("offset")));
+    EXPECT_TRUE(handler.latchedCapture());
+    ASSERT_FALSE(first_cap.poses.empty());
+    EXPECT_LT(first_cap.poses.front().pose.position.y, -0.05);
+
+    auto drifted_cap = handler.transformPath(pose({-0.75, 0.11, 0.0}));
+    EXPECT_TRUE(handler.latchedCapture());
+    ASSERT_FALSE(drifted_cap.poses.empty());
+    EXPECT_GT(drifted_cap.poses.front().pose.position.y, 0.05);
+
+    // Test dynamic disabling of FollowPath.terminal_capture_enabled while latched:
+    parent->set_parameter(rclcpp::Parameter("FollowPath.terminal_capture_enabled", false));
+    auto disabled_seg = handler.transformPath(pose({-0.75, 0.11, 0.0}));
+    EXPECT_FALSE(handler.latchedCapture());
+    ASSERT_FALSE(disabled_seg.poses.empty());
+    EXPECT_NEAR(disabled_seg.poses.front().pose.position.y, 0.0, 1e-6);
+  }
+
+  // 5. Complete M8 3-stroke cusp sequence with terminal_capture_enabled = true:
+  {
+    const auto & scenario = atlas->at("m8_full");
+    grid(scenario);
+    auto parent = node(true, 64, 0.558, 6, true);
+    mppi::ParametersHandler params(parent);
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    handler.initialize(parent, "FollowPath", cm, buffer, &params);
+    handler.setPath(scenario.message());
+    std::vector<size_t> handoffs;
+    for (size_t i = 0; i + 1 < scenario.path.size(); ++i) {
+      const bool was_reverse = handler.reverse();
+      auto segment = handler.transformPath(pose(scenario.path[i]));
+      ASSERT_GE(segment.poses.size(), 2u);
+      if (handler.reverse() != was_reverse) {
+        handoffs.push_back(i);
+      }
+      EXPECT_FALSE(handler.latchedCapture());
+    }
+    EXPECT_EQ(handoffs, (std::vector<size_t>{7, 24}));
+    EXPECT_FALSE(handler.reverse());
+    EXPECT_EQ(handler.inversion(), 0u);
+  }
+
+  // 6. Reverse-gear closed-loop terminal capture verification:
+  {
+    const auto rev_scenario = atlas->at("early_lateral_capture").variant(false, true);
+    const auto base_rev = run_scenario_closed_loop(
+      rev_scenario, "early_lateral_rev", "offset", false);
+    const auto cap_rev = run_scenario_closed_loop(
+      rev_scenario, "early_lateral_rev", "offset", true);
+    EXPECT_GT(std::abs(base_rev.e_right), 0.035);
+    EXPECT_TRUE(cap_rev.latched_capture);
+    EXPECT_TRUE(cap_rev.collision_free);
+    EXPECT_LT(std::abs(cap_rev.e_right), 0.025);
+    EXPECT_LT(std::abs(cap_rev.dth_rad), kMaxYawErrRad);
+  }
 }
 }  // namespace
 

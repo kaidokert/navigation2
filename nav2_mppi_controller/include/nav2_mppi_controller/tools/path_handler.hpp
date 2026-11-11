@@ -237,6 +237,28 @@ protected:
    */
   void updateCurrentSegmentDirection();
 
+  /**
+   * @brief Solve a 1-gear C/CC capture curve of radius R >= terminal_capture_min_turning_r_
+   * from the robot's current pose to the terminal goal pose, verified collision-free
+   * against the local costmap footprint.
+   * @param robot_pose Current robot pose in plan frame
+   * @param goal_pose Terminal goal pose in plan frame
+   * @param capture_plan Output sampled capture path in plan frame
+   * @return true if a feasible, collision-free 1-gear capture curve was found
+   */
+  bool solveTerminalCapturePath(
+    const geometry_msgs::msg::PoseStamped & robot_pose,
+    const geometry_msgs::msg::PoseStamped & goal_pose,
+    nav_msgs::msg::Path & capture_plan) const;
+
+  /**
+   * @brief Check if a plan-frame pose is footprint-collision-free in the costmap
+   * @param plan_pose Pose in plan frame
+   * @return true if in bounds and footprint clears lethal obstacles
+   */
+  bool isFootprintCollisionFreeInPlanFrame(
+    const geometry_msgs::msg::PoseStamped & plan_pose) const;
+
   std::string name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -303,6 +325,15 @@ protected:
   bool terminal_stub_aligned_{false};
   bool two_pose_post_cusp_segment_{false};
   bool current_segment_is_reverse_{false};
+  bool terminal_capture_enabled_{true};
+  double terminal_capture_max_distance_{1.00};
+  double terminal_capture_min_distance_{0.22};
+  double terminal_capture_min_cross_track_{0.025};
+  double terminal_capture_replan_drift_{0.045};
+  double terminal_capture_min_turning_r_{0.561};
+  double terminal_capture_point_spacing_{0.03};
+  bool has_latched_terminal_capture_{false};
+  nav_msgs::msg::Path nominal_terminal_plan_;
   // Structural length of the active segment, set at handoff time.
   // Thread safety: follows the same single-threaded controller model as
   // global_plan_, global_plan_up_to_inversion_, and inversion_locale_ —
