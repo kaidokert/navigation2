@@ -267,6 +267,7 @@ protected:
   int _max_on_approach_iterations;
   int _terminal_checking_interval;
   double _max_planning_time;
+  float _lookup_table_size{0.0f};
   float _tolerance;
   unsigned int _x_size;
   unsigned int _y_size;

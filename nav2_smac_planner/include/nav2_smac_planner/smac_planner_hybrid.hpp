@@ -104,6 +104,7 @@ protected:
   rclcpp::Clock::SharedPtr _clock;
   rclcpp::Logger _logger{rclcpp::get_logger("SmacPlannerHybrid")};
   nav2_costmap_2d::Costmap2D * _costmap;
+  nav2_costmap_2d::Costmap2D * _downsampled_costmap{nullptr};
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> _costmap_ros;
   std::unique_ptr<CostmapDownsampler> _costmap_downsampler;
   double _configured_resolution{0.0};
@@ -124,6 +125,8 @@ protected:
   double _max_planning_time;
   double _lookup_table_size;
   double _minimum_turning_radius_global_coords;
+  double _analytic_expansion_max_length_m{3.0};
+  double _gear_change_penalty_m{0.0};
   bool _debug_visualizations;
   bool _publish_analytic_expansion_trace{false};
   uint64_t _trace_plan_id{0};

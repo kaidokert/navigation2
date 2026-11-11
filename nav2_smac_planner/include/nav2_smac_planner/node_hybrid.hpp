@@ -130,9 +130,11 @@ struct HybridMotionTable
   float non_straight_penalty;
   float cost_penalty;
   float reverse_penalty;
+  float gear_change_penalty{0.0f};
   float travel_distance_reward;
   bool downsample_obstacle_heuristic;
   bool use_quadratic_cost_penalty;
+  bool allow_primitive_interpolation{false};
   ompl::base::StateSpacePtr state_space;
   std::vector<std::vector<double>> delta_xs;
   std::vector<std::vector<double>> delta_ys;
@@ -259,11 +261,21 @@ public:
     return _motion_primitive_index;
   }
 
+  inline const unsigned int & getMotionPrimitiveIndex() const
+  {
+    return _motion_primitive_index;
+  }
+
   /**
    * @brief Gets the motion primitive turning direction used to achieve node in search
    * @return reference to motion primitive turning direction
    */
   inline TurnDirection & getTurnDirection()
+  {
+    return _turn_dir;
+  }
+
+  inline const TurnDirection & getTurnDirection() const
   {
     return _turn_dir;
   }

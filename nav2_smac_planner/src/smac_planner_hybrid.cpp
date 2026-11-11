@@ -97,7 +97,6 @@ void SmacPlannerHybrid::configure(
   RCLCPP_INFO(_logger, "Configuring %s of type SmacPlannerHybrid", name.c_str());
 
   int angle_quantizations;
-  double analytic_expansion_max_length_m;
   bool smooth_path;
 
   // General planner params
@@ -147,6 +146,13 @@ void SmacPlannerHybrid::configure(
     node, name + ".reverse_penalty", rclcpp::ParameterValue(2.0));
   node->get_parameter(name + ".reverse_penalty", _search_info.reverse_penalty);
   nav2_util::declare_parameter_if_not_declared(
+    node, name + ".gear_change_penalty", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".gear_change_penalty", _gear_change_penalty_m);
+  nav2_util::declare_parameter_if_not_declared(
+    node, name + ".analytic_gear_change_deferrals", rclcpp::ParameterValue(0));
+  node->get_parameter(
+    name + ".analytic_gear_change_deferrals", _search_info.analytic_gear_change_deferrals);
+  nav2_util::declare_parameter_if_not_declared(
     node, name + ".change_penalty", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".change_penalty", _search_info.change_penalty);
   nav2_util::declare_parameter_if_not_declared(
@@ -181,9 +187,7 @@ void SmacPlannerHybrid::configure(
 
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".analytic_expansion_max_length", rclcpp::ParameterValue(3.0));
-  node->get_parameter(name + ".analytic_expansion_max_length", analytic_expansion_max_length_m);
-  _search_info.analytic_expansion_max_length =
-    analytic_expansion_max_length_m / _costmap->getResolution();
+  node->get_parameter(name + ".analytic_expansion_max_length", _analytic_expansion_max_length_m);
 
   nav2_util::declare_parameter_if_not_declared(
     node, name + ".max_planning_time", rclcpp::ParameterValue(5.0));
@@ -238,6 +242,10 @@ void SmacPlannerHybrid::configure(
   }
   _search_info.minimum_turning_radius =
     _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+  _search_info.gear_change_penalty = static_cast<float>(
+    _gear_change_penalty_m / (_costmap->getResolution() * _downsampling_factor));
+  _search_info.analytic_expansion_max_length = static_cast<float>(
+    _analytic_expansion_max_length_m / (_costmap->getResolution() * _downsampling_factor));
   _lookup_table_dim =
     static_cast<float>(_lookup_table_size) /
     static_cast<float>(_costmap->getResolution() * _downsampling_factor);
@@ -382,6 +390,7 @@ void SmacPlannerHybrid::cleanup()
     _costmap_downsampler->on_cleanup();
     _costmap_downsampler.reset();
   }
+  _downsampled_costmap = nullptr;
   _raw_plan_publisher.reset();
   if (_debug_visualizations) {
     _expansions_publisher.reset();
@@ -463,7 +472,10 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   nav2_costmap_2d::Costmap2D * costmap = _costmap;
   if (_costmap_downsampler) {
     costmap = _costmap_downsampler->downsample(_downsampling_factor);
+    _downsampled_costmap = costmap;
     _collision_checker.setCostmap(costmap);
+  } else {
+    _downsampled_costmap = nullptr;
   }
 
   // Set collision checker and costmap information
@@ -774,6 +786,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".reverse_penalty") {
         reinit_a_star = true;
         _search_info.reverse_penalty = static_cast<float>(parameter.as_double());
+      } else if (name == _name + ".gear_change_penalty") {
+        reinit_a_star = true;
+        _gear_change_penalty_m = parameter.as_double();
       } else if (name == _name + ".change_penalty") {
         reinit_a_star = true;
         _search_info.change_penalty = static_cast<float>(parameter.as_double());
@@ -783,13 +798,15 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".cost_penalty") {
         reinit_a_star = true;
         _search_info.cost_penalty = static_cast<float>(parameter.as_double());
+      } else if (name == _name + ".retrospective_penalty") {
+        reinit_a_star = true;
+        _search_info.retrospective_penalty = static_cast<float>(parameter.as_double());
       } else if (name == _name + ".analytic_expansion_ratio") {
         reinit_a_star = true;
         _search_info.analytic_expansion_ratio = static_cast<float>(parameter.as_double());
       } else if (name == _name + ".analytic_expansion_max_length") {
         reinit_a_star = true;
-        _search_info.analytic_expansion_max_length =
-          static_cast<float>(parameter.as_double()) / _costmap->getResolution();
+        _analytic_expansion_max_length_m = parameter.as_double();
       } else if (name == _name + ".analytic_expansion_max_cost") {
         reinit_a_star = true;
         _search_info.analytic_expansion_max_cost = static_cast<float>(parameter.as_double());
@@ -805,6 +822,7 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == _name + ".downsample_costmap") {
         reinit_downsampler = true;
+        reinit_a_star = true;
         _downsample_costmap = parameter.as_bool();
       } else if (name == _name + ".allow_unknown") {
         reinit_a_star = true;
@@ -824,12 +842,18 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".analytic_expansion_max_cost_override") {
         _search_info.analytic_expansion_max_cost_override = parameter.as_bool();
         reinit_a_star = true;
+      } else if (name == _name + ".use_quadratic_cost_penalty") {
+        _search_info.use_quadratic_cost_penalty = parameter.as_bool();
+        reinit_a_star = true;
       }
     } else if (type == ParameterType::PARAMETER_INTEGER) {
       if (name == _name + ".downsampling_factor") {
         reinit_a_star = true;
         reinit_downsampler = true;
         _downsampling_factor = parameter.as_int();
+      } else if (name == _name + ".analytic_gear_change_deferrals") {
+        reinit_a_star = true;
+        _search_info.analytic_gear_change_deferrals = static_cast<int>(parameter.as_int());
       } else if (name == _name + ".max_iterations") {
         reinit_a_star = true;
         _max_iterations = parameter.as_int();
@@ -881,6 +905,10 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
     }
     _search_info.minimum_turning_radius =
       _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+    _search_info.gear_change_penalty = static_cast<float>(
+      _gear_change_penalty_m / (_costmap->getResolution() * _downsampling_factor));
+    _search_info.analytic_expansion_max_length = static_cast<float>(
+      _analytic_expansion_max_length_m / (_costmap->getResolution() * _downsampling_factor));
     _lookup_table_dim =
       static_cast<float>(_lookup_table_size) /
       static_cast<float>(_costmap->getResolution() * _downsampling_factor);
@@ -914,11 +942,27 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
 
     // Re-Initialize costmap downsampler
     if (reinit_downsampler) {
+      if (_costmap_downsampler) {
+        if ((_downsampled_costmap != nullptr &&
+          NodeHybrid::obstacle_heuristic_costmap == _downsampled_costmap) ||
+          (_collision_checker.getCostmap() != _costmap &&
+          NodeHybrid::obstacle_heuristic_costmap == _collision_checker.getCostmap()))
+        {
+          NodeHybrid::obstacle_heuristic_costmap = nullptr;
+        }
+        _costmap_downsampler->on_cleanup();
+        _costmap_downsampler.reset();
+        _downsampled_costmap = nullptr;
+      }
+      _collision_checker.setCostmap(_costmap);
       if (_downsample_costmap && _downsampling_factor > 1) {
         std::string topic_name = "downsampled_costmap";
         _costmap_downsampler = std::make_unique<CostmapDownsampler>();
         _costmap_downsampler->on_configure(
           node, _global_frame, topic_name, _costmap, _downsampling_factor);
+        if (_raw_plan_publisher && _raw_plan_publisher->is_activated()) {
+          _costmap_downsampler->on_activate();
+        }
       }
     }
 

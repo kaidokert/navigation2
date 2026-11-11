@@ -38,6 +38,10 @@ struct SearchInfo
   float non_straight_penalty{1.05};
   float change_penalty{0.0};
   float reverse_penalty{2.0};
+  // Fixed cost per direction reversal, in search cells. 0 disables all gear-change behaviour.
+  float gear_change_penalty{0.0};
+  // Valid analytic shots containing a gear change to refuse per plan before accepting one.
+  int analytic_gear_change_deferrals{0};
   float cost_penalty{2.0};
   float retrospective_penalty{0.015};
   float rotation_penalty{5.0};

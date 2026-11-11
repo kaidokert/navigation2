@@ -872,3 +872,740 @@ TEST(AStarTest, timing_supports_stderr_sockets_without_blocking_or_sigpipe)
 }
 
 #endif  // __linux__
+
+#include "ompl/base/spaces/DubinsStateSpace.h"
+#include "ompl/base/spaces/ReedsSheppStateSpace.h"
+
+TEST(AStarTest, analytic_handoff_gear_seeding_and_single_gear_fallback)
+{
+  using Node = nav2_smac_planner::NodeHybrid;
+  using TurnDir = nav2_smac_planner::TurnDirection;
+  auto lnode = std::make_shared<rclcpp_lifecycle::LifecycleNode>("handoff_gear_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("handoff_gear_map");
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto * costmap = costmap_ros->getCostmap();
+  costmap->resizeMap(100, 100, 0.1, 0.0, 0.0);
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+
+  const unsigned int size_theta = 72;
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, size_theta, lnode);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 6.0f;
+  info.non_straight_penalty = 1.05f;
+  info.change_penalty = 0.0f;
+  info.reverse_penalty = 1.0f;
+  info.cost_penalty = 2.0f;
+  info.analytic_expansion_ratio = 3.5f;
+  info.analytic_expansion_max_length = 500.0f;
+  info.analytic_expansion_max_cost = 200.0f;
+  info.gear_change_penalty = 15.0f;
+  info.analytic_gear_change_deferrals = 2;
+
+  unsigned int size_x = 100u;
+  unsigned int size_y = 100u;
+  unsigned int size_th = size_theta;
+  Node::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
+  Node::precomputeDistanceHeuristic(
+    25.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
+  Node::resetObstacleHeuristic(costmap_ros, 50u, 50u, 35u, 50u, costmap);
+  EXPECT_FLOAT_EQ(Node::motion_table.gear_change_penalty, 15.0f);
+
+  // Verify NodeHybrid::getTraversalCost does not charge gear_change_penalty from UNKNOWN turn_dir
+  // or same-gear REVERSE -> REVERSE transition, but DOES charge gear_change_penalty on a
+  // FORWARD -> REVERSE transition.
+  Node unknown_parent(Node::getIndex(50u, 50u, 0u));
+  unknown_parent.setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  unknown_parent.setMotionPrimitiveIndex(0u, TurnDir::UNKNOWN);
+  ASSERT_TRUE(unknown_parent.isNodeValid(false, &checker));
+  Node rev_parent(Node::getIndex(50u, 50u, 0u));
+  rev_parent.setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  rev_parent.setMotionPrimitiveIndex(3u, TurnDir::REVERSE);
+  ASSERT_TRUE(rev_parent.isNodeValid(false, &checker));
+  Node fwd_child(Node::getIndex(51u, 50u, 0u));
+  fwd_child.setPose(Node::Coordinates(51.0f, 50.0f, 0.0f));
+  fwd_child.setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+  ASSERT_TRUE(fwd_child.isNodeValid(false, &checker));
+  Node rev_child(Node::getIndex(49u, 50u, 0u));
+  rev_child.setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+  rev_child.setMotionPrimitiveIndex(3u, TurnDir::REVERSE);
+  ASSERT_TRUE(rev_child.isNodeValid(false, &checker));
+
+  const float unknown_to_rev = unknown_parent.getTraversalCost(&rev_child);
+  const float rev_to_rev = rev_parent.getTraversalCost(&rev_child);
+  const float fwd_to_rev = fwd_child.getTraversalCost(&rev_child);
+  EXPECT_NEAR(unknown_to_rev, rev_to_rev, 1e-4f);
+  EXPECT_NEAR(fwd_to_rev - rev_to_rev, info.gear_change_penalty, 1e-4f);
+  EXPECT_NEAR(fwd_to_rev - unknown_to_rev, info.gear_change_penalty, 1e-4f);
+
+  nav2_smac_planner::AStarAlgorithm<Node>::Graph graph;
+  const uint64_t max_index =
+    static_cast<uint64_t>(size_x) * static_cast<uint64_t>(size_y) * static_cast<uint64_t>(size_th);
+  auto getter = [&graph, max_index](const uint64_t & index, Node * & node_rtn) -> bool {
+      if (index >= max_index) {
+        return false;
+      }
+      auto it = graph.find(index);
+      if (it == graph.end()) {
+        node_rtn = &(graph.emplace(index, Node(index)).first->second);
+        return true;
+      }
+      node_rtn = &(it->second);
+      return true;
+    };
+
+  nav2_smac_planner::AnalyticExpansion<Node> expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  expansion.setCollisionChecker(&checker);
+
+  std::vector<std::string> trace_records;
+  expansion.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+
+  auto has_record_with = [](const std::vector<std::string> & recs, const std::string & substr) {
+      for (const auto & r : recs) {
+        if (r.find(substr) != std::string::npos) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+  Node * goal_node = nullptr;
+  getter(Node::getIndex(35u, 50u, 0u), goal_node);
+  goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+
+  // Case A: Start node (TurnDirection::UNKNOWN -> initial_gear = 0) to pure-reverse goal.
+  // Must count 0 gear changes and accept immediately without deferral.
+  Node * start_node = nullptr;
+  getter(Node::getIndex(50u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  int iterations = 0;
+  int best_cost = 1000;
+  trace_records.clear();
+  expansion.setTraceRequestId(1);
+  Node * res_start = expansion.tryAnalyticExpansion(
+    start_node, goal_node, getter, iterations, best_cost);
+  ASSERT_NE(res_start, nullptr);
+  EXPECT_TRUE(has_record_with(trace_records, "\"gear_changes\":0"));
+  EXPECT_TRUE(has_record_with(trace_records, "\"selected_by\":\"gear_aware_min_score\""));
+
+  // Case B: Forward A* node (TurnDirection::FORWARD -> initial_gear = +1, parent != nullptr)
+  // on open map. The direct reverse shot has 1 handoff gear change (+1 -> -1) and lower score,
+  // while the forward_only Dubins loop has 0 gear changes (+1 -> +1) and higher score.
+  // On deferral 1, tryAnalyticExpansion must fall back to best_single_gear (single_gear_forward).
+  graph.clear();
+  getter(Node::getIndex(49u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(35u, 50u, 0u), goal_node);
+  goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  Node * fwd_node = nullptr;
+  getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+  fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+  fwd_node->parent = start_node;
+
+  trace_records.clear();
+  expansion.setTraceRequestId(2);
+  iterations = 0;
+  best_cost = 1000;
+  Node * res_fallback = expansion.tryAnalyticExpansion(
+    fwd_node, goal_node, getter, iterations, best_cost);
+  ASSERT_NE(res_fallback, nullptr);
+  EXPECT_TRUE(
+    has_record_with(trace_records, "\"selected_by\":\"gear_aware_single_gear_fallback\""));
+  EXPECT_TRUE(has_record_with(trace_records, "\"kind\":\"single_gear_forward\""));
+  // Verify the selected path steps forward from fwd_node (0 gear changes).
+  std::vector<Node::Coordinates> chain;
+  for (Node * p = res_fallback; p != nullptr && p != start_node; p = p->parent) {
+    chain.push_back(p->pose);
+  }
+  std::reverse(chain.begin(), chain.end());
+  ASSERT_GE(chain.size(), 4u);
+  for (size_t i = 1; i < chain.size(); ++i) {
+    const float dx = chain[i].x - chain[i - 1].x;
+    const float dy = chain[i].y - chain[i - 1].y;
+    if (std::hypot(dx, dy) > 1e-3f) {
+      const float h = Node::motion_table.getAngleFromBin(chain[i - 1].theta);
+      EXPECT_GE(dx * std::cos(h) + dy * std::sin(h), -1e-3f)
+        << "Fallback single-gear forward path reversed at step " << i;
+    }
+  }
+
+  // Case C: Block all forward motion at x in [51, 54] so no 0-gear-change path exists.
+  // Now deferral must return nullptr twice (deferrals_used: 0->1, 1->2) and accept on call 3.
+  for (unsigned int x = 51u; x <= 54u; ++x) {
+    for (unsigned int y = 10u; y <= 90u; ++y) {
+      costmap->setCost(x, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
+  }
+  expansion.setTraceRequestId(3);
+
+  for (int attempt = 1; attempt <= 2; ++attempt) {
+    graph.clear();
+    getter(Node::getIndex(49u, 50u, 0u), start_node);
+    start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(35u, 50u, 0u), goal_node);
+    goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+    fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+    fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+    fwd_node->parent = start_node;
+    trace_records.clear();
+    iterations = 0;
+    best_cost = 1000;
+    Node * deferred_res = expansion.tryAnalyticExpansion(
+      fwd_node, goal_node, getter, iterations, best_cost);
+    EXPECT_EQ(deferred_res, nullptr) << "Attempt " << attempt << " should have been deferred";
+    EXPECT_TRUE(has_record_with(trace_records, "\"gear_changes\":1"));
+    EXPECT_FALSE(has_record_with(trace_records, "\"event\":\"selection\""));
+  }
+
+  graph.clear();
+  getter(Node::getIndex(49u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(35u, 50u, 0u), goal_node);
+  goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+  fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+  fwd_node->parent = start_node;
+  trace_records.clear();
+  iterations = 0;
+  best_cost = 1000;
+  Node * accepted_res = expansion.tryAnalyticExpansion(
+    fwd_node, goal_node, getter, iterations, best_cost);
+  ASSERT_NE(accepted_res, nullptr) << "Attempt 3 after exhausting 2 deferrals must succeed";
+  EXPECT_TRUE(has_record_with(trace_records, "\"selected_by\":\"gear_aware_min_score\""));
+
+  // Case D: Consecutive plans on the same AnalyticExpansion instance with tracing disabled
+  // (setTraceCallback and setTraceRequestId never called).
+  // Exhaust the 2-deferral budget on Plan 1, then start Plan 2 from a root node
+  // (parent == nullptr) and verify that current_node->parent == nullptr resets
+  // _gear_change_deferrals_used = 0 so Plan 2 receives a fresh 2-deferral budget.
+  nav2_smac_planner::AnalyticExpansion<Node> untraced_expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  untraced_expansion.setCollisionChecker(&checker);
+
+  for (int plan_idx = 1; plan_idx <= 2; ++plan_idx) {
+    if (plan_idx == 2) {
+      graph.clear();
+      Node * plan2_root = nullptr;
+      Node * far_goal = nullptr;
+      getter(Node::getIndex(10u, 10u, 0u), plan2_root);
+      plan2_root->setPose(Node::Coordinates(10.0f, 10.0f, 0.0f));
+      plan2_root->parent = nullptr;
+      getter(Node::getIndex(90u, 90u, 0u), far_goal);
+      far_goal->setPose(Node::Coordinates(90.0f, 90.0f, 0.0f));
+      iterations = 1;
+      best_cost = 1000;
+      EXPECT_EQ(
+        untraced_expansion.tryAnalyticExpansion(
+          plan2_root, far_goal, getter, iterations, best_cost),
+        nullptr);
+    }
+
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+      graph.clear();
+      getter(Node::getIndex(49u, 50u, 0u), start_node);
+      start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+      getter(Node::getIndex(35u, 50u, 0u), goal_node);
+      goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+      getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+      fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+      fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+      fwd_node->parent = start_node;
+      iterations = 0;
+      best_cost = 1000;
+      Node * untraced_deferred = untraced_expansion.tryAnalyticExpansion(
+        fwd_node, goal_node, getter, iterations, best_cost);
+      EXPECT_EQ(untraced_deferred, nullptr)
+        << "Untraced plan " << plan_idx << " attempt " << attempt << " must be deferred";
+    }
+
+    graph.clear();
+    getter(Node::getIndex(49u, 50u, 0u), start_node);
+    start_node->setPose(Node::Coordinates(49.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(35u, 50u, 0u), goal_node);
+    goal_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+    getter(Node::getIndex(50u, 50u, 0u), fwd_node);
+    fwd_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+    fwd_node->setMotionPrimitiveIndex(0u, TurnDir::FORWARD);
+    fwd_node->parent = start_node;
+    iterations = 0;
+    best_cost = 1000;
+    Node * untraced_accepted = untraced_expansion.tryAnalyticExpansion(
+      fwd_node, goal_node, getter, iterations, best_cost);
+    ASSERT_NE(untraced_accepted, nullptr)
+      << "Untraced plan " << plan_idx << " attempt 3 after 2 deferrals must succeed";
+  }
+
+  Node::destroyStaticAssets();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
+
+TEST(AStarTest, analytic_reverse_only_dubins_and_strict_tie_break_and_quadratic_cost)
+{
+  using Node = nav2_smac_planner::NodeHybrid;
+  auto lnode = std::make_shared<rclcpp_lifecycle::LifecycleNode>("rev_dubins_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("rev_dubins_map");
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto * costmap = costmap_ros->getCostmap();
+  costmap->resizeMap(100, 100, 0.1, 0.0, 0.0);
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+
+  const unsigned int size_theta = 72;
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, size_theta, lnode);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 6.0f;
+  info.non_straight_penalty = 1.0f;
+  info.change_penalty = 0.0f;
+  info.reverse_penalty = 1.0f;
+  info.cost_penalty = 4.0f;
+  info.analytic_expansion_ratio = 3.5f;
+  info.analytic_expansion_max_length = 500.0f;
+  info.analytic_expansion_max_cost = 250.0f;
+  info.gear_change_penalty = 100.0f;
+  info.analytic_gear_change_deferrals = 0;
+
+  unsigned int size_x = 100u;
+  unsigned int size_y = 100u;
+  unsigned int size_th = size_theta;
+  Node::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
+  Node::precomputeDistanceHeuristic(
+    25.0f, nav2_smac_planner::MotionModel::REEDS_SHEPP, size_theta, info);
+  Node::resetObstacleHeuristic(costmap_ros, 50u, 50u, 50u, 56u, costmap);
+
+  nav2_smac_planner::AStarAlgorithm<Node>::Graph graph;
+  const uint64_t max_index =
+    static_cast<uint64_t>(size_x) * static_cast<uint64_t>(size_y) * static_cast<uint64_t>(size_th);
+  auto getter = [&graph, max_index](const uint64_t & index, Node * & node_rtn) -> bool {
+      if (index >= max_index) {
+        return false;
+      }
+      auto it = graph.find(index);
+      if (it == graph.end()) {
+        node_rtn = &(graph.emplace(index, Node(index)).first->second);
+        return true;
+      }
+      node_rtn = &(it->second);
+      return true;
+    };
+
+  nav2_smac_planner::AnalyticExpansion<Node> expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  expansion.setCollisionChecker(&checker);
+
+  // 1. Direct test of getAnalyticPath(..., dubins_space, reverse_only = true vs false)
+  ompl::base::StateSpacePtr dubins_space =
+    std::make_shared<ompl::base::DubinsStateSpace>(info.minimum_turning_radius);
+  Node * start_node = nullptr;
+  Node * behind_goal = nullptr;
+  getter(Node::getIndex(50u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(38u, 50u, 0u), behind_goal);
+  behind_goal->setPose(Node::Coordinates(38.0f, 50.0f, 0.0f));
+
+  const auto fwd_dubins_nodes =
+    expansion.getAnalyticPath(start_node, behind_goal, getter, dubins_space, false);
+  graph.clear();
+  getter(Node::getIndex(50u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(38u, 50u, 0u), behind_goal);
+  behind_goal->setPose(Node::Coordinates(38.0f, 50.0f, 0.0f));
+  const auto rev_dubins_nodes =
+    expansion.getAnalyticPath(start_node, behind_goal, getter, dubins_space, true);
+
+  ASSERT_FALSE(fwd_dubins_nodes.empty());
+  ASSERT_FALSE(rev_dubins_nodes.empty());
+  EXPECT_GT(fwd_dubins_nodes.size(), rev_dubins_nodes.size());
+  float prev_x = 50.0f;
+  for (const auto & n : rev_dubins_nodes) {
+    EXPECT_LT(n.proposed_coords.x, prev_x);
+    prev_x = n.proposed_coords.x;
+  }
+
+  // 2. Strict '<' tie-breaking: from (50, 50, bin 0) to (50, 56, bin 36 = pi, dy = R = 6.0):
+  // Reeds-Shepp uses a 1-gear-change cusp (penalized by gear_change_penalty = 100.0),
+  // whereas forward_only Dubins and reverse_only Dubins are symmetric 0-gear-change curves
+  // with identical length and score. Strict '<' must keep single_gear_forward over reverse.
+  graph.clear();
+  Node * sym_start = nullptr;
+  Node * sym_goal = nullptr;
+  getter(Node::getIndex(50u, 50u, 0u), sym_start);
+  sym_start->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(50u, 56u, 36u), sym_goal);
+  sym_goal->setPose(Node::Coordinates(50.0f, 56.0f, 36.0f));
+
+  std::vector<std::string> trace_records;
+  expansion.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+  expansion.setTraceRequestId(10);
+  int iterations = 0;
+  int best_cost = 1000;
+  Node * sym_res = expansion.tryAnalyticExpansion(
+    sym_start, sym_goal, getter, iterations, best_cost);
+  ASSERT_NE(sym_res, nullptr);
+  // Check that the first step from sym_start moves forward (+x), not backward (-x).
+  std::vector<Node::Coordinates> sym_chain;
+  for (Node * p = sym_res; p != nullptr; p = p->parent) {
+    sym_chain.push_back(p->pose);
+  }
+  std::reverse(sym_chain.begin(), sym_chain.end());
+  ASSERT_GE(sym_chain.size(), 3u);
+  EXPECT_GT(sym_chain[1].x, sym_chain[0].x)
+    << "Strict '<' tie-break must select forward Dubins (+x), not reverse Dubins (-x)";
+
+  // 3. Quadratic vs linear cost penalty in gear_aware scoring:
+  // Fill uniform cost = 126 (normalized = 126/252 = 0.5) across the map.
+  // With cost_penalty = 4.0:
+  //   linear multiplier per step    = 1 + 4.0 * 0.5  = 3.0
+  //   quadratic multiplier per step = 1 + 4.0 * 0.25 = 2.0
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    static_cast<unsigned char>(126));
+
+  auto extract_first_score = [](const std::vector<std::string> & recs) -> double {
+      std::smatch m;
+      for (const auto & r : recs) {
+        if (r.find("\"event\":\"score\"") != std::string::npos &&
+          std::regex_search(r, m, std::regex("\"score\":([0-9.]+)")))
+        {
+          return std::stod(m[1].str());
+        }
+      }
+      return -1.0;
+    };
+
+  info.gear_change_penalty = 1.0f;
+  info.use_quadratic_cost_penalty = false;
+  nav2_smac_planner::AnalyticExpansion<Node> exp_lin(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  exp_lin.setCollisionChecker(&checker);
+  trace_records.clear();
+  exp_lin.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+  graph.clear();
+  getter(Node::getIndex(35u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(50u, 50u, 0u), behind_goal);
+  behind_goal->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  iterations = 0;
+  best_cost = 1000;
+  ASSERT_NE(
+    exp_lin.tryAnalyticExpansion(start_node, behind_goal, getter, iterations, best_cost),
+    nullptr);
+  const double score_linear = extract_first_score(trace_records);
+  ASSERT_GT(score_linear, 0.0);
+
+  info.use_quadratic_cost_penalty = true;
+  nav2_smac_planner::AnalyticExpansion<Node> exp_quad(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  exp_quad.setCollisionChecker(&checker);
+  trace_records.clear();
+  exp_quad.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+  graph.clear();
+  getter(Node::getIndex(35u, 50u, 0u), start_node);
+  start_node->setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  getter(Node::getIndex(50u, 50u, 0u), behind_goal);
+  behind_goal->setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  iterations = 0;
+  best_cost = 1000;
+  ASSERT_NE(
+    exp_quad.tryAnalyticExpansion(start_node, behind_goal, getter, iterations, best_cost),
+    nullptr);
+  const double score_quad = extract_first_score(trace_records);
+  ASSERT_GT(score_quad, 0.0);
+
+  EXPECT_NEAR(score_quad * 3.0, score_linear * 2.0, 1e-3)
+    << "score_linear=" << score_linear << " score_quad=" << score_quad;
+
+  // 4. Default-off (gear_change_penalty = 0.0, analytic_gear_change_deferrals = 0) per-sample
+  // cell_cost preservation: when two samples in getAnalyticPath map to the same NodeHybrid*
+  // (e.g. a node alias / shared bin) and the second sample's isNodeValid overwrites node->_cost,
+  // scoringFn must still sum each sample's saved cell_cost rather than the final overwritten
+  // node->getCost().
+  info.gear_change_penalty = 0.0f;
+  info.analytic_gear_change_deferrals = 0;
+  info.use_quadratic_cost_penalty = false;
+  nav2_smac_planner::AnalyticExpansion<Node> exp_default_off(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  exp_default_off.setCollisionChecker(&checker);
+  trace_records.clear();
+  exp_default_off.setTraceCallback([&trace_records](const std::string & rec) {
+      trace_records.push_back(rec);
+    });
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+  // Paint moderate cost (189 <= max_cost 250) on x in [36, 42] and free space (0) on x > 42,
+  // and alias all intermediate lookups to a single shared NodeHybrid instance so later
+  // free-space samples overwrite shared_node._cost = 0.
+  for (unsigned int x = 36u; x <= 42u; ++x) {
+    costmap->setCost(x, 50u, 189);
+  }
+  Node shared_node(Node::getIndex(36u, 50u, 0u));
+  Node start_35(Node::getIndex(35u, 50u, 0u));
+  start_35.setPose(Node::Coordinates(35.0f, 50.0f, 0.0f));
+  Node goal_50(Node::getIndex(50u, 50u, 0u));
+  goal_50.setPose(Node::Coordinates(50.0f, 50.0f, 0.0f));
+  auto aliasing_getter = [&shared_node](const uint64_t & /*index*/, Node * & node_rtn) -> bool {
+      node_rtn = &shared_node;
+      return true;
+    };
+  iterations = 0;
+  best_cost = 1000;
+  ASSERT_NE(
+    exp_default_off.tryAnalyticExpansion(
+      &start_35, &goal_50, aliasing_getter, iterations, best_cost),
+    nullptr);
+  EXPECT_FLOAT_EQ(shared_node.getCost(), 0.0f);
+  const double score_aliased = extract_first_score(trace_records);
+  // Pure distance score (if all samples had cost 0) is ~15.0; with 7 samples at cost 252
+  // (weight = 4.0), preserved cell_cost adds ~28.0 * step_distance (> 30.0 total).
+  EXPECT_GT(score_aliased, 30.0)
+    << "Default-off scoringFn must use per-sample saved cell_cost, not overwritten node->getCost()";
+
+  Node::destroyStaticAssets();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}
+
+TEST(AStarTest, analytic_path_rejects_negative_and_upper_bounds_and_wraps_two_pi)
+{
+  using Node = nav2_smac_planner::NodeHybrid;
+  auto lnode = std::make_shared<rclcpp_lifecycle::LifecycleNode>("bounds_wrap_test");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("bounds_wrap_map");
+  costmap_ros->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto * costmap = costmap_ros->getCostmap();
+  costmap->resizeMap(30, 30, 0.1, 0.0, 0.0);
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+
+  const unsigned int size_theta = 72;
+  nav2_smac_planner::GridCollisionChecker checker(costmap_ros, size_theta, lnode);
+  checker.setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+
+  nav2_smac_planner::SearchInfo info;
+  info.minimum_turning_radius = 8.0f;
+  info.analytic_expansion_max_length = 500.0f;
+  info.analytic_expansion_ratio = 3.5f;
+
+  unsigned int size_x = 30u;
+  unsigned int size_y = 30u;
+  unsigned int size_th = size_theta;
+  Node::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
+
+  nav2_smac_planner::AStarAlgorithm<Node>::Graph graph;
+  const uint64_t max_index =
+    static_cast<uint64_t>(size_x) * static_cast<uint64_t>(size_y) * static_cast<uint64_t>(size_th);
+  auto getter = [&graph, max_index](const uint64_t & index, Node * & node_rtn) -> bool {
+      if (index >= max_index) {
+        return false;
+      }
+      auto it = graph.find(index);
+      if (it == graph.end()) {
+        node_rtn = &(graph.emplace(index, Node(index)).first->second);
+        return true;
+      }
+      node_rtn = &(it->second);
+      return true;
+    };
+
+  nav2_smac_planner::AnalyticExpansion<Node> expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  expansion.setCollisionChecker(&checker);
+  ompl::base::StateSpacePtr dubins_space =
+    std::make_shared<ompl::base::DubinsStateSpace>(info.minimum_turning_radius);
+
+  // 1a. Negative x excursion in (-1.0, 0.0):
+  // Start at (0.3, 10.0, bin 27 = 135 deg) -> Goal at (0.3, 15.0, bin 9 = 45 deg).
+  // The arc dips to x ~ -0.45. Without reals[0] < 0.0, static_cast<unsigned int>(-0.45)
+  // truncates toward zero to 0u (which is inside [0, 30) and free!) and falsely succeeds.
+  Node * neg_x_start = nullptr;
+  Node * neg_x_goal = nullptr;
+  getter(Node::getIndex(0u, 10u, 27u), neg_x_start);
+  neg_x_start->setPose(Node::Coordinates(0.3f, 10.0f, 27.0f));
+  getter(Node::getIndex(0u, 15u, 9u), neg_x_goal);
+  neg_x_goal->setPose(Node::Coordinates(0.3f, 15.0f, 9.0f));
+
+  const auto neg_x_nodes =
+    expansion.getAnalyticPath(neg_x_start, neg_x_goal, getter, dubins_space, false);
+  EXPECT_TRUE(neg_x_nodes.empty())
+    << "Curve dipping into negative x (-0.45) must be rejected before unsigned cast";
+
+  // 1b. Deep negative x excursion (x <= -1.0, e.g. x ~ -1.8):
+  // Start at (0.2, 8.0, bin 27 = 135 deg) -> Goal at (0.2, 18.0, bin 9 = 45 deg).
+  // Without reals[0] < 0.0, static_cast<unsigned int>(-1.8) invokes UB / wraps to UINT_MAX.
+  graph.clear();
+  Node * deep_neg_x_start = nullptr;
+  Node * deep_neg_x_goal = nullptr;
+  getter(Node::getIndex(0u, 8u, 27u), deep_neg_x_start);
+  deep_neg_x_start->setPose(Node::Coordinates(0.2f, 8.0f, 27.0f));
+  getter(Node::getIndex(0u, 18u, 9u), deep_neg_x_goal);
+  deep_neg_x_goal->setPose(Node::Coordinates(0.2f, 18.0f, 9.0f));
+
+  const auto deep_neg_x_nodes =
+    expansion.getAnalyticPath(deep_neg_x_start, deep_neg_x_goal, getter, dubins_space, false);
+  EXPECT_TRUE(deep_neg_x_nodes.empty())
+    << "Curve dipping into deep negative x (-1.8) must be rejected before unsigned cast";
+  EXPECT_EQ(graph.size(), 2u)
+    << "No out-of-bounds or wrapped graph nodes may be allocated during negative excursion";
+
+  // 2. Negative y excursion in (-1.0, 0.0):
+  // Start at (10.0, 0.3, bin 63 = 315 deg) -> Goal at (15.0, 0.3, bin 9 = 45 deg).
+  graph.clear();
+  Node * neg_y_start = nullptr;
+  Node * neg_y_goal = nullptr;
+  getter(Node::getIndex(10u, 0u, 63u), neg_y_start);
+  neg_y_start->setPose(Node::Coordinates(10.0f, 0.3f, 63.0f));
+  getter(Node::getIndex(15u, 0u, 9u), neg_y_goal);
+  neg_y_goal->setPose(Node::Coordinates(15.0f, 0.3f, 9.0f));
+
+  const auto neg_y_nodes =
+    expansion.getAnalyticPath(neg_y_start, neg_y_goal, getter, dubins_space, false);
+  EXPECT_TRUE(neg_y_nodes.empty())
+    << "Curve dipping into negative y (-0.45) must be rejected before unsigned cast";
+  EXPECT_EQ(graph.size(), 2u);
+
+  // 2b. Upper-bound x >= max_x (30.0) and y >= max_y (30.0) excursions:
+  // Without reals[0] >= max_x, static_cast<unsigned int>(30.45) == 30u wraps into row y + 1
+  // inside Node::getIndex(30u, y, bin) < max_index and allocates an aliased node in graph.
+  graph.clear();
+  Node * pos_x_start = nullptr;
+  Node * pos_x_goal = nullptr;
+  getter(Node::getIndex(29u, 10u, 9u), pos_x_start);
+  pos_x_start->setPose(Node::Coordinates(29.7f, 10.0f, 9.0f));
+  getter(Node::getIndex(29u, 15u, 27u), pos_x_goal);
+  pos_x_goal->setPose(Node::Coordinates(29.7f, 15.0f, 27.0f));
+  const auto pos_x_nodes =
+    expansion.getAnalyticPath(pos_x_start, pos_x_goal, getter, dubins_space, false);
+  EXPECT_TRUE(pos_x_nodes.empty())
+    << "Curve bulging past max_x (30.45 >= 30.0) must be rejected before getIndex row-wrap";
+  EXPECT_EQ(graph.size(), 2u)
+    << "No wrapped graph nodes may be allocated when reals[0] >= max_x";
+
+  graph.clear();
+  Node * pos_y_start = nullptr;
+  Node * pos_y_goal = nullptr;
+  getter(Node::getIndex(10u, 29u, 9u), pos_y_start);
+  pos_y_start->setPose(Node::Coordinates(10.0f, 29.7f, 9.0f));
+  getter(Node::getIndex(15u, 29u, 63u), pos_y_goal);
+  pos_y_goal->setPose(Node::Coordinates(15.0f, 29.7f, 63.0f));
+  const auto pos_y_nodes =
+    expansion.getAnalyticPath(pos_y_start, pos_y_goal, getter, dubins_space, false);
+  EXPECT_TRUE(pos_y_nodes.empty())
+    << "Curve bulging past max_y (30.45 >= 30.0) must be rejected before getIndex";
+  EXPECT_EQ(graph.size(), 2u);
+
+  // 3. Heading wrap across 2 * M_PI (bin 71 = 355 deg -> bin 1 = 5 deg, and reverse_only +M_PI):
+  // Ensure every node's orientation bin is strictly < size_theta (72) and in [0, size_theta).
+  graph.clear();
+  Node * wrap_start = nullptr;
+  Node * wrap_goal = nullptr;
+  getter(Node::getIndex(10u, 15u, 71u), wrap_start);
+  wrap_start->setPose(Node::Coordinates(10.0f, 15.0f, 71.0f));
+  getter(Node::getIndex(20u, 15u, 1u), wrap_goal);
+  wrap_goal->setPose(Node::Coordinates(20.0f, 15.0f, 1.0f));
+
+  const auto wrap_nodes =
+    expansion.getAnalyticPath(wrap_start, wrap_goal, getter, dubins_space, false);
+  ASSERT_FALSE(wrap_nodes.empty());
+  for (const auto & n : wrap_nodes) {
+    const uint64_t idx = n.node->getIndex();
+    const uint64_t theta_bin = idx % size_theta;
+    EXPECT_LT(theta_bin, size_theta);
+    EXPECT_GE(n.proposed_coords.theta, 0.0f);
+    EXPECT_LT(n.proposed_coords.theta, static_cast<float>(size_theta));
+    const Node::Coordinates decoded = Node::getCoords(idx, size_x, size_theta);
+    EXPECT_LT(decoded.x, static_cast<float>(size_x));
+    EXPECT_LT(decoded.y, static_cast<float>(size_y));
+  }
+
+  // Also test reverse_only = true backing straight North (+y) while facing South (bin 54 = 270 deg)
+  // and backing straight West (-x) while facing East (bin 0 = 0 deg, where OMPL Dubins yaw is pi
+  // so reals[2] + M_PI == 2 * M_PI and must wrap to bin 0, never bin 72).
+  graph.clear();
+  Node * rev_wrap_start = nullptr;
+  Node * rev_wrap_goal = nullptr;
+  getter(Node::getIndex(20u, 15u, 0u), rev_wrap_start);
+  rev_wrap_start->setPose(Node::Coordinates(20.0f, 15.0f, 0.0f));
+  getter(Node::getIndex(10u, 15u, 0u), rev_wrap_goal);
+  rev_wrap_goal->setPose(Node::Coordinates(10.0f, 15.0f, 0.0f));
+  const auto rev_wrap_nodes =
+    expansion.getAnalyticPath(rev_wrap_start, rev_wrap_goal, getter, dubins_space, true);
+  ASSERT_FALSE(rev_wrap_nodes.empty());
+  for (const auto & n : rev_wrap_nodes) {
+    EXPECT_GE(n.proposed_coords.theta, 0.0f);
+    EXPECT_LT(n.proposed_coords.theta, static_cast<float>(size_theta));
+  }
+
+  // 4. Larger-radius candidate sampling density (Reeds-Shepp and Dubins):
+  // With minimum_turning_radius = 4.0 cells and a refined candidate state space of
+  // radius = 15.0 cells (3.75x R_min), a 20-cell straight segment from (5, 15, 0) to
+  // (25, 15, 0) has normalized OMPL length seg_len = 20 / 15 = 1.3333.
+  // Scaling seg_len by minimum_turning_radius (4.0) instead of candidate_radius (15.0)
+  // under-estimates seg_cell_dist as 5.333 cells (only 4 intervals -> samples at
+  // x = 10, 15, 20, 25), stepping right over a 2-cell lethal obstacle at x in [12, 13].
+  Node::destroyStaticAssets();
+  info.minimum_turning_radius = 4.0f;
+  Node::initMotionModel(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, size_x, size_y, size_th, info);
+  nav2_smac_planner::AnalyticExpansion<Node> wide_expansion(
+    nav2_smac_planner::MotionModel::REEDS_SHEPP, info, false, size_theta);
+  wide_expansion.setCollisionChecker(&checker);
+
+  std::fill_n(
+    costmap->getCharMap(), costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+  costmap->setCost(12u, 15u, nav2_costmap_2d::LETHAL_OBSTACLE);
+  costmap->setCost(13u, 15u, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  ompl::base::StateSpacePtr wide_rs_space =
+    std::make_shared<ompl::base::ReedsSheppStateSpace>(15.0);
+  ompl::base::StateSpacePtr wide_dubins_space =
+    std::make_shared<ompl::base::DubinsStateSpace>(15.0);
+
+  graph.clear();
+  Node * wide_start = nullptr;
+  Node * wide_goal = nullptr;
+  getter(Node::getIndex(5u, 15u, 0u), wide_start);
+  wide_start->setPose(Node::Coordinates(5.0f, 15.0f, 0.0f));
+  getter(Node::getIndex(25u, 15u, 0u), wide_goal);
+  wide_goal->setPose(Node::Coordinates(25.0f, 15.0f, 0.0f));
+  const auto wide_rs_nodes =
+    wide_expansion.getAnalyticPath(wide_start, wide_goal, getter, wide_rs_space, false);
+  EXPECT_TRUE(wide_rs_nodes.empty())
+    << "Larger-radius Reeds-Shepp candidate must sample using its own radius and hit obstacle";
+
+  graph.clear();
+  getter(Node::getIndex(5u, 15u, 0u), wide_start);
+  wide_start->setPose(Node::Coordinates(5.0f, 15.0f, 0.0f));
+  getter(Node::getIndex(25u, 15u, 0u), wide_goal);
+  wide_goal->setPose(Node::Coordinates(25.0f, 15.0f, 0.0f));
+  const auto wide_dubins_nodes =
+    wide_expansion.getAnalyticPath(wide_start, wide_goal, getter, wide_dubins_space, false);
+  EXPECT_TRUE(wide_dubins_nodes.empty())
+    << "Larger-radius Dubins candidate must sample using its own radius and hit obstacle";
+
+  Node::destroyStaticAssets();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+}

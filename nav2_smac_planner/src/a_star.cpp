@@ -229,6 +229,15 @@ public:
 #endif
   }
 };
+
+nav2_costmap_2d::Costmap2D * g_obstacle_heuristic_costmap = nullptr;
+unsigned int g_obstacle_heuristic_size_x = 0u;
+unsigned int g_obstacle_heuristic_size_y = 0u;
+float g_obstacle_heuristic_goal_x = std::numeric_limits<float>::quiet_NaN();
+float g_obstacle_heuristic_goal_y = std::numeric_limits<float>::quiet_NaN();
+bool g_obstacle_heuristic_downsampled = false;
+float g_obstacle_heuristic_cost_penalty = std::numeric_limits<float>::quiet_NaN();
+bool g_obstacle_heuristic_quadratic = false;
 }  // namespace
 
 
@@ -272,6 +281,7 @@ void AStarAlgorithm<NodeT>::initialize(
   _max_on_approach_iterations = max_on_approach_iterations;
   _terminal_checking_interval = terminal_checking_interval;
   _max_planning_time = max_planning_time;
+  _lookup_table_size = lookup_table_size;
   if (!_is_initialized) {
     NodeT::precomputeDistanceHeuristic(lookup_table_size, _motion_model, dim_3_size, _search_info);
   }
@@ -315,11 +325,15 @@ void AStarAlgorithm<NodeT>::setCollisionChecker(GridCollisionChecker * collision
 
   clearGraph();
 
-  if (getSizeX() != x_size || getSizeY() != y_size) {
-    _x_size = x_size;
-    _y_size = y_size;
-    NodeT::initMotionModel(_motion_model, _x_size, _y_size, _dim3_size, _search_info);
+  _x_size = x_size;
+  _y_size = y_size;
+  if constexpr (std::is_same_v<NodeT, NodeHybrid>) {
+    if (_is_initialized && _lookup_table_size > 0.0f) {
+      NodeT::precomputeDistanceHeuristic(
+        _lookup_table_size, _motion_model, _dim3_size, _search_info);
+    }
   }
+  NodeT::initMotionModel(_motion_model, _x_size, _y_size, _dim3_size, _search_info);
   _expander->setCollisionChecker(_collision_checker);
 }
 
@@ -460,6 +474,15 @@ void AStarAlgorithm<NodeT>::setGoal(
   const unsigned int size_y = _costmap->getSizeInCellsY();
   if (!_search_info.cache_obstacle_heuristic || goal_coords != _goal_coordinates ||
     _last_heuristic_costmap != _costmap ||
+    NodeHybrid::obstacle_heuristic_costmap != _costmap ||
+    g_obstacle_heuristic_costmap != _costmap ||
+    g_obstacle_heuristic_size_x != size_x ||
+    g_obstacle_heuristic_size_y != size_y ||
+    g_obstacle_heuristic_goal_x != mx ||
+    g_obstacle_heuristic_goal_y != my ||
+    g_obstacle_heuristic_downsampled != _search_info.downsample_obstacle_heuristic ||
+    g_obstacle_heuristic_cost_penalty != _search_info.cost_penalty ||
+    g_obstacle_heuristic_quadratic != NodeHybrid::motion_table.use_quadratic_cost_penalty ||
     _last_heuristic_size_x != size_x || _last_heuristic_size_y != size_y)
   {
     if (!_start) {
@@ -471,6 +494,14 @@ void AStarAlgorithm<NodeT>::setGoal(
     _last_heuristic_costmap = _costmap;
     _last_heuristic_size_x = size_x;
     _last_heuristic_size_y = size_y;
+    g_obstacle_heuristic_costmap = _costmap;
+    g_obstacle_heuristic_size_x = size_x;
+    g_obstacle_heuristic_size_y = size_y;
+    g_obstacle_heuristic_goal_x = mx;
+    g_obstacle_heuristic_goal_y = my;
+    g_obstacle_heuristic_downsampled = _search_info.downsample_obstacle_heuristic;
+    g_obstacle_heuristic_cost_penalty = _search_info.cost_penalty;
+    g_obstacle_heuristic_quadratic = NodeHybrid::motion_table.use_quadratic_cost_penalty;
   }
 
   _goal_coordinates = goal_coords;

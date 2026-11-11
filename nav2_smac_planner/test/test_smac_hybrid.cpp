@@ -520,3 +520,317 @@ TEST(SmacTest, test_smac_costmap_mutation_throws)
   costmap_ros.reset();
   nodeSE2.reset();
 }
+
+TEST(SmacTest, dynamic_gear_change_penalty_and_downsampling_rescaling)
+{
+  using json = nlohmann::json;
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacGearDynTest");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>("gear_dyn_costmap");
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  costmap_ros->getCostmap()->resizeMap(200, 200, 0.05, -5.0, -5.0);
+
+  node->declare_parameter("test.publish_analytic_expansion_trace", true);
+  node->declare_parameter("test.downsample_costmap", false);
+  node->declare_parameter("test.downsampling_factor", 2);
+  node->declare_parameter("test.motion_model_for_search", std::string("REEDS_SHEPP"));
+  node->declare_parameter("test.minimum_turning_radius", 0.5);
+  node->declare_parameter("test.smooth_path", false);
+  node->declare_parameter("test.analytic_expansion_max_length", 3.0);
+  node->declare_parameter("test.analytic_expansion_ratio", 2.0);
+  node->declare_parameter("test.lookup_table_size", 10.0);
+
+  auto planner = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner->configure(node, "test", nullptr, costmap_ros);
+  planner->activate();
+
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 0.0f);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("smac_gear_dyn_trace_sub");
+  std::vector<std::string> batches;
+  auto subscription = subscriber_node->create_subscription<std_msgs::msg::String>(
+    "/analytic_expansion_trace", rclcpp::QoS(10),
+    [&batches](std_msgs::msg::String::ConstSharedPtr message) {
+      batches.push_back(message->data);
+    });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(subscriber_node);
+  for (int i = 0; i < 20; ++i) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  auto wait_for_batch = [&executor, &batches](size_t expected_count) {
+      for (int i = 0; i < 100 && batches.size() < expected_count; ++i) {
+        executor.spin_some();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      return batches.size() >= expected_count;
+    };
+
+  auto make_pose = [](double x, double y, double yaw) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.frame_id = "map";
+      pose.pose.position.x = x;
+      pose.pose.position.y = y;
+      pose.pose.orientation.z = std::sin(yaw / 2.0);
+      pose.pose.orientation.w = std::cos(yaw / 2.0);
+      return pose;
+    };
+  const auto start = make_pose(-1.188, 0.843, 252.0 * M_PI / 180.0);
+  const auto goal = make_pose(-1.18, 0.90, 270.0 * M_PI / 180.0);
+  auto no_cancel = []() {return false;};
+
+  // 1. Default off-by-default (0.0, 0) -> gear_aware is false
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  ASSERT_TRUE(wait_for_batch(1));
+  const json batch0 = json::parse(batches[0]);
+  bool saw_gear_aware_false = false;
+  for (const auto & rec : batch0) {
+    if (rec["event"] == "score") {
+      EXPECT_FALSE(rec["gear_aware"].get<bool>());
+      saw_gear_aware_false = true;
+    }
+  }
+  EXPECT_TRUE(saw_gear_aware_false);
+
+  // 2. Dynamically enable gear_change_penalty = 0.5 m (10.0 cells at 0.05 m/cell) and deferrals = 2
+  const auto res_enable = node->set_parameters_atomically({
+    rclcpp::Parameter("test.gear_change_penalty", 0.5),
+    rclcpp::Parameter("test.analytic_gear_change_deferrals", 2)});
+  ASSERT_TRUE(res_enable.successful);
+
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 10.0f);
+  ASSERT_TRUE(wait_for_batch(2));
+  const json batch1 = json::parse(batches[1]);
+  bool saw_rs = false;
+  bool saw_dubins_fwd = false;
+  bool saw_dubins_rev = false;
+  bool saw_gear_aware_true = false;
+  for (const auto & rec : batch1) {
+    if (rec["event"] == "candidate") {
+      const std::string kind = rec["kind"].get<std::string>();
+      if (kind == "reeds_shepp") {saw_rs = true;}
+      if (kind == "single_gear_forward") {saw_dubins_fwd = true;}
+      if (kind == "single_gear_reverse") {saw_dubins_rev = true;}
+    } else if (rec["event"] == "score") {
+      EXPECT_TRUE(rec["gear_aware"].get<bool>());
+      saw_gear_aware_true = true;
+    }
+  }
+  EXPECT_TRUE(saw_rs);
+  EXPECT_TRUE(saw_dubins_fwd);
+  EXPECT_TRUE(saw_dubins_rev);
+  EXPECT_TRUE(saw_gear_aware_true);
+
+  // 3. Dynamically enable downsample_costmap = true (downsampling_factor = 2 -> 0.10 m/cell)
+  // gear_change_penalty in grid cells must rescale from 10.0f to 5.0f.
+  const auto res_ds_on = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", true),
+    rclcpp::Parameter("test.downsampling_factor", 2)});
+  ASSERT_TRUE(res_ds_on.successful);
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 5.0f);
+  ASSERT_TRUE(wait_for_batch(3));
+
+  // 4. Dynamically disable downsample_costmap = false -> must rescale back to 10.0f
+  const auto res_ds_off = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", false)});
+  ASSERT_TRUE(res_ds_off.successful);
+  EXPECT_GE(planner->createPlan(start, goal, no_cancel).poses.size(), 4u);
+  EXPECT_FLOAT_EQ(nav2_smac_planner::NodeHybrid::motion_table.gear_change_penalty, 10.0f);
+  ASSERT_TRUE(wait_for_batch(4));
+
+  // 5. Verify analytic_expansion_max_length rescales with downsampling_factor on dynamic update:
+  // Enable downsample_costmap = true (factor 2 -> 0.10 m/cell) and set
+  // analytic_expansion_max_length = 1.2 m (12.0 downsampled cells; would be 24.0 cells if divided
+  // only by base resolution 0.05 m). For a 1.8 m straight shot (18.0 downsampled cells),
+  // 18.0 > 12.0 so the initial analytic shot from the start node MUST hit "distance_gate".
+  const auto res_maxlen_ds = node->set_parameters_atomically({
+    rclcpp::Parameter("test.downsample_costmap", true),
+    rclcpp::Parameter("test.downsampling_factor", 2),
+    rclcpp::Parameter("test.analytic_expansion_max_length", 1.2)});
+  ASSERT_TRUE(res_maxlen_ds.successful);
+  const auto far_start = make_pose(0.0, 0.0, 0.0);
+  const auto far_goal = make_pose(1.8, 0.0, 0.0);
+  EXPECT_GE(planner->createPlan(far_start, far_goal, no_cancel).poses.size(), 2u);
+  ASSERT_TRUE(wait_for_batch(5));
+  const json batch4 = json::parse(batches[4]);
+  bool first_candidate_checked = false;
+  for (const auto & rec : batch4) {
+    if (rec["event"] == "candidate") {
+      EXPECT_EQ(rec["outcome"].get<std::string>(), "distance_gate")
+        << "1.8 m shot (18 downsampled cells) must exceed 1.2 m (12 downsampled cells) max_length";
+      first_candidate_checked = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(first_candidate_checked);
+
+  planner->deactivate();
+  planner->cleanup();
+  planner.reset();
+  executor.remove_node(subscriber_node->get_node_base_interface());
+  subscription.reset();
+  subscriber_node.reset();
+  costmap_ros->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros.reset();
+  node.reset();
+}
+
+TEST(SmacTest, multi_instance_downsampler_reconfig_preserves_and_revalidates_obstacle_heuristic)
+{
+  using Node = nav2_smac_planner::NodeHybrid;
+  auto node_a = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacMultiA");
+  auto node_b = std::make_shared<rclcpp_lifecycle::LifecycleNode>("SmacMultiB");
+  auto costmap_ros_a = std::make_shared<nav2_costmap_2d::Costmap2DROS>("costmap_multi_a");
+  costmap_ros_a->on_configure(rclcpp_lifecycle::State());
+  costmap_ros_a->getCostmap()->resizeMap(100, 100, 0.05, 0.0, 0.0);
+
+  node_a->declare_parameter("a.cache_obstacle_heuristic", true);
+  node_a->declare_parameter("a.downsample_costmap", false);
+  node_a->declare_parameter("a.downsampling_factor", 2);
+  node_a->declare_parameter("a.minimum_turning_radius", 0.4);
+  node_a->declare_parameter("a.lookup_table_size", 2.0);
+  node_a->declare_parameter("a.smooth_path", false);
+
+  node_b->declare_parameter("b.cache_obstacle_heuristic", true);
+  node_b->declare_parameter("b.downsample_costmap", true);
+  node_b->declare_parameter("b.downsampling_factor", 2);
+  node_b->declare_parameter("b.minimum_turning_radius", 0.4);
+  node_b->declare_parameter("b.lookup_table_size", 2.0);
+  node_b->declare_parameter("b.smooth_path", false);
+
+  // Share the same Costmap2DROS instance between Planner A (undownsampled) and
+  // Planner B (downsampled) to exercise shared-_costmap ownership and cache revalidation.
+  auto planner_a = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  auto planner_b = std::make_unique<nav2_smac_planner::SmacPlannerHybrid>();
+  planner_a->configure(node_a, "a", nullptr, costmap_ros_a);
+  planner_a->activate();
+  planner_b->configure(node_b, "b", nullptr, costmap_ros_a);
+  planner_b->activate();
+
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = "map";
+  start.pose.position.x = 0.5;
+  start.pose.position.y = 0.5;
+  start.pose.orientation.w = 1.0;
+  goal.header.frame_id = "map";
+  goal.pose.position.x = 3.5;
+  goal.pose.position.y = 3.5;
+  goal.pose.orientation.w = 1.0;
+  auto no_cancel = []() {return false;};
+
+  // 1. Planner A plans and caches its obstacle heuristic on costmap_ros_a->getCostmap().
+  ASSERT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 100u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 8.0f);
+
+  // Planner B (which has not downsampled yet and does not own obstacle_heuristic_costmap)
+  // reconfigures its downsampler; it must NOT clear Planner A's active obstacle_heuristic_costmap,
+  // and hot-path getObstacleHeuristic evaluation on an unexpanded cell must remain valid.
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", false)}).successful);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap())
+    << "Unrelated planner downsampler teardown must not null another planner's heuristic costmap";
+  EXPECT_GT(
+    Node::getObstacleHeuristic(
+      Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f),
+    0.0f);
+
+  // 2. Planner B re-enables downsampling, plans (taking ownership of the shared static pointer
+  // with its 50x50 downsampled grid), and then disables downsampling (which nulls
+  // NodeHybrid::obstacle_heuristic_costmap because Planner B owned it).
+  // When Planner A plans again to the SAME goal, AStarAlgorithm::setGoal and setCollisionChecker
+  // must rebuild the obstacle heuristic and restore motion_table for Planner A's 100x100 grid.
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", true),
+    rclcpp::Parameter("b.downsampling_factor", 2)}).successful);
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_NE(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 50u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 4.0f);
+
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.downsample_costmap", false)}).successful);
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, nullptr);
+
+  EXPECT_NO_THROW({
+    EXPECT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  });
+  EXPECT_EQ(Node::obstacle_heuristic_costmap, costmap_ros_a->getCostmap());
+  EXPECT_EQ(Node::motion_table.size_x, 100u);
+  EXPECT_FLOAT_EQ(Node::motion_table.min_turning_radius, 8.0f);
+  EXPECT_GT(
+    Node::getObstacleHeuristic(
+      Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f),
+    0.0f);
+
+  // 3. Reconfigure Planner B to use fewer angle bins (36 vs 72) and a higher cost_penalty
+  // (10.0 vs 2.0) on the shared costmap with non-zero traversal cost. After Planner B plans,
+  // Planner A (72 bins, cost_penalty 2.0) must restore its cached 72-bin distance heuristic
+  // table in O(1) without recomputing OMPL distances and must rebuild the shared obstacle
+  // heuristic table rather than reusing Planner B's cost_penalty expansion.
+  const float * dist_table_ptr_a = Node::dist_heuristic_lookup_table.data();
+  const int floored_a = static_cast<int>(std::floor(Node::size_lookup / 2.0f));
+  const int ceiling_a = static_cast<int>(std::ceil(Node::size_lookup / 2.0f));
+  const int probe_idx_a =
+    ((-2 + floored_a) * ceiling_a * 72) + (2 * 72) + 1;
+  ASSERT_LT(static_cast<size_t>(probe_idx_a), Node::dist_heuristic_lookup_table.size());
+  Node::dist_heuristic_lookup_table[probe_idx_a] += 0.125f;
+  const float expected_dist_h_a = Node::getDistanceHeuristic(
+    Node::Coordinates(68.0f, 68.0f, 71.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 1.0f);
+  EXPECT_GT(expected_dist_h_a, 0.0f);
+
+  for (unsigned int cx = 0; cx < 100; ++cx) {
+    for (unsigned int cy = 0; cy < 100; ++cy) {
+      costmap_ros_a->getCostmap()->setCost(cx, cy, 128);
+    }
+  }
+  ASSERT_TRUE(
+    node_b->set_parameters_atomically({
+    rclcpp::Parameter("b.angle_quantization_bins", 36),
+    rclcpp::Parameter("b.cost_penalty", 10.0)}).successful);
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 36u);
+  const float * dist_table_ptr_b = Node::dist_heuristic_lookup_table.data();
+  EXPECT_NE(dist_table_ptr_b, dist_table_ptr_a);
+  const float h_b = Node::getObstacleHeuristic(
+    Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 10.0f);
+
+  ASSERT_GT(planner_a->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 72u);
+  EXPECT_EQ(
+    Node::dist_heuristic_lookup_table.size(),
+    static_cast<size_t>(Node::size_lookup * std::ceil(Node::size_lookup / 2.0f) * 72u));
+  EXPECT_EQ(Node::dist_heuristic_lookup_table.data(), dist_table_ptr_a)
+    << "Alternating back to Planner A must reuse its cached distance heuristic buffer via swap";
+  EXPECT_FLOAT_EQ(
+    Node::getDistanceHeuristic(
+      Node::Coordinates(68.0f, 68.0f, 71.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 1.0f),
+    expected_dist_h_a)
+    << "Alternating back to Planner A must preserve cached distance heuristic values";
+  Node::dist_heuristic_lookup_table[probe_idx_a] -= 0.125f;
+  const float h_a = Node::getObstacleHeuristic(
+    Node::Coordinates(20.0f, 20.0f, 0.0f), Node::Coordinates(70.0f, 70.0f, 0.0f), 2.0f);
+  EXPECT_LT(h_a, h_b);
+
+  ASSERT_GT(planner_b->createPlan(start, goal, no_cancel).poses.size(), 2u);
+  EXPECT_EQ(Node::motion_table.num_angle_quantization, 36u);
+  EXPECT_EQ(Node::dist_heuristic_lookup_table.data(), dist_table_ptr_b)
+    << "Alternating back to Planner B must reuse its cached distance heuristic buffer via swap";
+
+  planner_b->deactivate();
+  planner_b->cleanup();
+  planner_b.reset();
+  planner_a->deactivate();
+  planner_a->cleanup();
+  planner_a.reset();
+  costmap_ros_a->on_cleanup(rclcpp_lifecycle::State());
+  costmap_ros_a.reset();
+  node_b.reset();
+  node_a.reset();
+}

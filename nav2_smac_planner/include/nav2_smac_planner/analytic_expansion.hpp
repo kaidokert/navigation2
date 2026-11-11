@@ -49,16 +49,19 @@ public:
     AnalyticExpansionNode(
       NodePtr & node_in,
       Coordinates & initial_coords_in,
-      Coordinates & proposed_coords_in)
+      Coordinates & proposed_coords_in,
+      const float cell_cost_in = 0.0f)
     : node(node_in),
       initial_coords(initial_coords_in),
-      proposed_coords(proposed_coords_in)
+      proposed_coords(proposed_coords_in),
+      cell_cost(cell_cost_in)
     {
     }
 
     NodePtr node;
     Coordinates initial_coords;
     Coordinates proposed_coords;
+    float cell_cost{0.0f};
   };
 
   typedef std::vector<AnalyticExpansionNode> AnalyticExpansionNodes;
@@ -86,6 +89,7 @@ public:
     _trace_opportunities = 0;
     _trace_schedule_skips = 0;
     _trace_request_attempts = 0;
+    _gear_change_deferrals_used = 0;
   }
   uint64_t getTraceOpportunities() const {return _trace_opportunities;}
   uint64_t getTraceScheduleSkips() const {return _trace_schedule_skips;}
@@ -112,11 +116,14 @@ public:
    * @param goal The goal node to plan to
    * @param getter The function object that gets valid nodes from the graph
    * @param state_space State space to use for computing analytic expansions
+   * @param reverse_only Plan with headings flipped by pi, so a forward-only state space
+   * (Dubins) yields a reverse-only path
    * @return A set of analytically expanded nodes to the goal from current node, if possible
    */
   AnalyticExpansionNodes getAnalyticPath(
     const NodePtr & node, const NodePtr & goal,
-    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space);
+    const NodeGetter & getter, const ompl::base::StateSpacePtr & state_space,
+    const bool reverse_only = false);
 
   /**
    * @brief Takes final analytic expansion and appends to current expanded node
@@ -137,6 +144,7 @@ public:
   void cleanNode(const NodePtr & nodes);
 
 protected:
+  int _gear_change_deferrals_used{0};
   MotionModel _motion_model;
   SearchInfo _search_info;
   bool _traverse_unknown;
@@ -151,6 +159,7 @@ protected:
   uint64_t _trace_schedule_skips{0};
   uint64_t _trace_request_attempts{0};
   float _trace_candidate_turning_radius{0.0f};
+  const char * _trace_candidate_kind{"reeds_shepp"};
 };
 
 }  // namespace nav2_smac_planner
