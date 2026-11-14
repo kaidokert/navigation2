@@ -45,10 +45,11 @@ ament_add_gtest(collision_critic_tests collision_critic_tests.cpp)
 ament_target_dependencies(collision_critic_tests ${dependencies_pkgs})
 target_link_libraries(collision_critic_tests mppi_controller mppi_critics)
 
+find_package(nav2_controller REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
 ament_add_gtest(controller_scenario_tests controller_scenario_tests.cpp TIMEOUT 120)
-ament_target_dependencies(controller_scenario_tests ${dependencies_pkgs})
+ament_target_dependencies(controller_scenario_tests ${dependencies_pkgs} nav2_controller)
 target_link_libraries(controller_scenario_tests mppi_controller mppi_critics yaml-cpp)
 target_compile_definitions(controller_scenario_tests PRIVATE
   CONTROLLER_SCENARIO_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/approach_atlas.json")

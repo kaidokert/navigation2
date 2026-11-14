@@ -74,6 +74,11 @@ void CriticManager::on_activate()
   if (critics_effect_pub_) {
     critics_effect_pub_->on_activate();
   }
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->on_activate();
+    }
+  }
 }
 
 void CriticManager::on_deactivate()
@@ -81,12 +86,49 @@ void CriticManager::on_deactivate()
   if (critics_effect_pub_) {
     critics_effect_pub_->on_deactivate();
   }
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->on_deactivate();
+    }
+  }
 }
 
 void CriticManager::on_cleanup()
 {
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->on_cleanup();
+    }
+  }
   critics_effect_pub_.reset();
   critics_.clear();
+}
+
+void CriticManager::reset()
+{
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->reset();
+    }
+  }
+}
+
+void CriticManager::onNewPlan(const nav_msgs::msg::Path & plan)
+{
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->onNewPlan(plan);
+    }
+  }
+}
+
+void CriticManager::onTickStart()
+{
+  for (auto & critic : critics_) {
+    if (critic) {
+      critic->onTickStart();
+    }
+  }
 }
 
 std::string CriticManager::getFullName(const std::string & name)

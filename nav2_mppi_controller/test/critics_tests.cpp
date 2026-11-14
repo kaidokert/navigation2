@@ -33,6 +33,7 @@
 #include "nav2_mppi_controller/critics/prefer_forward_critic.hpp"
 #include "nav2_mppi_controller/critics/twirling_critic.hpp"
 #include "nav2_mppi_controller/critics/velocity_deadband_critic.hpp"
+#include "nav2_mppi_controller/critics/terminal_approach_critic.hpp"
 #include "utils_test.cpp"  // NOLINT
 
 // Tests the various critic plugin functions
@@ -1222,4 +1223,239 @@ TEST(CriticTests, PathAlignDegenerateOriginRemainsFinite)
     EXPECT_TRUE(std::isfinite(costs(0)));
     EXPECT_NEAR(costs(0), valid ? 2.5f : 0.0f, 1e-4f);
   }
+}
+
+TEST(CriticTests, TerminalApproachCriticDefaultOffAndGating)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_approach_unit");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "terminal_costmap", "", "terminal_costmap", true);
+  costmap_ros->on_configure(rclcpp_lifecycle::State());
+  auto * costmap = costmap_ros->getCostmap();
+  costmap->resizeMap(400, 400, 0.01, -2.0, -2.0);
+  std::fill_n(
+    costmap->getCharMap(),
+    costmap->getSizeInCellsX() * costmap->getSizeInCellsY(),
+    nav2_costmap_2d::FREE_SPACE);
+  ParametersHandler parameters(node);
+  parameters.start();
+
+  TerminalApproachCritic terminal_critic;
+  EXPECT_FALSE(terminal_critic.defaultEnabled());
+  terminal_critic.on_configure(
+    node, "mppi", "mppi.TerminalApproachCritic", costmap_ros, &parameters);
+  terminal_critic.on_activate();
+
+  bool enabled_param = true;
+  ASSERT_TRUE(node->get_parameter("mppi.TerminalApproachCritic.enabled", enabled_param));
+  EXPECT_FALSE(enabled_param);
+
+  std::string policy_param;
+  ASSERT_TRUE(
+    node->get_parameter("mppi.TerminalApproachCritic.infeasible_policy", policy_param));
+  EXPECT_EQ(policy_param, "abort");
+  double approach_r_param = 0.0;
+  double cutoff_r_param = 0.0;
+  ASSERT_TRUE(
+    node->get_parameter("mppi.TerminalApproachCritic.approach_radius", approach_r_param));
+  ASSERT_TRUE(
+    node->get_parameter("mppi.TerminalApproachCritic.cutoff_radius", cutoff_r_param));
+  EXPECT_NEAR(approach_r_param, 0.65, 1e-5);
+  EXPECT_NEAR(cutoff_r_param, 0.35, 1e-5);
+  EXPECT_EQ(node->count_publishers("mppi/terminal_replan_requested"), 0u);
+
+  node->declare_parameter("mppi.PathAlignCritic.threshold_to_consider", 0.35);
+  node->declare_parameter("mppi.PathFollowCritic.threshold_to_consider", 0.35);
+  PathAlignCritic align_critic;
+  align_critic.on_configure(node, "mppi", "mppi.PathAlignCritic", costmap_ros, &parameters);
+  PathFollowCritic follow_critic;
+  follow_critic.on_configure(node, "mppi", "mppi.PathFollowCritic", costmap_ros, &parameters);
+
+  // Place robot inside the 0.35 m < d_goal <= 0.65 m overlap ring at (-0.45, -0.06, 0.0)
+  // (d_goal = 0.454 m) with a 6 cm lateral offset from a straight path along y = 0 to goal
+  // (0.0, 0.0, 0.0), so the enabled_ gate is falsifiably exercised rather than the
+  // approach_radius distance check.
+  models::State state;
+  state.reset(2, 20);
+  state.pose.header.frame_id = "odom";
+  state.pose.pose.position.x = -0.45;
+  state.pose.pose.position.y = -0.06;
+  state.pose.pose.orientation.w = 1.0;
+
+  models::Trajectories trajectories;
+  trajectories.reset(2, 20);
+  for (size_t j = 0; j < 20; ++j) {
+    const float x_j = -0.45f + 0.022f * static_cast<float>(j);
+    trajectories.x(0, j) = x_j;
+    trajectories.y(0, j) = -0.06f * (1.0f - static_cast<float>(j) / 19.0f);
+    trajectories.x(1, j) = x_j;
+    trajectories.y(1, j) = -0.25f;
+  }
+
+  models::Path path;
+  path.reset(25);
+  for (size_t i = 0; i < 25; ++i) {
+    path.x(i) = -0.60f + 0.025f * static_cast<float>(i);
+    path.y(i) = 0.0f;
+    path.yaws(i) = 0.0f;
+  }
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 0.0;
+  goal.position.y = 0.0;
+  goal.orientation.w = 1.0;
+
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float dt = 0.05f;
+  CriticData data = {state, trajectories, path, goal, costs, dt,
+    false, nullptr, nullptr, std::nullopt, std::nullopt};
+
+  // 1. Default-off TerminalApproachCritic inside the 0.65 m approach circle must remain
+  //    unlatched and add 0 cost
+  terminal_critic.score(data);
+  EXPECT_FALSE(terminal_critic.isLatched());
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+
+  // 2. Enabling TerminalApproachCritic in the overlap ring (d_goal = 0.454 m > 0.35 m)
+  //    latches a corrective curve and scores > 0 while stock critics ALSO remain active
+  ASSERT_TRUE(
+    node->set_parameters({rclcpp::Parameter("mppi.TerminalApproachCritic.enabled", true)})[0]
+    .successful);
+  terminal_critic.score(data);
+  EXPECT_TRUE(terminal_critic.isLatched());
+  EXPECT_FALSE(terminal_critic.isReferencePathLatched());
+  EXPECT_GT(costs(0), 0.0f);
+  EXPECT_GT(costs(1), costs(0));
+
+  costs.fill(0.0f);
+  align_critic.score(data);
+  const float overlap_align_cost = costs(1);
+  EXPECT_GT(overlap_align_cost, 0.0f);
+  follow_critic.score(data);
+  EXPECT_GT(costs(1), overlap_align_cost);
+
+  // 3. Inside the stock-critic cutoff (d_goal = 0.25 m <= 0.35 m) on a nominal approach,
+  //    PathAlignCritic and PathFollowCritic switch off unconditionally via their own
+  //    threshold_to_consider (0.35 m), while TerminalApproachCritic latches the reference
+  //    path and owns arrival guidance.
+  terminal_critic.reset();
+  state.pose.pose.position.x = -0.25;
+  state.pose.pose.position.y = 0.0;
+  for (size_t j = 0; j < 20; ++j) {
+    const float x_j = -0.25f + 0.012f * static_cast<float>(j);
+    trajectories.x(0, j) = x_j;
+    trajectories.y(0, j) = 0.0f;
+    trajectories.x(1, j) = x_j;
+    trajectories.y(1, j) = -0.15f;
+  }
+  data.furthest_reached_path_point.reset();
+  data.path_pts_valid.reset();
+  costs.fill(0.0f);
+  align_critic.score(data);
+  follow_critic.score(data);
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+
+  terminal_critic.score(data);
+  EXPECT_TRUE(terminal_critic.isLatched());
+  EXPECT_TRUE(terminal_critic.isReferencePathLatched());
+  EXPECT_GT(costs(0), 0.0f);
+  EXPECT_GT(costs(1), costs(0));
+
+  // 4. Unlatched 1-point path (n_path == 1) inside the stock-critic cutoff (d_goal = 0.20 m):
+  //    Stock PathAlignCritic and PathFollowCritic contribute 0, so an unlatched
+  //    TerminalApproachCritic must NOT silently return on n_path == 1; it must either
+  //    establish valid guidance (latching reference_path or a capture curve) or explicitly
+  //    escalate via ENTRY_INFEASIBLE (Review #2 Round 4 Finding 2).
+  terminal_critic.reset();
+  path.reset(1);
+  path.x(0) = 0.0f;
+  path.y(0) = 0.0f;
+  path.yaws(0) = 0.0f;
+  state.pose.pose.position.x = -0.20;
+  state.pose.pose.position.y = 0.0;
+  for (size_t j = 0; j < 20; ++j) {
+    const float x_j = -0.20f + 0.010f * static_cast<float>(j);
+    trajectories.x(0, j) = x_j;
+    trajectories.y(0, j) = 0.0f;
+    trajectories.x(1, j) = x_j;
+    trajectories.y(1, j) = -0.15f;
+  }
+  data.furthest_reached_path_point.reset();
+  data.path_pts_valid.reset();
+  costs.fill(0.0f);
+  align_critic.score(data);
+  follow_critic.score(data);
+  EXPECT_FLOAT_EQ(costs(0), 0.0f);
+  EXPECT_FLOAT_EQ(costs(1), 0.0f);
+
+  terminal_critic.score(data);
+  EXPECT_TRUE(terminal_critic.isLatched());
+  EXPECT_TRUE(terminal_critic.isReferencePathLatched());
+  ASSERT_GT(terminal_critic.latchedCurve().size(), 4u);
+  EXPECT_NEAR(terminal_critic.latchedCurve().front().x, -0.20f, 1e-3f);
+  EXPECT_GT(costs(0), 0.0f);
+  EXPECT_GT(costs(1), costs(0));
+
+  // Tick 1 on the latched 1-point reference path: verifyLatchedCurveOrRedraw() must validate
+  // minDistanceToCurve() without throwing DRIFT_EXCEEDED (falsifies reverting min_lead_distance).
+  data.reuse_obstacles_cache = false;
+  costs.fill(0.0f);
+  EXPECT_NO_THROW(terminal_critic.score(data));
+  EXPECT_TRUE(terminal_critic.isLatched());
+  EXPECT_GT(costs(0), 0.0f);
+  EXPECT_GT(costs(1), costs(0));
+
+  // 4b. Unlatched 1-point path at d_goal = 0.20 m with an infeasible lateral offset (-0.18 m)
+  //     must explicitly escalate via InvalidPath (ENTRY_INFEASIBLE) rather than silently returning.
+  terminal_critic.reset();
+  state.pose.pose.position.x = -0.20;
+  state.pose.pose.position.y = -0.18;
+  costs.fill(0.0f);
+  try {
+    terminal_critic.score(data);
+    FAIL() << "Expected InvalidPath (ENTRY_INFEASIBLE) on infeasible unlatched 1-point path";
+  } catch (const nav2_core::InvalidPath & ex) {
+    EXPECT_NE(std::string(ex.what()).find("reason=ENTRY_INFEASIBLE"), std::string::npos)
+      << ex.what();
+  }
+  EXPECT_FALSE(terminal_critic.isLatched());
+
+  // 4c. Laterally-displaced short S-curve (start and goal share heading 0.0, start at
+  //     (-0.16, -0.06, 0.0), goal at (0.0, 0.0, 0.0), span = 0.1709 m < d_goal = 0.1897 m)
+  //     with a lethal obstacle on the straight goal axis at (-0.28, 0.0) (10 cm behind a fake
+  //     lead-in at (-0.18, 0.0) but > 12 cm from all S-curve poses):
+  //     buildReferencePathCurve() must check positional collinearity with the goal axis rather
+  //     than only start/end heading equality, so it does NOT prepend a fake goal-axis lead-in
+  //     or create a 6 cm lateral jump to (-0.16, -0.06) (Review #2 & #3 Round 5).
+  terminal_critic.reset();
+  unsigned int ox = 0u, oy = 0u;
+  ASSERT_TRUE(costmap->worldToMap(-0.28, 0.0, ox, oy));
+  costmap->setCost(ox, oy, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  path.reset(5);
+  const float s_xs[5] = {-0.16f, -0.12f, -0.08f, -0.04f, 0.0f};
+  const float s_ys[5] = {-0.06f, -0.05f, -0.03f, -0.01f, 0.0f};
+  const float s_yaws[5] = {0.0f, 0.18f, 0.25f, 0.12f, 0.0f};
+  for (size_t i = 0; i < 5u; ++i) {
+    path.x(i) = s_xs[i];
+    path.y(i) = s_ys[i];
+    path.yaws(i) = s_yaws[i];
+  }
+  state.pose.pose.position.x = -0.18;
+  state.pose.pose.position.y = -0.06;
+  costs.fill(0.0f);
+  EXPECT_NO_THROW(terminal_critic.score(data));
+  EXPECT_TRUE(terminal_critic.isLatched());
+  EXPECT_TRUE(terminal_critic.isReferencePathLatched());
+  ASSERT_GE(terminal_critic.latchedCurve().size(), 5u);
+  EXPECT_NEAR(terminal_critic.latchedCurve().front().x, -0.16f, 1e-4f);
+  EXPECT_NEAR(terminal_critic.latchedCurve().front().y, -0.06f, 1e-4f);
+  for (size_t i = 0; i + 1u < terminal_critic.latchedCurve().size(); ++i) {
+    const double step_d = std::hypot(
+      terminal_critic.latchedCurve()[i + 1u].x - terminal_critic.latchedCurve()[i].x,
+      terminal_critic.latchedCurve()[i + 1u].y - terminal_critic.latchedCurve()[i].y);
+    EXPECT_LE(step_d, 0.03) << "Unexpected jump segment at index " << i;
+  }
+  costmap->setCost(ox, oy, nav2_costmap_2d::FREE_SPACE);
 }

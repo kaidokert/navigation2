@@ -37,6 +37,8 @@ set(dependencies_pkgs
   tf2_geometry_msgs
   tf2_eigen
   tf2_ros
+  std_msgs
+  angles
   nav2_critics_msgs
 )
 
@@ -95,6 +97,7 @@ add_library(mppi_critics SHARED
   src/critics/twirling_critic.cpp
   src/critics/constraint_critic.cpp
   src/critics/velocity_deadband_critic.cpp
+  src/critics/terminal_approach_critic.cpp
 )
 
 set(libraries mppi_controller mppi_critics)
