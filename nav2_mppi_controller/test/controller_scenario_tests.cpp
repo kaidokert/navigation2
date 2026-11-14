@@ -291,6 +291,55 @@ protected:
     m5_rec.diagnostic_only = true;
     atlas->cases.push_back(std::move(m5_rec));
 
+    Scenario m6_cusp;
+    m6_cusp.id = "m6_cusp_recorded";
+    m6_cusp.path = {
+      {-0.857687, -1.114868, 2.001800},
+      {-0.877820, -1.068446, 1.958200},
+      {-0.895910, -1.021190, 1.914600},
+      {-0.911923, -0.973191, 1.871000},
+      {-0.925829, -0.924539, 1.827400},
+      {-0.937601, -0.875328, 1.783800},
+      {-0.947217, -0.825650, 1.740200},
+      {-0.954659, -0.775697, 1.696006},  // Cusp vertex (inversion index 8)
+      {-0.951166, -0.812774, 1.633401},
+      {-0.950000, -0.850000, 1.570796}};
+    m6_cusp.gears = {1, 1, 1, 1, 1, 1, 1, -1, -1};
+    m6_cusp.starts = {
+      {"pre_cusp_fast", {-0.905259, -0.850300, 2.164800}},
+      {"cusp_handoff", {-0.954359, -0.756900, 1.978200}}};
+    m6_cusp.obstacles = {};
+    m6_cusp.diagnostic_only = true;
+    atlas->cases.push_back(std::move(m6_cusp));
+
+    Scenario wp1_rec;
+    wp1_rec.id = "wp1_overlap_recorded";
+    wp1_rec.path = {
+      {2.480787, 0.029013, -0.530449},
+      {2.551111, -0.016468, -0.617716},
+      {2.617202, -0.067906, -0.704982},
+      {2.678560, -0.124908, -0.792249},
+      {2.734716, -0.187040, -0.879515},
+      {2.785243, -0.253830, -0.966781},
+      {2.829756, -0.324771, -1.054048},
+      {2.867917, -0.399321, -1.141315},
+      {2.899436, -0.476912, -1.228581},
+      {2.924072, -0.556956, -1.315847},
+      {2.941638, -0.638842, -1.403114},
+      {2.952000, -0.721948, -1.490380},
+      {2.955080, -0.805641, -1.577647},
+      {2.950854, -0.889283, -1.664913},
+      {2.945782, -0.943018, -1.664913},
+      {2.940709, -0.996753, -1.664913},
+      {2.929797, -1.076474, -1.748755},
+      {2.912247, -1.155001, -1.832596}};
+    wp1_rec.gears.assign(wp1_rec.path.size() - 1u, 1);
+    wp1_rec.starts = {
+      {"overlap_entry", {2.794900, -0.520500, -1.373400}}};
+    wp1_rec.obstacles = {};
+    wp1_rec.diagnostic_only = true;
+    atlas->cases.push_back(std::move(wp1_rec));
+
     cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
       "scenario_map", "", "scenario_map", true);
     cm->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
@@ -323,10 +372,12 @@ protected:
   void grid(const Scenario & scenario)
   {
     const auto map = atlas->document["map"];
+    const double ox = (scenario.id == "wp1_overlap_recorded") ?
+      1.0 : controller_test::number(map["origin"][0]);
+    const double oy = controller_test::number(map["origin"][1]);
     cm->getLayeredCostmap()->resizeMap(
       map["size"][0].as<unsigned int>(), map["size"][1].as<unsigned int>(),
-      controller_test::number(map["resolution"]), controller_test::number(map["origin"][0]),
-      controller_test::number(map["origin"][1]));
+      controller_test::number(map["resolution"]), ox, oy);
     auto * map_ptr = cm->getCostmap();
     for (unsigned int y = 0; y < map_ptr->getSizeInCellsY(); ++y) {
       for (unsigned int x = 0; x < map_ptr->getSizeInCellsX(); ++x) {
@@ -383,7 +434,10 @@ protected:
     one.path = {p};
     return one.message().poses.front();
   }
-  // First-order lagged Ackermann approximation (tau_v, tau_steer, wheel_speed_gain, steering_gain)
+  // First-order speed/curvature lag approximation of selected plant parameters (tau_v, tau_steer,
+  // wheel_speed_gain, steering_gain). Not a complete model of Gazebo bridge actuator quantization
+  // or contact dynamics; recorded Gazebo state trajectories (m6_cusp_recorded,
+  // wp1_overlap_recorded) are used for deterministic reproduction of live Gazebo transitions.
   struct AckermannPlantState
   {
     double v{0.0};
@@ -431,7 +485,7 @@ protected:
 
 TEST_F(ControllerScenarios, GeometryGearAndMirrorContracts)
 {
-  ASSERT_EQ(atlas->cases.size(), 17u);
+  ASSERT_EQ(atlas->cases.size(), 19u);
   for (const auto & scenario : atlas->cases) {
     SCOPED_TRACE(scenario.id);
     for (bool reverse : {false, true}) {
@@ -458,7 +512,11 @@ TEST_F(ControllerScenarios, GeometryGearAndMirrorContracts)
 TEST_F(ControllerScenarios, RealPathAlignScoresAllStartsAndRepresentations)
 {
   for (const auto & original : atlas->cases) {
-    if (original.id == "m8_full" || original.id == "m5_recorded") {continue;}
+    if (original.id == "m8_full" || original.id == "m5_recorded" ||
+      original.id == "m6_cusp_recorded" || original.id == "wp1_overlap_recorded")
+    {
+      continue;
+    }
     for (bool reverse : {false, true}) {
       const auto scenario = original.variant(false, reverse);
       grid(scenario);
@@ -1065,6 +1123,42 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ClosedLoopCaptureAndInvaria
     EXPECT_DOUBLE_EQ(cand_001_cmd.linear.x, base_001_cmd.linear.x);
     EXPECT_DOUBLE_EQ(cand_001_cmd.angular.z, base_001_cmd.angular.z);
 
+    // Stateful 2-tick sequence on the same controller instance with stock_cutoff_r = 0.01:
+    // tick 0 at (-0.30, 0.0, 0.0) followed by a 55 mm (> 45 mm) corner-cutting step at
+    // (-0.25, 0.055, 0.0) must NOT self-abort with DRIFT_EXCEEDED while stock critics steer.
+    {
+      auto parent_001 = node(true, 64, 0.558, 6, 0.01);
+      parent_001->declare_parameter(
+        "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+      parent_001->declare_parameter(
+        "FollowPath.TerminalApproachCritic.approach_radius", rclcpp::ParameterValue(0.65));
+      parent_001->declare_parameter(
+        "FollowPath.TerminalApproachCritic.cutoff_radius", rclcpp::ParameterValue(0.35));
+      parent_001->declare_parameter(
+        "FollowPath.TerminalApproachCritic.infeasible_policy",
+        rclcpp::ParameterValue(std::string("abort")));
+      parent_001->declare_parameter(
+        "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+      mppi::ParametersHandler params_001(parent_001);
+      params_001.start();
+      auto buffer_001 = std::make_shared<tf2_ros::Buffer>(parent_001->get_clock());
+      ScenarioPathHandler handler_001;
+      handler_001.initialize(parent_001, "FollowPath", cm, buffer_001, &params_001);
+      handler_001.setPath(scenario.message());
+      ScenarioOptimizer opt_001;
+      opt_001.configure(parent_001, cm, &params_001, true);
+      opt_001.setSeededGaussianBank(42u);
+      geometry_msgs::msg::Twist speed_001;
+      speed_001.linear.x = 0.15;
+      const auto goal_001 = scenario.message().poses.back().pose;
+      auto p0 = pose({-0.30, 0.0, 0.0});
+      auto lp0 = handler_001.transformPath(p0);
+      EXPECT_NO_THROW(opt_001.evalControl(p0, speed_001, lp0, goal_001, nullptr));
+      auto p1 = pose({-0.25, 0.055, 0.0});
+      auto lp1 = handler_001.transformPath(p1);
+      EXPECT_NO_THROW(opt_001.evalControl(p1, speed_001, lp1, goal_001, nullptr));
+    }
+
     bool cap_001_latched = false, cap_001_is_ref = true;
     const auto base_cap_001_cmd = evalOverlapCmd(
       pose({-0.30, -0.06, 0.0}), false, 0.35, nullptr, nullptr, 0.01);
@@ -1630,11 +1724,35 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11EscalationAndDriftPolicies)
     EXPECT_EQ(probe->observed_latched, (std::vector<bool>{false, false, false}));
   }
 
-  // 5. CriticManager preserves declared critic order without cross-critic coupling
+  // 5. CriticManager preserves declared critic order in both loaded names and actual score()
+  //    execution order when evalTrajectoriesScores() is invoked
   {
+    struct OrderRecordingCritic : public mppi::critics::CriticFunction
+    {
+      OrderRecordingCritic(std::string critic_id, std::vector<std::string> * out_log)
+      : id(std::move(critic_id)), log(out_log) {}
+      void initialize() override {}
+      void score(mppi::CriticData & /*data*/) override
+      {
+        if (log != nullptr) {
+          log->push_back(id);
+        }
+      }
+      std::string id;
+      std::vector<std::string> * log{nullptr};
+    };
     struct StaticCriticManager : mppi::CriticManager
     {
-      void loadCritics() override {}
+      std::vector<std::string> executed_order;
+      void loadCritics() override
+      {
+        auto & critics_vec = this->*CriticAccess::critics();
+        critics_vec.clear();
+        for (const auto & cname : this->*CriticAccess::names()) {
+          critics_vec.push_back(
+            std::make_unique<OrderRecordingCritic>(cname, &executed_order));
+        }
+      }
     };
     auto parent = std::make_shared<rclcpp_lifecycle::LifecycleNode>("critic_order_node");
     parent->declare_parameter(
@@ -1651,6 +1769,23 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11EscalationAndDriftPolicies)
     EXPECT_EQ(loaded_names[0], "PathFollowCritic");
     EXPECT_EQ(loaded_names[1], "PathAlignCritic");
     EXPECT_EQ(loaded_names[2], "TerminalApproachCritic");
+
+    mppi::models::State st;
+    st.reset(1, 5);
+    mppi::models::Trajectories tr;
+    tr.reset(1, 5);
+    mppi::models::Path mp;
+    mp.reset(2);
+    geometry_msgs::msg::Pose g;
+    xt::xtensor<float, 1> costs = xt::zeros<float>({1});
+    float dt = 0.05f;
+    mppi::CriticData data = {
+      st, tr, mp, g, costs, dt, false, nullptr, nullptr, std::nullopt, std::nullopt};
+    mgr.evalTrajectoriesScores(data);
+    ASSERT_EQ(mgr.executed_order.size(), 3u);
+    EXPECT_EQ(mgr.executed_order[0], "PathFollowCritic");
+    EXPECT_EQ(mgr.executed_order[1], "PathAlignCritic");
+    EXPECT_EQ(mgr.executed_order[2], "TerminalApproachCritic");
   }
 }
 
@@ -2175,17 +2310,19 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
     }
   }
 
-  // 2. M8 post-cusp handoff poses (all 3 Gazebo attempts), short_cusp_exit: stress,
-  //    Review #1's worked example [-0.20, 0.05, 0.0], and a true 2-segment sub-min_approach
-  //    cusp scenario (reverse -> cusp at x=-0.10 -> 10 cm forward stub to [0, 0, 0]) latch the
-  //    reference path and complete in closed loop inside the 0.35 m stock-critic cutoff with
-  //    0 aborts under Ackermann plant, falsifiably abort when short-approach guards are disabled,
-  //    and reject kinematically unreachable heading errors (> viable_yaw + goal_dist / r_min).
+  // 2. Short single-gear terminal path handoff poses (short_cusp_exit: stress and
+  //    short_terminal_attempt_1..3, plus Review #1's worked example [-0.20, 0.05, 0.0] on
+  //    early_lateral_capture) and a true 2-segment gear-reversal sub-min_approach cusp scenario
+  //    (sub_min_cusp: reverse -> cusp vertex at index 4 (-0.12, 0.0, 0.0) -> 12 cm forward stub
+  //    to [0, 0, 0]) latch the reference path and complete in closed loop inside the 0.35 m
+  //    stock-critic cutoff with 0 aborts under Ackermann plant, falsifiably abort when
+  //    short-approach guards are disabled, and reject kinematically unreachable heading/lateral
+  //    errors.
   {
     Scenario short_exit = atlas->at("short_cusp_exit");
-    short_exit.starts["m8_attempt_1"] = {-0.248, 0.430, -0.5624};
-    short_exit.starts["m8_attempt_2"] = {-0.197, 0.404, -0.4995};
-    short_exit.starts["m8_attempt_3"] = {-0.200, 0.398, -0.5112};
+    short_exit.starts["short_terminal_attempt_1"] = {-0.248, 0.430, -0.5624};
+    short_exit.starts["short_terminal_attempt_2"] = {-0.197, 0.404, -0.4995};
+    short_exit.starts["short_terminal_attempt_3"] = {-0.200, 0.398, -0.5112};
     Scenario straight_short = atlas->at("early_lateral_capture");
     straight_short.starts["review1_worked_example"] = {-0.200, 0.050, 0.0};
 
@@ -2199,7 +2336,7 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
       {0.03, -0.02, -0.15},
       {-0.03, -0.01, -0.10},
       {-0.08, -0.005, -0.05},
-      {-0.12, 0.0, 0.0},      // Cusp vertex (inversion point at index 5)
+      {-0.12, 0.0, 0.0},      // Cusp vertex at index 4 (findFirstPathInversion returns index 5)
       {-0.08, 0.0, 0.0},      // Post-cusp forward stub (< 0.16 m from goal)
       {-0.04, 0.0, 0.0},
       {0.0, 0.0, 0.0}};
@@ -2215,12 +2352,12 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
     ASSERT_EQ(mppi::utils::findFirstPathInversion(sub_min_cusp_msg), 5u);
 
     // Falsifiability proof: without the short-approach / viable-corridor admission guards,
-    // M8 post-cusp handoff (including the < 16 cm 2-segment post-cusp stub with -0.34 rad yaw
-    // error) and Review #1's worked example abort with ENTRY_INFEASIBLE
+    // short single-gear terminal legs, the < 16 cm 2-segment post-cusp stub with -0.34 rad yaw
+    // error, and Review #1's worked example abort with ENTRY_INFEASIBLE
     for (const std::string & fail_key : {
-        std::string("m8_attempt_1"),
-        std::string("m8_attempt_2"),
-        std::string("m8_attempt_3"),
+        std::string("short_terminal_attempt_1"),
+        std::string("short_terminal_attempt_2"),
+        std::string("short_terminal_attempt_3"),
         std::string("review1_worked_example"),
         std::string("post_cusp_reachable")})
     {
@@ -2406,9 +2543,9 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
 
     for (const std::string & start_key : {
         std::string("stress"),
-        std::string("m8_attempt_1"),
-        std::string("m8_attempt_2"),
-        std::string("m8_attempt_3"),
+        std::string("short_terminal_attempt_1"),
+        std::string("short_terminal_attempt_2"),
+        std::string("short_terminal_attempt_3"),
         std::string("review1_worked_example"),
         std::string("post_cusp_reachable")})
     {
@@ -2474,7 +2611,8 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
       EXPECT_TRUE(optimizer.terminalCritic()->isReferencePathLatched()) << start_key;
     }
 
-    // Post-latch drift envelope consistency & ratcheting (m3 post-cusp 0.062 -> 0.100 m):
+    // Short-approach reference_path post-latch drift envelope consistency & ratcheting
+    // (single-gear straight_short at kinematically reachable pose (-0.22, 0.062, -0.20)):
     // 1) When reference_path latches at initial_cross_track = 0.062 m (<= 0.095 m viable limit),
     //    the initial post-latch drift limit is latch_initial_cross_track_ + max_tracking_drift_
     //    (0.062 + 0.045 = 0.107 m):
@@ -2508,7 +2646,7 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
       optimizer.configure(parent, cm, &params, true);
 
       const auto goal_msg = straight_short.message().poses.back().pose;
-      auto latch_p = pose({-0.12, 0.062, 0.20});
+      auto latch_p = pose({-0.22, 0.062, -0.20});
       auto local_p = handler.transformPath(latch_p);
       geometry_msgs::msg::Twist speed;
       speed.linear.x = 0.05;
@@ -2517,13 +2655,13 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
       ASSERT_TRUE(optimizer.terminalCritic()->isReferencePathLatched());
 
       // +38 mm post-latch excursion (total cross_track = 0.100 m <= 0.062 + 0.045 = 0.107 m):
-      auto coast_p = pose({-0.13, 0.100, 0.18});
+      auto coast_p = pose({-0.21, 0.100, -0.18});
       local_p = handler.transformPath(coast_p);
       EXPECT_NO_THROW(optimizer.evalControl(coast_p, speed, local_p, goal_msg, goal_checker.get()));
       EXPECT_TRUE(optimizer.terminalCritic()->isLatched());
 
       // +55 mm post-latch excursion (total cross_track = 0.117 m > 0.107 m) -> DRIFT_EXCEEDED:
-      auto over_p = pose({-0.13, 0.117, 0.18});
+      auto over_p = pose({-0.21, 0.117, -0.18});
       local_p = handler.transformPath(over_p);
       try {
         optimizer.evalControl(over_p, speed, local_p, goal_msg, goal_checker.get());
@@ -2554,11 +2692,11 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11M5M8RetryAndLifecycleRegres
       local_p = handler.transformPath(latch_p);
       EXPECT_NO_THROW(optimizer.evalControl(latch_p, speed, local_p, goal_msg, goal_checker.get()));
       ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
-      auto converged_p = pose({-0.11, 0.010, 0.05});
+      auto converged_p = pose({-0.19, 0.010, -0.05});
       local_p = handler.transformPath(converged_p);
       EXPECT_NO_THROW(
         optimizer.evalControl(converged_p, speed, local_p, goal_msg, goal_checker.get()));
-      auto rebound_p = pose({-0.11, 0.070, 0.05});
+      auto rebound_p = pose({-0.19, 0.070, -0.05});
       local_p = handler.transformPath(rebound_p);
       EXPECT_THROW(
         optimizer.evalControl(rebound_p, speed, local_p, goal_msg, goal_checker.get()),
@@ -3017,10 +3155,11 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11LifecycleAndReplanRegressio
     }
     EXPECT_FALSE(tc->isLatched());
 
-    // Review #3 Round 6 (minDistanceToCurve first-segment clamp & abort on local odom shifts):
-    // 1) Backing away behind latched_curve_[0] by 7 cm (> 4.5 cm max_tracking_drift_) must
-    //    measure true distance from latched_curve_[0] (t clamped >= 0.0) and abort with
-    //    DRIFT_EXCEEDED rather than projecting onto a backward ray with 0 drift:
+    // Section 1: Separate lateral tracking error (DRIFT_EXCEEDED) from longitudinal pre-start
+    // rollback (ROLLBACK_EXCEEDED):
+    // (1a) Unexplained 70 mm backward retreat (> 45 mm max_tracking_drift_) in established
+    //      same-gear motion (speed.linear.x = +0.10 in forward gear +1) must abort with
+    //      reason=ROLLBACK_EXCEEDED:
     controller.reset();
     controller.setPlan(early_scenario.message());
     auto latch_pose = pose({-0.55, -0.06, 0.0});
@@ -3029,12 +3168,55 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11LifecycleAndReplanRegressio
     auto backed_pose = pose({-0.62, -0.06, 0.0});
     try {
       controller.computeVelocityCommands(backed_pose, speed, nullptr);
-      FAIL() << "Expected DRIFT_EXCEEDED when backing 7 cm behind latched_curve_[0]";
+      FAIL() << "Expected ROLLBACK_EXCEEDED when retreating 7 cm in established forward motion";
     } catch (const nav2_core::InvalidPath & ex) {
       EXPECT_NE(
-        std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
+        std::string(ex.what()).find("reason=ROLLBACK_EXCEEDED"), std::string::npos) << ex.what();
     }
     EXPECT_FALSE(tc->isLatched());
+
+    // (1b) State-aware cusp braking transient: when latching with opposite-gear braking velocity
+    //      (speed.linear.x = -0.12 while gear = +1), a 70 mm longitudinal coast behind
+    //      latched_curve_[0] with zero lateral departure survives (EXPECT_NO_THROW), whereas a
+    //      65 mm lateral departure during that coast aborts with DRIFT_EXCEEDED, and an excessive
+    //      150 mm (> 135 mm) rollback aborts with ROLLBACK_EXCEEDED:
+    {
+      geometry_msgs::msg::Twist braking_speed;
+      braking_speed.linear.x = -0.12;
+      controller.reset();
+      controller.setPlan(early_scenario.message());
+      EXPECT_NO_THROW(controller.computeVelocityCommands(latch_pose, braking_speed, nullptr));
+      EXPECT_TRUE(tc->isLatched());
+      braking_speed.linear.x = -0.06;
+      EXPECT_NO_THROW(controller.computeVelocityCommands(backed_pose, braking_speed, nullptr));
+      EXPECT_TRUE(tc->isLatched());
+      EXPECT_GT(tc->lastPreStartRollbackM(), 0.055);
+      EXPECT_LT(tc->lastCurveLateralErr(), 0.015);
+
+      auto lat_depart_pose = pose({-0.62, -0.130, 0.0});
+      try {
+        controller.computeVelocityCommands(lat_depart_pose, braking_speed, nullptr);
+        FAIL() << "Expected DRIFT_EXCEEDED on 65 mm lateral departure during cusp braking coast";
+      } catch (const nav2_core::InvalidPath & ex) {
+        EXPECT_NE(
+          std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
+      }
+
+      controller.reset();
+      controller.setPlan(early_scenario.message());
+      braking_speed.linear.x = -0.12;
+      auto closer_latch_pose = pose({-0.48, -0.06, 0.0});
+      EXPECT_NO_THROW(
+        controller.computeVelocityCommands(closer_latch_pose, braking_speed, nullptr));
+      auto excessive_rollback_pose = pose({-0.63, -0.06, 0.0});
+      try {
+        controller.computeVelocityCommands(excessive_rollback_pose, braking_speed, nullptr);
+        FAIL() << "Expected ROLLBACK_EXCEEDED on 150 mm (> 135 mm) cusp rollback";
+      } catch (const nav2_core::InvalidPath & ex) {
+        EXPECT_NE(
+          std::string(ex.what()).find("reason=ROLLBACK_EXCEEDED"), std::string::npos) << ex.what();
+      }
+    }
 
     // 2) An 8 cm map -> odom localization jump (> 4.5 cm max_tracking_drift_, <= 0.25 m
     //    goal_reset_pos_tol_) that shifts the transformed goal away from the odom robot pose
@@ -3179,6 +3361,610 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11LifecycleAndReplanRegressio
     controller.cleanup();
     // Null-guarded reset() after cleanup() must not dereference null parameters_handler_
     EXPECT_NO_THROW(controller.reset());
+  }
+}
+
+TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
+{
+  auto makeGoalChecker = [&](rclcpp_lifecycle::LifecycleNode::SharedPtr parent) {
+      parent->declare_parameter(
+        "FollowPath.goal_checker.xy_goal_tolerance", rclcpp::ParameterValue(0.10));
+      parent->declare_parameter(
+        "FollowPath.goal_checker.yaw_goal_tolerance", rclcpp::ParameterValue(0.25));
+      parent->declare_parameter(
+        "FollowPath.goal_checker.trans_stopped_velocity", rclcpp::ParameterValue(0.04));
+      parent->declare_parameter(
+        "FollowPath.goal_checker.rot_stopped_velocity", rclcpp::ParameterValue(0.12));
+      parent->declare_parameter(
+        "FollowPath.goal_checker.stateful", rclcpp::ParameterValue(false));
+      auto gc = std::make_unique<nav2_controller::StoppedGoalChecker>();
+      gc->initialize(parent, "FollowPath.goal_checker", cm);
+      return gc;
+    };
+
+  // (1) Section 1: Recorded M6 post-cusp longitudinal braking coast sequence (m6_cusp_recorded)
+  //     must survive the demonstrated ~60 mm opposite-gear braking coast without throwing
+  //     DRIFT_EXCEEDED and proceed on the original approach with 0 redraws, across both travel
+  //     directions and mirrored geometry.
+  {
+    const auto & m6_base = atlas->at("m6_cusp_recorded");
+    const std::vector<std::pair<Pose, std::pair<double, double>>> m6_coast_states = {
+      {{-0.954359, -0.7569, 1.9782}, {0.2087, -0.2980}},
+      {{-0.958959, -0.7496, 1.9587}, {0.1637, -0.4091}},
+      {{-0.962059, -0.7389, 1.9388}, {0.1304, -0.3953}},
+      {{-0.965359, -0.7272, 1.9191}, {0.0921, -0.2833}},
+      {{-0.966559, -0.7209, 1.9034}, {0.0614, -0.1867}},
+      {{-0.968459, -0.7126, 1.8874}, {0.0263, -0.0810}},
+      {{-0.969859, -0.7067, 1.8697}, {-0.0131, -0.0404}},
+      {{-0.972759, -0.6966, 1.8545}, {-0.0450, -0.0500}}};
+
+    for (const bool mirror : {false, true}) {
+      for (const bool reverse_dir : {false, true}) {
+        SCOPED_TRACE(
+          std::string("m6_cusp_recorded/") + (mirror ? "mirror/" : "nom/") +
+          (reverse_dir ? "rev_dir" : "fwd_dir"));
+        const Scenario sc = m6_base.variant(mirror, reverse_dir);
+        grid(sc);
+        auto parent = node(true, 500, 0.325, 7, 0.35);
+        parent->declare_parameter(
+          "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+        parent->declare_parameter(
+          "FollowPath.TerminalApproachCritic.infeasible_policy",
+          rclcpp::ParameterValue(std::string("abort")));
+        parent->declare_parameter(
+          "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+        auto gc = makeGoalChecker(parent);
+        mppi::ParametersHandler params(parent);
+        params.start();
+        auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+        ScenarioPathHandler handler;
+        handler.initialize(parent, "FollowPath", cm, buffer, &params);
+        handler.setPath(sc.message());
+        ScenarioOptimizer optimizer;
+        optimizer.configure(parent, cm, &params, true);
+        optimizer.setSeededGaussianBank(42u);
+
+        const auto goal_msg = sc.message().poses.back().pose;
+        // First evaluate a pre-cusp tick on the full 2-segment path at pre_cusp_fast so
+        // score() records the pre-cusp gear before PathHandler prunes across the cusp vertex.
+        {
+          auto pre_cusp_actual = pose(sc.starts.at("pre_cusp_fast"));
+          auto pre_cusp_local = handler.transformPath(pre_cusp_actual);
+          ASSERT_NE(handler.inversion(), 0u);
+          geometry_msgs::msg::Twist pre_speed;
+          pre_speed.linear.x = (reverse_dir ? -1.0 : 1.0) * 0.25;
+          EXPECT_NO_THROW(
+            optimizer.evalControl(
+              pre_cusp_actual, pre_speed, pre_cusp_local, goal_msg, gc.get()));
+          EXPECT_FALSE(optimizer.terminalCritic()->isLatched());
+        }
+        // Advance ScenarioPathHandler onto the post-cusp terminal segment (inversion == 0)
+        auto cusp_vertex_pose = pose(sc.path[7]);
+        while (handler.inversion() != 0u) {
+          (void)handler.transformPath(cusp_vertex_pose);
+        }
+        ASSERT_EQ(handler.inversion(), 0u);
+
+        for (size_t idx = 0u; idx < m6_coast_states.size(); ++idx) {
+          Pose p = m6_coast_states[idx].first;
+          if (mirror) {
+            p[1] = -p[1];
+            p[2] = -p[2];
+          }
+          p[2] = controller_test::wrap(p[2] + (reverse_dir ? M_PI : 0.0));
+          auto actual = pose(p);
+          auto local_path = handler.transformPath(actual);
+          geometry_msgs::msg::Twist speed;
+          speed.linear.x = (reverse_dir ? -1.0 : 1.0) * m6_coast_states[idx].second.first;
+          speed.angular.z = (mirror ? -1.0 : 1.0) * m6_coast_states[idx].second.second;
+          EXPECT_NO_THROW(
+            optimizer.evalControl(actual, speed, local_path, goal_msg, gc.get()))
+            << "M6 post-cusp braking coast aborted at step " << idx;
+          EXPECT_TRUE(optimizer.terminalCritic()->isLatched()) << "step " << idx;
+          EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0) << "step " << idx;
+        }
+
+        // Genuine lateral departure (70 mm perpendicular to post-cusp segment) during cusp coast
+        // must still abort with reason=DRIFT_EXCEEDED:
+        {
+          Pose lat_p = m6_coast_states.back().first;
+          lat_p[0] -= 0.070;
+          if (mirror) {
+            lat_p[1] = -lat_p[1];
+            lat_p[2] = -lat_p[2];
+          }
+          lat_p[2] = controller_test::wrap(lat_p[2] + (reverse_dir ? M_PI : 0.0));
+          auto actual = pose(lat_p);
+          auto local_path = handler.transformPath(actual);
+          geometry_msgs::msg::Twist speed;
+          speed.linear.x = (reverse_dir ? -1.0 : 1.0) * m6_coast_states.back().second.first;
+          try {
+            optimizer.evalControl(actual, speed, local_path, goal_msg, gc.get());
+            FAIL() << "Expected DRIFT_EXCEEDED on genuine 70 mm lateral departure on M6";
+          } catch (const nav2_core::InvalidPath & ex) {
+            EXPECT_NE(
+              std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
+          }
+        }
+
+        // Excessive pre-start rollback (> 135 mm kMaxCuspBrakingRollbackM) or post-reversal
+        // retreat (> max_observed_rollback_m_ + 25 mm after establishing post-cusp motion)
+        // must abort with reason=ROLLBACK_EXCEEDED:
+        {
+          handler.setPath(sc.message());
+          optimizer.resetCritics();
+          auto cusp_v = pose(sc.path[7]);
+          while (handler.inversion() != 0u) {
+            (void)handler.transformPath(cusp_v);
+          }
+          // Latch at cusp_handoff (step 0)
+          Pose p0 = m6_coast_states.front().first;
+          if (mirror) {
+            p0[1] = -p0[1];
+            p0[2] = -p0[2];
+          }
+          p0[2] = controller_test::wrap(p0[2] + (reverse_dir ? M_PI : 0.0));
+          auto actual0 = pose(p0);
+          auto lp0 = handler.transformPath(actual0);
+          geometry_msgs::msg::Twist speed0;
+          speed0.linear.x = (reverse_dir ? -1.0 : 1.0) * m6_coast_states.front().second.first;
+          EXPECT_NO_THROW(optimizer.evalControl(actual0, speed0, lp0, goal_msg, gc.get()));
+          ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
+
+          // Establish post-cusp motion on the post-cusp curve (along_track_s >= 0.01 m,
+          // |vx| = 0.08 m/s >= 0.015 m/s)
+          Pose rev_est_p = {-0.9508, -0.8250, 1.6150};
+          if (mirror) {
+            rev_est_p[1] = -rev_est_p[1];
+            rev_est_p[2] = -rev_est_p[2];
+          }
+          rev_est_p[2] = controller_test::wrap(rev_est_p[2] + (reverse_dir ? M_PI : 0.0));
+          auto rev_est_actual = pose(rev_est_p);
+          auto rev_est_lp = handler.transformPath(rev_est_actual);
+          geometry_msgs::msg::Twist rev_speed;
+          rev_speed.linear.x = (reverse_dir ? -1.0 : 1.0) * (-0.08);
+          EXPECT_NO_THROW(
+            optimizer.evalControl(rev_est_actual, rev_speed, rev_est_lp, goal_msg, gc.get()));
+
+          // Now retreat backwards along the pre-start ray to 101 mm (> 56 mm + 25 mm = 81 mm,
+          // while still < 135 mm kMaxCuspBrakingRollbackM): must abort with ROLLBACK_EXCEEDED!
+          Pose retreat_p = {-0.9543, -0.7120, 1.6960};
+          if (mirror) {
+            retreat_p[1] = -retreat_p[1];
+            retreat_p[2] = -retreat_p[2];
+          }
+          retreat_p[2] = controller_test::wrap(retreat_p[2] + (reverse_dir ? M_PI : 0.0));
+          auto retreat_actual = pose(retreat_p);
+          auto retreat_lp = handler.transformPath(retreat_actual);
+          try {
+            optimizer.evalControl(retreat_actual, rev_speed, retreat_lp, goal_msg, gc.get());
+            FAIL() << "Expected ROLLBACK_EXCEEDED on post-reversal retreat";
+          } catch (const nav2_core::InvalidPath & ex) {
+            EXPECT_NE(
+              std::string(ex.what()).find("reason=ROLLBACK_EXCEEDED"), std::string::npos)
+              << ex.what();
+          }
+        }
+      }
+    }
+
+    // Closed-loop M6 cusp traversal at 0.22 m/s with motor_tau_s = 0.176 s (Section 7.13):
+    // evaluates pre_cusp_fast on the 2-segment path first, transitions across the cusp,
+    // produces > 4.5 cm physical post-cusp coast behind latched_curve_[0], and completes with
+    // 0 aborts and 0 redraws.
+    {
+      grid(m6_base);
+      auto parent = node(true, 500, 0.325, 7, 0.35);
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.infeasible_policy",
+        rclcpp::ParameterValue(std::string("abort")));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+      auto gc = makeGoalChecker(parent);
+      mppi::ParametersHandler params(parent);
+      params.start();
+      auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+      ScenarioPathHandler handler;
+      handler.initialize(parent, "FollowPath", cm, buffer, &params);
+      handler.setPath(m6_base.message());
+      ScenarioOptimizer optimizer;
+      optimizer.configure(parent, cm, &params, true);
+      optimizer.setSeededGaussianBank(42u);
+
+      const auto goal_msg = m6_base.message().poses.back().pose;
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = 0.22;
+      speed.angular.z = -0.25;
+      auto pre_actual = pose(m6_base.starts.at("pre_cusp_fast"));
+      auto pre_lp = handler.transformPath(pre_actual);
+      ASSERT_NE(handler.inversion(), 0u);
+      ASSERT_NO_THROW(optimizer.evalControl(pre_actual, speed, pre_lp, goal_msg, gc.get()));
+
+      auto actual = pose(m6_base.starts.at("cusp_handoff"));
+      auto cusp_vertex_pose = pose(m6_base.path[7]);
+      while (handler.inversion() != 0u) {
+        (void)handler.transformPath(cusp_vertex_pose);
+      }
+      ASSERT_EQ(handler.inversion(), 0u);
+      AckermannPlantState plant{speed.linear.x, -0.25 / 0.22};
+      double max_rollback_observed = 0.0;
+      bool reached = false;
+      for (size_t tick = 0u; tick < 160u; ++tick) {
+        if (gc->isGoalReached(actual.pose, goal_msg, speed)) {
+          reached = true;
+          break;
+        }
+        auto local_path = handler.transformPath(actual);
+        geometry_msgs::msg::TwistStamped cmd;
+        ASSERT_NO_THROW(
+          cmd = optimizer.evalControl(actual, speed, local_path, goal_msg, gc.get()))
+          << "Aborted at tick " << tick;
+        max_rollback_observed = std::max(
+          max_rollback_observed, optimizer.terminalCritic()->lastPreStartRollbackM());
+        stepAckermannPose(actual, speed, cmd.twist, plant, 0.05, 0.56, 0.176, 0.05, 0.945, 1.21);
+      }
+      EXPECT_GT(max_rollback_observed, 0.045);
+      EXPECT_TRUE(reached);
+      EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
+    }
+  }
+
+  // (2) Section 2: Recorded WP1 synthetic-curve overlap sequence (wp1_overlap_recorded)
+  //     must not fail with DRIFT_EXCEEDED while stock PathFollowCritic/PathAlignCritic still
+  //     guide in the 0.35..0.65 m overlap ring, must maintain valid terminal guidance upon
+  //     crossing the 0.35 m cutoff with 0 redraws, and must still escalate if an obstacle
+  //     blocks the latched curve or the robot leaves the joinable corridor.
+  {
+    const auto & wp1_sc = atlas->at("wp1_overlap_recorded");
+    grid(wp1_sc);
+    auto parent = node(true, 500, 0.325, 7, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+    auto gc = makeGoalChecker(parent);
+    mppi::ParametersHandler params(parent);
+    params.start();
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    handler.initialize(parent, "FollowPath", cm, buffer, &params);
+    handler.setPath(wp1_sc.message());
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    optimizer.setSeededGaussianBank(42u);
+
+    const auto goal_msg = wp1_sc.message().poses.back().pose;
+    const std::vector<std::pair<Pose, std::pair<double, double>>> wp1_states = {
+      {{2.7949, -0.5205, -1.3734}, {0.2823, -0.0667}},
+      {{2.7967, -0.5275, -1.3749}, {0.2739, -0.0174}},
+      {{2.8008, -0.5488, -1.3777}, {0.2697, 0.0128}},
+      {{2.8013, -0.5764, -1.3868}, {0.2619, 0.0448}},
+      {{2.8054, -0.6067, -1.3872}, {0.2584, 0.0768}},
+      {{2.8093, -0.6324, -1.3865}, {0.2550, 0.0892}},
+      {{2.8096, -0.6571, -1.3865}, {0.2514, 0.1004}},
+      {{2.8136, -0.6812, -1.3786}, {0.2428, 0.1074}},
+      {{2.8155, -0.7039, -1.3723}, {0.2313, 0.1052}},
+      {{2.8182, -0.7214, -1.3654}, {0.2238, 0.1051}},
+      {{2.8192, -0.7276, -1.3630}, {0.2200, 0.1050}}};
+
+    for (size_t idx = 0u; idx < wp1_states.size(); ++idx) {
+      auto actual = pose(wp1_states[idx].first);
+      auto local_path = handler.transformPath(actual);
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = wp1_states[idx].second.first;
+      speed.angular.z = wp1_states[idx].second.second;
+      EXPECT_NO_THROW(
+        optimizer.evalControl(actual, speed, local_path, goal_msg, gc.get()))
+        << "WP1 overlap synthetic latch aborted at step " << idx;
+      EXPECT_TRUE(optimizer.terminalCritic()->isLatched()) << "step " << idx;
+      EXPECT_FALSE(optimizer.terminalCritic()->isReferencePathLatched()) << "step " << idx;
+      EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0) << "step " << idx;
+    }
+
+    // Leaving the shared-control joinable corridor (+150 mm lateral offset in overlap ring)
+    // must escalate with DRIFT_EXCEEDED and 0 redraws:
+    {
+      auto bad_overlap = pose({2.6500, -0.6812, -1.3786});
+      auto local_path = handler.transformPath(bad_overlap);
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = 0.24;
+      try {
+        optimizer.evalControl(bad_overlap, speed, local_path, goal_msg, gc.get());
+        FAIL() << "Expected DRIFT_EXCEEDED when leaving joinable overlap corridor on WP1";
+      } catch (const nav2_core::InvalidPath & ex) {
+        EXPECT_NE(
+          std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
+      }
+      EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
+    }
+
+    // Obstacle appearing on the latched WP1 curve during overlap must escalate with
+    // LATCHED_CURVE_BLOCKED and 0 redraws:
+    {
+      handler.setPath(wp1_sc.message());
+      optimizer.terminalCritic()->onNewPlan(wp1_sc.message());
+      auto entry_actual = pose(wp1_states[0].first);
+      auto local_path = handler.transformPath(entry_actual);
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = wp1_states[0].second.first;
+      EXPECT_NO_THROW(optimizer.evalControl(entry_actual, speed, local_path, goal_msg, gc.get()));
+      ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
+
+      Scenario blocked_wp1 = wp1_sc;
+      blocked_wp1.obstacles.push_back({2.88, -1.18, 2.95, -1.10});
+      grid(blocked_wp1);
+      auto step1_actual = pose(wp1_states[1].first);
+      local_path = handler.transformPath(step1_actual);
+      try {
+        optimizer.evalControl(step1_actual, speed, local_path, goal_msg, gc.get());
+        FAIL() << "Expected LATCHED_CURVE_BLOCKED when obstacle blocks WP1 curve in overlap";
+      } catch (const nav2_core::InvalidPath & ex) {
+        EXPECT_NE(
+          std::string(ex.what()).find("reason=LATCHED_CURVE_BLOCKED"), std::string::npos)
+          << ex.what();
+      }
+      EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
+      grid(wp1_sc);
+    }
+  }
+
+  // (2b) Section 7.10 & Section 7.2: Direct passive_overlap_ref test:
+  //      Latch reference_path inside cutoff (d_goal = 0.32 m <= 0.35 m), then step back into
+  //      the hysteresis band (d_goal = 0.40 m in (0.35, 0.42]) where stock critics steer:
+  //      - A 55 mm cross-track shift (> 45 mm max_tracking_drift_, <= 95 mm viable corridor)
+  //        in the hysteresis band must NOT self-abort with DRIFT_EXCEEDED;
+  //      - An obstacle appearing on the reference path while at d_goal = 0.40 m (> 0.35 m)
+  //        must unlatch into PREPARE without throwing InvalidPath while stock critics steer,
+  //        and throw once inside cutoff (d_goal <= 0.35 m).
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+    auto gc = makeGoalChecker(parent);
+    mppi::ParametersHandler params(parent);
+    params.start();
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    handler.initialize(parent, "FollowPath", cm, buffer, &params);
+    handler.setPath(early_sc.message());
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    const auto goal_msg = early_sc.message().poses.back().pose;
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.10;
+
+    // Latch reference_path inside cutoff (d_goal = 0.34 m <= 0.35 m)
+    auto p_latch = pose({-0.34, 0.0, 0.0});
+    auto lp_latch = handler.transformPath(p_latch);
+    EXPECT_NO_THROW(optimizer.evalControl(p_latch, speed, lp_latch, goal_msg, gc.get()));
+    ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
+    ASSERT_TRUE(optimizer.terminalCritic()->isReferencePathLatched());
+
+    // Step into (0.35, 0.42] band (d_goal = hypot(-0.35, 0.060) = 0.3551 m, rollback = 10 mm)
+    // with 60 mm (> 45 mm) lateral shift: must NOT throw DRIFT_EXCEEDED
+    auto p_band = pose({-0.35, 0.060, 0.0});
+    auto lp_band = handler.transformPath(p_band);
+    EXPECT_NO_THROW(optimizer.evalControl(p_band, speed, lp_band, goal_msg, gc.get()));
+    EXPECT_TRUE(optimizer.terminalCritic()->isLatched());
+
+    // Place an obstacle on the reference path goal footprint while still at d_goal = 0.3551 m:
+    // passive reference_path in 0.35..0.70 m unlatches into PREPARE without throwing InvalidPath
+    Scenario blocked_early = early_sc;
+    blocked_early.obstacles.push_back({0.10, -0.02, 0.13, 0.02});
+    grid(blocked_early);
+    EXPECT_NO_THROW(optimizer.evalControl(p_band, speed, lp_band, goal_msg, gc.get()));
+    EXPECT_FALSE(optimizer.terminalCritic()->isLatched());
+
+    // Once stepping inside cutoff (d_goal = 0.30 m <= 0.35 m), throws InvalidPath
+    auto p_inside = pose({-0.30, 0.0, 0.0});
+    auto lp_inside = handler.transformPath(p_inside);
+    EXPECT_THROW(
+      optimizer.evalControl(p_inside, speed, lp_inside, goal_msg, gc.get()),
+      nav2_core::InvalidPath);
+    grid(early_sc);
+  }
+
+  // (2c) Section 7.1: Sub-min_approach_distance (< 0.16 m) turning-radius enforcement:
+  //      1) Pose (-0.14, 0.0, 0.70) has d_goal = 0.14 m < 0.16 m and |yaw_err| = 0.70 rad
+  //         (kinematically impossible at R_min = 0.5605 m) -> must reject with ENTRY_INFEASIBLE.
+  //      2) Reference path with a sharp sub-R_min kink inside 0.16 m -> must reject
+  //         reference_path admission with ENTRY_INFEASIBLE.
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioController controller;
+    controller.configureWithCompiledCritics(parent, buffer, cm);
+    controller.setPlan(early_sc.message());
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.05;
+    try {
+      controller.computeVelocityCommands(pose({-0.14, 0.0, 0.70}), speed, nullptr);
+      FAIL() << "Expected ENTRY_INFEASIBLE on sub-0.16 m pose (-0.14, 0.0, 0.70)";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=ENTRY_INFEASIBLE"), std::string::npos) << ex.what();
+    }
+
+    Scenario kinked_ref = early_sc;
+    kinked_ref.path = {
+      {-0.14, 0.0, 0.0},
+      {-0.09, 0.0, 0.0},
+      {-0.05, 0.03, 0.55},
+      {0.0, 0.0, 0.0}};
+    kinked_ref.gears = {1, 1, 1};
+    controller.reset();
+    controller.setPlan(kinked_ref.message());
+    try {
+      controller.computeVelocityCommands(pose({-0.14, 0.0, 0.0}), speed, nullptr);
+      FAIL() << "Expected ENTRY_INFEASIBLE on sub-R_min kinked reference path inside 0.16 m";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=ENTRY_INFEASIBLE"), std::string::npos) << ex.what();
+    }
+
+    // Parallel-offset poses (-0.14, 0.080, 0.0) (goal_dist = 0.161 m) and (-0.11, 0.080, 0.0)
+    // (goal_dist = 0.136 m < 0.16 m) cannot reach |y_end| <= 0.045 m at R_min = 0.56 m
+    // (best |y_end| >= 0.0625 m) -> both must reject with ENTRY_INFEASIBLE:
+    for (const double lon_x : {-0.14, -0.11}) {
+      controller.reset();
+      controller.setPlan(early_sc.message());
+      EXPECT_THROW(
+        controller.computeVelocityCommands(pose({lon_x, 0.080, 0.0}), speed, nullptr),
+        nav2_core::InvalidPath);
+    }
+  }
+
+  // (3) Section 3: Stock cutoff 0.50 m / configured cutoff 0.35 m with infeasible pose at 0.45 m
+  //     must treat 0.50 m as the effective handoff cutoff (failing immediately rather than
+  //     leaving a 0.35..0.50 m guidance gap where both stock critics and terminal critic are off).
+  {
+    const auto & late_sc = atlas->at("late_lateral_capture");
+    grid(late_sc);
+    for (const std::string & pol : {std::string("fallback"), std::string("replan_signal")}) {
+      SCOPED_TRACE("cutoff_mismatch_050_035/" + pol);
+      auto parent = node(true, 64, 0.558, 6, 0.50);
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.approach_radius", rclcpp::ParameterValue(0.65));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.cutoff_radius", rclcpp::ParameterValue(0.35));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.infeasible_policy", rclcpp::ParameterValue(pol));
+      parent->declare_parameter(
+        "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+      auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+      ScenarioController controller;
+      controller.configureWithCompiledCritics(parent, buffer, cm);
+      controller.setPlan(late_sc.message());
+      // d_goal = hypot(-0.41, -0.185) = 0.4498 m <= 0.50 m stock cutoff (both stock critics off!)
+      auto pose_045 = pose({-0.41, -0.185, 0.0});
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = 0.10;
+      EXPECT_THROW(
+        controller.computeVelocityCommands(pose_045, speed, nullptr),
+        nav2_core::InvalidPath) << "Expected immediate handoff failure at 0.45 m under " << pol;
+    }
+  }
+
+  // (4) Section 7.2: Unlatched infeasible pose at (-0.60, 0.03, yaw 0.45) in the 0.35..0.65 m
+  //     overlap ring under policy="abort" must NOT abort before the critic owns steering; if
+  //     stock critics align the robot by <= 0.35 m it latches and succeeds, whereas if the robot
+  //     is still unaligned at <= 0.35 m it throws ENTRY_INFEASIBLE at the handoff boundary.
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioController controller;
+    controller.configureWithCompiledCritics(parent, buffer, cm);
+    controller.setPlan(early_sc.message());
+    auto overlap_pose = pose({-0.60, 0.03, 0.45});
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.10;
+    EXPECT_NO_THROW(controller.computeVelocityCommands(overlap_pose, speed, nullptr));
+    EXPECT_FALSE(controller.terminalCritic()->isLatched());
+
+    // Stock critics align the robot onto the straight reference path by d_goal = 0.30 m <= 0.35 m:
+    // authoritative handoff check latches cleanly with 0 aborts!
+    auto aligned_handoff_pose = pose({-0.30, 0.01, 0.05});
+    EXPECT_NO_THROW(controller.computeVelocityCommands(aligned_handoff_pose, speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
+    // Conversely, if the robot enters the overlap ring at (-0.60, 0.03, 0.45) and remains
+    // unaligned when crossing d_goal <= 0.35 m ((-0.30, 0.18, 0.45)), it throws ENTRY_INFEASIBLE
+    // at the handoff cutoff:
+    controller.reset();
+    controller.setPlan(early_sc.message());
+    EXPECT_NO_THROW(controller.computeVelocityCommands(overlap_pose, speed, nullptr));
+    EXPECT_THROW(
+      controller.computeVelocityCommands(pose({-0.30, 0.18, 0.45}), speed, nullptr),
+      nav2_core::InvalidPath);
+  }
+
+  // (5) Section 7.6: Live weight change (align_weight) while latched must NOT abort with
+  //     PARAM_CHANGE_WHILE_LATCHED.
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioController controller;
+    controller.configureWithCompiledCritics(parent, buffer, cm);
+    controller.setPlan(early_sc.message());
+    auto inside_pose = pose({-0.30, -0.05, 0.0});
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.10;
+    EXPECT_NO_THROW(controller.computeVelocityCommands(inside_pose, speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.align_weight", 48.0)})[0].successful);
+    EXPECT_NO_THROW(controller.computeVelocityCommands(inside_pose, speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+  }
+
+  // (6) Section 7.3: When already within (goal_xy_tol, goal_yaw_tol) at the goal, do NOT
+  //     re-solve or abort on curve lateral drift while waiting to settle.
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(1));
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioController controller;
+    controller.configureWithCompiledCritics(parent, buffer, cm);
+    controller.setPlan(early_sc.message());
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.05;
+    EXPECT_NO_THROW(controller.computeVelocityCommands(pose({-0.30, 0.0, 0.0}), speed, nullptr));
+    ASSERT_TRUE(controller.terminalCritic()->isLatched());
+    // Pose inside goal box (d_goal = hypot(-0.05, 0.06) = 0.078 m <= 0.10 m, |yaw| = 0.10 <= 0.25)
+    // with 60 mm (> 45 mm max_tracking_drift_) lateral offset: holds latch with 0 redraws.
+    EXPECT_NO_THROW(controller.computeVelocityCommands(pose({-0.05, 0.06, 0.10}), speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+    EXPECT_EQ(controller.terminalCritic()->redrawCount(), 0);
   }
 }
 }  // namespace
