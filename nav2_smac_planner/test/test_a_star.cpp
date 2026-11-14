@@ -48,7 +48,19 @@
 class RclCppFixture
 {
 public:
-  RclCppFixture() {rclcpp::init(0, nullptr);}
+  RclCppFixture()
+  {
+#ifdef __linux__
+    // Block SIGPIPE before rclcpp::init so DDS background threads inherit SIGPIPE
+    // blocked and cannot steal process-directed (PIDTYPE_TGID) SIGPIPE signals during
+    // single-thread stderr pipe death tests.
+    sigset_t pipe_signal;
+    sigemptyset(&pipe_signal);
+    sigaddset(&pipe_signal, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr);
+#endif
+    rclcpp::init(0, nullptr);
+  }
   ~RclCppFixture() {rclcpp::shutdown();}
 };
 RclCppFixture g_rclcppfixture;
@@ -567,19 +579,17 @@ public:
   TimingSearch(
     int cap = 10000, bool barrier = false, bool invalid = false, bool same = false,
     double budget = 120.0)
-  : node(std::make_shared<rclcpp_lifecycle::LifecycleNode>("timing_test")),
-    map(std::make_shared<nav2_costmap_2d::Costmap2DROS>()),
+  : costmap(30, 30, 0.1, 0.0, 0.0, 0),
     search(nav2_smac_planner::MotionModel::TWOD, nav2_smac_planner::SearchInfo())
   {
-    map->on_configure(rclcpp_lifecycle::State());
-    map->getCostmap()->resizeMap(30, 30, 0.1, 0.0, 0.0);
     if (barrier) {
       for (unsigned int y = 0; y < 30; ++y) {
-        map->getCostmap()->setCost(15, y, 254);
+        costmap.setCost(15, y, 254);
       }
     }
-    checker = std::make_unique<nav2_smac_planner::GridCollisionChecker>(map, 1, node);
-    checker->setFootprint(nav2_costmap_2d::Footprint(), true, 0.0);
+    checker = std::make_unique<nav2_smac_planner::GridCollisionChecker>(nullptr, 1, nullptr);
+    checker->setCostmap(&costmap);
+    checker->setFootprint(nav2_costmap_2d::Footprint(), true, 1.0);
     search.initialize(false, cap, 10, 2, budget, 0.0, 1);
     search.setCollisionChecker(checker.get());
     search.setStart(2, 2, 0);
@@ -604,8 +614,7 @@ public:
     return testing::internal::GetCapturedStderr();
   }
 
-  std::shared_ptr<rclcpp_lifecycle::LifecycleNode> node;
-  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> map;
+  nav2_costmap_2d::Costmap2D costmap;
   std::unique_ptr<nav2_smac_planner::GridCollisionChecker> checker;
   Algorithm search;
   nav2_smac_planner::Node2D::CoordinateVector path;
@@ -786,6 +795,10 @@ TEST(AStarTest, timing_does_not_block_on_full_or_closed_stderr_pipe)
   for (bool closed : {false, true}) {
     ASSERT_EXIT(
     {
+      sigset_t pipe_signal;
+      sigemptyset(&pipe_signal);
+      sigaddset(&pipe_signal, SIGPIPE);
+      if (pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr) != 0) {_exit(13);}
       ScopedTimingEnvironment enabled("1");
       TimingSearch search;
       int descriptors[2];
@@ -799,9 +812,6 @@ TEST(AStarTest, timing_does_not_block_on_full_or_closed_stderr_pipe)
       const int saved = dup(STDERR_FILENO);
       if (dup2(descriptors[1], STDERR_FILENO) < 0) {_exit(11);}
       signal(SIGPIPE, SIG_DFL);
-      sigset_t pipe_signal;
-      sigemptyset(&pipe_signal);
-      sigaddset(&pipe_signal, SIGPIPE);
       if (pthread_sigmask(SIG_UNBLOCK, &pipe_signal, nullptr) != 0) {_exit(13);}
       alarm(2);
       const bool found = search.search.createPath(
@@ -826,6 +836,10 @@ TEST(AStarTest, timing_supports_stderr_sockets_without_blocking_or_sigpipe)
   for (int mode : {0, 1, 2}) {
     ASSERT_EXIT(
     {
+      sigset_t pipe_signal;
+      sigemptyset(&pipe_signal);
+      sigaddset(&pipe_signal, SIGPIPE);
+      if (pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr) != 0) {_exit(13);}
       ScopedTimingEnvironment enabled("1");
       TimingSearch search;
       int descriptors[2];
@@ -838,9 +852,6 @@ TEST(AStarTest, timing_supports_stderr_sockets_without_blocking_or_sigpipe)
       const int saved = dup(STDERR_FILENO);
       if (dup2(descriptors[1], STDERR_FILENO) < 0) {_exit(11);}
       signal(SIGPIPE, SIG_DFL);
-      sigset_t pipe_signal;
-      sigemptyset(&pipe_signal);
-      sigaddset(&pipe_signal, SIGPIPE);
       if (pthread_sigmask(SIG_UNBLOCK, &pipe_signal, nullptr) != 0) {_exit(13);}
       alarm(2);
       const bool found = search.search.createPath(
