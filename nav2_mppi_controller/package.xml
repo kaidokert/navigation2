@@ -26,6 +26,7 @@
   <depend>tf2_eigen</depend>
   <depend>tf2_ros</depend>
   <depend>std_msgs</depend>
+  <depend>angles</depend>
   <depend>xtensor</depend>
   <depend>libomp-dev</depend>
   <depend>benchmark</depend>
@@ -34,6 +35,7 @@
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>nav2_controller</test_depend>
   <test_depend>yaml_cpp_vendor</test_depend>
   <export>
     <build_type>ament_cmake</build_type>
