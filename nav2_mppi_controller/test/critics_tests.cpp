@@ -1230,6 +1230,8 @@ TEST(CriticTests, TerminalApproachCriticDefaultOffAndGating)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("terminal_approach_unit");
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "terminal_costmap", "", "terminal_costmap", true);
+  costmap_ros->set_parameter(rclcpp::Parameter("robot_radius", 0.10));
+  costmap_ros->set_parameter(rclcpp::Parameter("footprint_padding", 0.0));
   costmap_ros->on_configure(rclcpp_lifecycle::State());
   auto * costmap = costmap_ros->getCostmap();
   costmap->resizeMap(400, 400, 0.01, -2.0, -2.0);
