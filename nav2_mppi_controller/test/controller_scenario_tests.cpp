@@ -3823,6 +3823,21 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
         std::string(ex.what()).find("reason=ENTRY_INFEASIBLE"), std::string::npos) << ex.what();
     }
 
+    // Interior segment with 0.20 rad step (< goal_yaw_tolerance = 0.25 rad, but > max_seg_dth =
+    // 0.089 rad at R_min = 0.56 m over 0.04 m) must also reject with ENTRY_INFEASIBLE:
+    Scenario interior_kink_ref = early_sc;
+    interior_kink_ref.path = {
+      {-0.12, 0.0, 0.0},
+      {-0.08, 0.0, 0.0},
+      {-0.04, 0.0, 0.20},
+      {0.0, 0.0, 0.0}};
+    interior_kink_ref.gears = {1, 1, 1};
+    controller.reset();
+    controller.setPlan(interior_kink_ref.message());
+    EXPECT_THROW(
+      controller.computeVelocityCommands(pose({-0.12, 0.0, 0.0}), speed, nullptr),
+      nav2_core::InvalidPath);
+
     // Parallel-offset poses (-0.14, 0.080, 0.0) (goal_dist = 0.161 m) and (-0.11, 0.080, 0.0)
     // (goal_dist = 0.136 m < 0.16 m) cannot reach |y_end| <= 0.045 m at R_min = 0.56 m
     // (best |y_end| >= 0.0625 m) -> both must reject with ENTRY_INFEASIBLE:
@@ -3833,6 +3848,84 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
         controller.computeVelocityCommands(pose({lon_x, 0.080, 0.0}), speed, nullptr),
         nav2_core::InvalidPath);
     }
+
+    // Active opposite-gear cusp-braking handoffs (< 0.16 m) from m8_lateral_shift (r1/r4)
+    // and m6_reverse_right_90 (r2/r4/r5): when PathHandler hands off inside 0.16 m while
+    // the robot is still coasting in the pre-cusp gear (vx * gear < -0.24 m/s) within the
+    // tracking corridor (|y0_goal| <= 0.045 m) and the 2-phase cusp-coast apex + approach arc
+    // reaches the goal box, reference_path must latch and hold through the pre-apex coast
+    // without ENTRY_INFEASIBLE, ROLLBACK_EXCEEDED, or DRIFT_EXCEEDED.
+    Scenario m8_cusp_stub = early_sc;
+    m8_cusp_stub.path = {
+      {-0.071, 0.0057, -0.16},
+      {-0.035, 0.0014, -0.08},
+      {0.0, 0.0, 0.0}};
+    m8_cusp_stub.gears = {1, 1};
+    controller.reset();
+    controller.setPlan(m8_cusp_stub.message());
+    geometry_msgs::msg::Twist cusp_speed;
+    cusp_speed.linear.x = -0.26;
+    // m8_r1 handoff state: lon = 0.094 m, y0 = -0.031 m, th0 = -0.581 rad, vx = -0.26 m/s
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.094, -0.031, -0.581}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+    // Coast across y = 0 to the cusp apex (-0.185, +0.025, -0.466) and then reverse into forward:
+    cusp_speed.linear.x = -0.12;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.145, 0.000, -0.510}), cusp_speed, nullptr));
+    cusp_speed.linear.x = -0.02;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.185, 0.025, -0.466}), cusp_speed, nullptr));
+    cusp_speed.linear.x = 0.08;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.160, 0.018, -0.420}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
+    // m8_r4 handoff state: lon = 0.136 m, y0 = -0.0432 m, th0 = -0.626 rad, vx = -0.272 m/s
+    Scenario m8_r4_stub = early_sc;
+    m8_r4_stub.path = {
+      {-0.094, 0.0085, -0.18},
+      {-0.047, 0.0021, -0.09},
+      {0.0, 0.0, 0.0}};
+    m8_r4_stub.gears = {1, 1};
+    controller.reset();
+    controller.setPlan(m8_r4_stub.message());
+    cusp_speed.linear.x = -0.272;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.136, -0.0432, -0.626}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
+    // m6_r5 reverse-gear (gear = -1) handoff state: lon = 0.089 m, y0 = +0.0242 m,
+    // th0 = +0.497 rad (nose yaw = M_PI + 0.497 = -2.6446 rad), vx = +0.247 m/s
+    // (vx * gear = -0.247 m/s < 0), followed by coast to apex and reverse approach:
+    const Scenario rev_early_sc = early_sc.variant(false, true);
+    controller.reset();
+    controller.setPlan(rev_early_sc.message());
+    cusp_speed.linear.x = 0.247;
+    const double m6_nose_yaw = controller_test::wrap(M_PI + 0.497);
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(
+        pose({-0.089, 0.0242, m6_nose_yaw}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+    cusp_speed.linear.x = 0.04;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(
+        pose({-0.145, -0.002, controller_test::wrap(M_PI + 0.387)}), cusp_speed, nullptr));
+    cusp_speed.linear.x = -0.08;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(
+        pose({-0.125, -0.005, controller_test::wrap(M_PI + 0.330)}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
+    // Conversely, an active opposite-gear cusp-braking pose with excessive heading error
+    // (-0.09, 0.0, 0.85, vx = -0.25 m/s) cannot reach the goal box even after coasting to apex
+    // -> must reject with ENTRY_INFEASIBLE:
+    controller.reset();
+    controller.setPlan(m8_cusp_stub.message());
+    cusp_speed.linear.x = -0.25;
+    EXPECT_THROW(
+      controller.computeVelocityCommands(pose({-0.090, 0.0, 0.85}), cusp_speed, nullptr),
+      nav2_core::InvalidPath);
   }
 
   // (3) Section 3: Stock cutoff 0.50 m / configured cutoff 0.35 m with infeasible pose at 0.45 m

@@ -58,6 +58,7 @@ constexpr double kMinBehindGoalLonM = -0.05;                // ROBOT (UNDERIVED)
 constexpr double kSubMinBehindGoalLonM = 0.02;              // ROBOT (UNDERIVED): Sub-min lon (m)
 constexpr double kSubMinAtGoalLonM = -0.02;                 // ROBOT (UNDERIVED): At-goal lon (m)
 constexpr double kMaxCuspBrakingRollbackM = 0.135;          // ROBOT (UNDERIVED): Cusp brake coast
+constexpr double kCuspCoastBrakingTimeS = 0.25;             // ROBOT (UNDERIVED): Cusp coast time
 constexpr double kMaxPostReversalRetreatM = 0.025;          // ROBOT (UNDERIVED): Post-rev retreat
 constexpr double kReversalEstablishedVelMps = 0.015;        // ROBOT (UNDERIVED): Reversal vel (m/s)
 constexpr double kReversalEstablishedAlongTrackM = 0.01;    // ROBOT (UNDERIVED): Min post-rev s
@@ -841,7 +842,10 @@ bool TerminalApproachCritic::buildReferencePathCurve(
   const double min_dist =
     static_cast<double>(std::max(kMinApproachDistanceFloorM, min_approach_distance_));
   const bool enforce_sub_min_curvature =
-    (min_lead_distance > 0.0) && (min_lead_distance < min_dist);
+    (min_lead_distance > 0.0) &&
+    ((min_lead_distance < min_dist) ||
+    in_cusp_braking_transient_ ||
+    (last_measured_vx_ * gear < -1e-3));
 
   std::vector<utils::Pose2D> built;
   built.reserve((last_idx - start_idx + 2u) * 3u);
@@ -865,9 +869,14 @@ bool TerminalApproachCritic::buildReferencePathCurve(
       }
       const double dth = angles::shortest_angular_distance(ath, bth);
       if (enforce_sub_min_curvature) {
-        if (std::fabs(dth) > 1e-3 &&
-          seg_len < kRefCurvatureMarginRatio * min_turning_r * std::fabs(dth))
-        {
+        const double base_max_seg_dth =
+          (seg_len / (kRefCurvatureMarginRatio * min_turning_r)) + kMinGoalYawToleranceFloorM;
+        const bool is_terminal_seg = (i + 1u == last_idx);
+        const double max_seg_dth = is_terminal_seg ?
+          (base_max_seg_dth +
+          std::max(kMinGoalYawToleranceFloorM, static_cast<double>(goal_yaw_tolerance_))) :
+          base_max_seg_dth;
+        if (std::fabs(dth) > max_seg_dth) {
           return false;
         }
         if (seg_len > 1e-4) {
@@ -877,7 +886,8 @@ bool TerminalApproachCritic::buildReferencePathCurve(
           const double chord_err =
             std::fabs(angles::shortest_angular_distance(seg_travel_th, chord_th));
           const double max_chord_err = std::max(
-            kMinRefChordAngleTolRad, seg_len / (kRefCurvatureMarginRatio * min_turning_r));
+            kMinRefChordAngleTolRad,
+            seg_len / (kRefCurvatureMarginRatio * min_turning_r));
           if (chord_err > max_chord_err) {
             return false;
           }
@@ -2425,48 +2435,116 @@ bool TerminalApproachCritic::tryInitialLatch(
   // Exact constant-curvature Ackermann reachability check for sub-min_approach_distance
   // poses: verify that a single-gear constant-curvature arc with |kappa| <= 1/r_min
   // reaches X = 0 within the goal checker tolerances (goal_xy_tol, goal_yaw_tol) in
-  // Goal Travel Frame.
-  bool sub_min_arc_reaches_goal_box = false;
-  if (lon_remaining >= kSubMinBehindGoalLonM &&
-    std::fabs(theta0_goal) < kMaxCaptureAngleRad)
-  {
-    const double max_kappa = 1.0 / r_min;
-    const double sin_th0 = std::sin(theta0_goal);
-    const double cos_th0 = std::cos(theta0_goal);
-    const double sin_lim = std::sin(std::min(goal_yaw_tol, kMaxCaptureAngleRad - 1e-3));
-    const double kappa_low = std::max(
-      -max_kappa, (-sin_lim - sin_th0) / lon_remaining);
-    const double kappa_high = std::min(
-      max_kappa, (sin_lim - sin_th0) / lon_remaining);
-    if (kappa_low <= kappa_high) {
+  // Goal Travel Frame, or during an active opposite-gear cusp braking coast reaches X = 0
+  // from the collision-free post-coast cusp apex.
+  const bool tick0_cusp_braking =
+    in_cusp_braking_transient_ || (last_measured_vx_ * gear < -1e-3);
+  const double max_kappa = 1.0 / r_min;
+  const double sin_lim = std::sin(std::min(goal_yaw_tol, kMaxCaptureAngleRad - 1e-3));
+  const double sub_min_end_xy_tol = std::min(
+    goal_xy_tol,
+    std::max(
+      kGoalBoxXyTargetRatio * goal_xy_tol,
+      static_cast<double>(max_tracking_drift_)));
+  auto evalArcReachesGoalBox = [&](
+    double lon_s, double y_s, double th_s, double xy_tol) -> bool
+    {
+      if (lon_s < kSubMinBehindGoalLonM || std::fabs(th_s) >= kMaxCaptureAngleRad) {
+        return lon_s >= kSubMinAtGoalLonM &&
+               std::fabs(y_s) <= max_end_xy &&
+               std::fabs(th_s) <= max_end_yaw;
+      }
+      const double sin_th = std::sin(th_s);
+      const double cos_th = std::cos(th_s);
+      const double kappa_low = std::max(
+        -max_kappa, (-sin_lim - sin_th) / lon_s);
+      const double kappa_high = std::min(
+        max_kappa, (sin_lim - sin_th) / lon_s);
+      if (kappa_low > kappa_high) {
+        return false;
+      }
       auto evalEndY = [&](double kappa) -> double {
           if (std::fabs(kappa) < 1e-6) {
-            return y0_goal + (lon_remaining / std::max(kMinForwardCosine, cos_th0)) * sin_th0;
+            return y_s + (lon_s / std::max(kMinForwardCosine, cos_th)) * sin_th;
           }
           const double sin_end =
-            std::clamp(sin_th0 + kappa * lon_remaining, -0.999999, 0.999999);
+            std::clamp(sin_th + kappa * lon_s, -0.999999, 0.999999);
           const double cos_end = std::sqrt(std::max(0.0, 1.0 - sin_end * sin_end));
-          return y0_goal - (cos_end - cos_th0) / kappa;
+          return y_s - (cos_end - cos_th) / kappa;
         };
       const double y_a = evalEndY(kappa_low);
       const double y_b = evalEndY(kappa_high);
       const double y_min = std::min(y_a, y_b);
       const double y_max = std::max(y_a, y_b);
-      const double sub_min_end_xy_tol = std::min(
-        goal_xy_tol,
-        std::max(
-          kGoalBoxXyTargetRatio * goal_xy_tol,
-          static_cast<double>(max_tracking_drift_)));
-      sub_min_arc_reaches_goal_box =
-        (y_min <= sub_min_end_xy_tol + 1e-5) && (y_max >= -sub_min_end_xy_tol - 1e-5);
-    }
-  } else {
-    if (
-      lon_remaining >= kSubMinAtGoalLonM &&
-      std::fabs(y0_goal) <= max_end_xy &&
-      std::fabs(theta0_goal) <= max_end_yaw)
-    {
-      sub_min_arc_reaches_goal_box = true;
+      return (y_min <= xy_tol + 1e-5) && (y_max >= -xy_tol - 1e-5);
+    };
+  bool sub_min_arc_reaches_goal_box =
+    evalArcReachesGoalBox(lon_remaining, y0_goal, theta0_goal, sub_min_end_xy_tol);
+  bool has_cusp_coast_apex = false;
+  double cusp_apex_wx = robot_x;
+  double cusp_apex_wy = robot_y;
+  if (!sub_min_arc_reaches_goal_box && tick0_cusp_braking &&
+    lon_remaining >= kSubMinBehindGoalLonM &&
+    std::fabs(theta0_goal) < kMaxCaptureAngleRad &&
+    std::fabs(y0_goal) <= static_cast<double>(max_tracking_drift_))
+  {
+    const double v_opp = std::max(0.0, -last_measured_vx_ * gear);
+    if (v_opp >= kReversalEstablishedVelMps) {
+      const double s_coast =
+        std::min(kMaxCuspBrakingRollbackM, kCuspCoastBrakingTimeS * v_opp);
+      const double s_turn = (max_kappa > 1e-6) ?
+        std::min(s_coast, std::fabs(theta0_goal) / max_kappa) : 0.0;
+      const double s_straight = std::max(0.0, s_coast - s_turn);
+      const double dth_turn = s_turn * max_kappa;
+      const double th_apex = theta0_goal - std::copysign(dth_turn, theta0_goal);
+      const double k1 = std::copysign(max_kappa, theta0_goal);
+      const double lon_turn = (s_turn > 1e-6 && std::fabs(k1) > 1e-6) ?
+        ((std::sin(theta0_goal) - std::sin(th_apex)) / k1) :
+        (s_turn * std::cos(theta0_goal));
+      const double y_turn = (s_turn > 1e-6 && std::fabs(k1) > 1e-6) ?
+        ((std::cos(theta0_goal) - std::cos(th_apex)) / k1) :
+        (-s_turn * std::sin(theta0_goal));
+      const double lon_apex = lon_remaining + lon_turn + s_straight * std::cos(th_apex);
+      const double y_apex = y0_goal + y_turn - s_straight * std::sin(th_apex);
+      const double cos_tg = std::cos(travel_goal_yaw);
+      const double sin_tg = std::sin(travel_goal_yaw);
+      const double wx_apex = goal_x - lon_apex * cos_tg - y_apex * sin_tg;
+      const double wy_apex = goal_y - lon_apex * sin_tg + y_apex * cos_tg;
+      const size_t coast_steps = std::max<size_t>(
+        1u, static_cast<size_t>(std::ceil(s_coast / kMaxCollisionCheckStepM)));
+      bool coast_collision_free = isFootprintCollisionFree(robot_x, robot_y, robot_yaw);
+      for (size_t step = 1u; coast_collision_free && step <= coast_steps; ++step) {
+        const double s_cur =
+          (s_coast * static_cast<double>(step)) / static_cast<double>(coast_steps);
+        const double s_t = std::min(s_cur, s_turn);
+        const double s_rem = std::max(0.0, s_cur - s_t);
+        const double th_cur = theta0_goal - std::copysign(s_t * max_kappa, theta0_goal);
+        const double lon_t = (s_t > 1e-6 && std::fabs(k1) > 1e-6) ?
+          ((std::sin(theta0_goal) - std::sin(th_cur)) / k1) :
+          (s_t * std::cos(theta0_goal));
+        const double y_t = (s_t > 1e-6 && std::fabs(k1) > 1e-6) ?
+          ((std::cos(theta0_goal) - std::cos(th_cur)) / k1) :
+          (-s_t * std::sin(theta0_goal));
+        const double lon_cur = lon_remaining + lon_t + s_rem * std::cos(th_cur);
+        const double y_cur = y0_goal + y_t - s_rem * std::sin(th_cur);
+        const double wx_cur = goal_x - lon_cur * cos_tg - y_cur * sin_tg;
+        const double wy_cur = goal_y - lon_cur * sin_tg + y_cur * cos_tg;
+        const double w_travel_cur = angles::normalize_angle(travel_goal_yaw + th_cur);
+        const double wyaw_cur =
+          (gear < 0.0) ? angles::normalize_angle(w_travel_cur + M_PI) : w_travel_cur;
+        if (!isFootprintCollisionFree(wx_cur, wy_cur, wyaw_cur)) {
+          coast_collision_free = false;
+        }
+      }
+      if (std::fabs(y_apex) <= viable_cross_track_limit &&
+        coast_collision_free &&
+        evalArcReachesGoalBox(lon_apex, y_apex, th_apex, viable_cross_track_limit))
+      {
+        sub_min_arc_reaches_goal_box = true;
+        has_cusp_coast_apex = true;
+        cusp_apex_wx = wx_apex;
+        cusp_apex_wy = wy_apex;
+      }
     }
   }
 
@@ -2510,8 +2588,6 @@ bool TerminalApproachCritic::tryInitialLatch(
   }
   overlap_entry_deferred_ = false;
 
-  const bool tick0_cusp_braking =
-    in_cusp_braking_transient_ || (last_measured_vx_ * gear < -1e-3);
   const double max_tick0_rollback = tick0_cusp_braking ?
     kMaxCuspBrakingRollbackM : static_cast<double>(max_tracking_drift_);
   auto validateRefCurvePreStart = [&](const std::vector<utils::Pose2D> & cand) -> bool {
@@ -2565,7 +2641,7 @@ bool TerminalApproachCritic::tryInitialLatch(
     ((goal_dist >= min_dist && solveCaptureCurve(
       data.state.pose.pose, data.goal, gear, curve, goal_xy_tol, goal_yaw_tol,
       nullptr, &selected_family, &selected_r)) ||
-    (is_short_approach && goal_dist < min_dist && ref_path_free &&
+    (is_short_approach && (goal_dist < min_dist || tick0_cusp_braking) && ref_path_free &&
     sub_min_kinematically_reachable &&
     buildReferencePathCurve(
       data.path, closest_path_seg_idx, terminal_goal_idx, data.goal, gear, curve, goal_dist) &&
@@ -2619,14 +2695,20 @@ bool TerminalApproachCritic::tryInitialLatch(
   latched_curve_ = std::move(curve);
   const CurveProjection init_proj =
     projectOntoCurve(robot_x, robot_y, latched_curve_, latched_gear_);
+  double init_lat = init_proj.lateral_dist;
+  if (has_cusp_coast_apex) {
+    const CurveProjection apex_proj =
+      projectOntoCurve(cusp_apex_wx, cusp_apex_wy, latched_curve_, latched_gear_);
+    init_lat = std::max(init_lat, apex_proj.lateral_dist);
+  }
   latch_origin_cross_track_ = init_proj.lateral_dist;
-  latch_initial_cross_track_ = init_proj.lateral_dist;
+  latch_initial_cross_track_ = init_lat;
   latch_path_cross_track_ = path_cross_track;
   last_curve_lateral_err_ = init_proj.lateral_dist;
   last_pre_start_rollback_m_ = init_proj.pre_start_rollback_m;
   last_effective_lat_limit_ =
     latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
-  if (last_measured_vx_ * gear < -1e-3) {
+  if (last_measured_vx_ * gear < -1e-3 || in_cusp_braking_transient_) {
     in_cusp_braking_transient_ = true;
     reversal_motion_established_ = false;
     max_observed_rollback_m_ = init_proj.pre_start_rollback_m;
@@ -2910,7 +2992,9 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     handleInfeasible(fail_reason, path_cross_track, goal_dist, path_yaw_err);
     return false;
   }
-  if (!passive_overlap_ref && !in_shared_overlap) {
+  if (!passive_overlap_ref && !in_shared_overlap &&
+    !in_cusp_braking_transient_ && proj.pre_start_rollback_m <= 1e-4)
+  {
     latch_initial_cross_track_ = std::min(latch_initial_cross_track_, proj.lateral_dist);
     last_effective_lat_limit_ =
       latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
