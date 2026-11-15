@@ -4673,7 +4673,8 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
     // latch a new capture curve, and score it (> 0 cost)!
     setGlobalToMapTransform(0.24, -0.18);
     auto shift1_pose = pose({-0.30 + 0.24, -0.06 - 0.18, 0.0});
-    auto shift1_cmd = controller.computeVelocityCommands(shift1_pose, speed, nullptr);
+    geometry_msgs::msg::TwistStamped shift1_cmd;
+    EXPECT_NO_THROW(shift1_cmd = controller.computeVelocityCommands(shift1_pose, speed, nullptr));
     EXPECT_TRUE(tc->isLatched())
       << "Permitted local-goal-shift redraw (max_redraws=1) must latch a replacement curve";
     EXPECT_FALSE(tc->isReferencePathLatched());
@@ -4867,6 +4868,81 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
     }
     EXPECT_FALSE(tc->isLatched());
     EXPECT_EQ(tc->redrawCount(), 0);
+
+    // (8c) onNewPlan() (setPlan) permitted gear-flip redraw (max_redraws = 1) + spent-budget:
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_redraws", 1)})[0].successful);
+    controller.reset();
+    controller.setPlan(early_sc.message());
+    EXPECT_NO_THROW(controller.computeVelocityCommands(init_pose, speed, nullptr));
+    ASSERT_TRUE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 0);
+    nav_msgs::msg::Path rev_plan = early_sc.message();
+    rev_plan.poses.resize(7);
+    for (size_t i = 0; i < 7; ++i) {
+      rev_plan.poses[i].header.frame_id = "map";
+      rev_plan.poses[i].pose.position.x = 0.30 - 0.05 * static_cast<double>(i);
+      rev_plan.poses[i].pose.position.y = 0.0;
+      rev_plan.poses[i].pose.orientation.w = 1.0;
+    }
+    controller.setPlan(rev_plan);
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_FALSE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    auto rev_pose = pose({0.30, 0.06, 0.0});
+    geometry_msgs::msg::Twist rev_speed;
+    rev_speed.linear.x = -0.10;
+    EXPECT_NO_THROW(controller.computeVelocityCommands(rev_pose, rev_speed, nullptr));
+    EXPECT_TRUE(tc->isLatched())
+      << "onNewPlan() permitted gear-flip redraw must latch replacement curve on next score()";
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    // Spent-budget second setPlan() gear flip must escalate GEAR_FLIP_ON_SAME_GOAL:
+    controller.setPlan(early_sc.message());
+    try {
+      controller.computeVelocityCommands(init_pose, speed, nullptr);
+      FAIL() << "Expected GEAR_FLIP_ON_SAME_GOAL once redraw budget (1/1) is spent";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=GEAR_FLIP_ON_SAME_GOAL"),
+        std::string::npos) << ex.what();
+    }
+
+    // (8d) Consecutive dynamic set_parameters() calls when max_redraws = 1 must not reset
+    // redraw_count_ in addPostCallback and must escalate PARAM_CHANGE_WHILE_LATCHED on 2nd change:
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_redraws", 1),
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_residual_y", 0.025)})[0]
+      .successful);
+    controller.reset();
+    controller.setPlan(early_sc.message());
+    EXPECT_NO_THROW(controller.computeVelocityCommands(init_pose, speed, nullptr));
+    ASSERT_TRUE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 0);
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_residual_y", 0.030)})[0]
+      .successful);
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_FALSE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_residual_y", 0.025)})[0]
+      .successful);
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    try {
+      controller.computeVelocityCommands(init_pose, speed, nullptr);
+      FAIL() << "Expected PARAM_CHANGE_WHILE_LATCHED on 2nd parameter change once budget (1/1) "
+        "is spent";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=PARAM_CHANGE_WHILE_LATCHED"),
+        std::string::npos) << ex.what();
+    }
   }
 }
 }  // namespace

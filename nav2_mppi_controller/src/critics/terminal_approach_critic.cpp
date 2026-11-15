@@ -191,7 +191,7 @@ void TerminalApproachCritic::initialize()
         if (hasParameterChangedSinceLatch()) {
           const bool consume_latch =
           latch_consumed_ || latched_ || approach_escalated_ ||
-          replan_pending_ || replan_allowance_consumed_;
+          replan_pending_ || replan_allowance_consumed_ || redraw_count_ > 0;
           if (consume_latch) {
             if (replan_signal_sent_) {
               if (is_active_ && replan_pub_ != nullptr && replan_pub_->is_activated()) {
@@ -480,6 +480,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
       } else {
         latch_consumed_ = false;
         ++redraw_count_;
+        latched_gear_ = plan_gear;
       }
     } else {
       tick_evaluated_ = false;
@@ -1982,7 +1983,7 @@ void TerminalApproachCritic::score(CriticData & data)
 
   if (!enabled_) {
     if (!latch_consumed_ && !latched_ && !approach_escalated_ &&
-      !replan_pending_ && !replan_allowance_consumed_)
+      !replan_pending_ && !replan_allowance_consumed_ && redraw_count_ == 0)
     {
       resetLatch();
     }
@@ -2296,7 +2297,7 @@ void TerminalApproachCritic::score(CriticData & data)
     }
     const bool had_gear_ctx = latched_ || approach_escalated_ || redraw_count_ > 0;
     if (!inferred_from_seg) {
-      if (latched_ || approach_escalated_ || replan_pending_) {
+      if (had_gear_ctx || replan_pending_) {
         path_gear = latched_gear_;
       } else if (has_plan_gear_) {
         path_gear = last_plan_gear_;
@@ -2332,6 +2333,10 @@ void TerminalApproachCritic::score(CriticData & data)
         ++redraw_count_;
         clearActiveCurve();
         latch_consumed_ = false;
+        latched_gear_ = path_gear;
+        if (has_plan_gear_) {
+          last_plan_gear_ = path_gear;
+        }
       }
     }
 
@@ -2627,7 +2632,7 @@ bool TerminalApproachCritic::tryInitialLatch(
     (!is_sub_min_dist || sub_min_kinematically_reachable);
   ownership_ = computeOwnership(goal_dist, false, false);
   if (prefer_reference_path && ref_cutoff > 0.0 && goal_dist > ref_cutoff &&
-    !replan_allowance_consumed_)
+    !replan_allowance_consumed_ && redraw_count_ == 0)
   {
     ownership_ = computeOwnership(goal_dist, true, true);
     if (ownership_ == GuidanceOwnership::PREPARE) {
