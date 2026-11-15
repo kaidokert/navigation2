@@ -4612,6 +4612,262 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
     EXPECT_FALSE(tc->isLatched()) << "latch_consumed_ must block re-latching on the same plan";
     EXPECT_TRUE(tc->isLatchConsumed());
   }
+
+  // (8) Follow-Up Review Finding 1 (Consumed-latch guard vs configured, permitted redraws):
+  //     Exercise BOTH local-goal-shift (L2035-2070) and score-detected gear-flip (L2305-2336)
+  //     branches through score() with an active latch, max_redraws = 1, unused redraw budget,
+  //     and a feasible replacement curve:
+  //     - Verify an actual replacement curve is latched and scored (> 0 cost), not just a counter.
+  //     - Verify the spent-budget case (a subsequent qualifying failure is rejected).
+  //     - Retain direct max_redraws = 0 regressions (no replacement solved).
+  {
+    const auto & early_sc = atlas->at("early_lateral_capture");
+    grid(early_sc);
+    auto parent = node(true, 64, 0.558, 6, 0.35);
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.infeasible_policy",
+      rclcpp::ParameterValue(std::string("abort")));
+    parent->declare_parameter(
+      "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(1));
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    buffer->setUsingDedicatedThread(true);
+    auto setGlobalToMapTransform = [&](double tx, double ty) {
+        geometry_msgs::msg::TransformStamped tf_msg;
+        tf_msg.header.stamp = rclcpp::Time(0, 0, parent->get_clock()->get_clock_type());
+        tf_msg.header.frame_id = "map";
+        tf_msg.child_frame_id = "global_test";
+        tf_msg.transform.translation.x = tx;
+        tf_msg.transform.translation.y = ty;
+        tf_msg.transform.rotation.w = 1.0;
+        buffer->setTransform(tf_msg, "unittest", true);
+      };
+    setGlobalToMapTransform(0.0, 0.0);
+
+    ScenarioController controller;
+    controller.configureWithCompiledCritics(parent, buffer, cm);
+    nav_msgs::msg::Path global_plan = early_sc.message();
+    global_plan.header.frame_id = "global_test";
+    for (auto & ps : global_plan.poses) {
+      ps.header.frame_id = "global_test";
+    }
+    controller.setPlan(global_plan);
+    auto * tc = controller.terminalCritic();
+    ASSERT_NE(tc, nullptr);
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.10;
+
+    // (8a) Local-goal-shift branch (max_redraws = 1):
+    // Tick 0: latch initial capture curve at (-0.30, -0.06, 0.0) inside cutoff (d_goal = 0.3059 m)
+    auto init_pose = pose({-0.30, -0.06, 0.0});
+    auto init_cmd = controller.computeVelocityCommands(init_pose, speed, nullptr);
+    ASSERT_TRUE(tc->isLatched());
+    EXPECT_FALSE(tc->isReferencePathLatched());
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 0);
+    EXPECT_GT(std::fabs(init_cmd.twist.linear.x), 1e-3);
+
+    // Tick 1: 0.30 m (+0.24 m, -0.18 m) local goal shift (> 0.25 m goal_reset_pos_tol_) with a
+    // feasible replacement pose -> must release latch_consumed_ for the authorized replacement,
+    // latch a new capture curve, and score it (> 0 cost)!
+    setGlobalToMapTransform(0.24, -0.18);
+    auto shift1_pose = pose({-0.30 + 0.24, -0.06 - 0.18, 0.0});
+    auto shift1_cmd = controller.computeVelocityCommands(shift1_pose, speed, nullptr);
+    EXPECT_TRUE(tc->isLatched())
+      << "Permitted local-goal-shift redraw (max_redraws=1) must latch a replacement curve";
+    EXPECT_FALSE(tc->isReferencePathLatched());
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    ASSERT_FALSE(tc->latchedCurve().empty());
+    EXPECT_NEAR(tc->latchedCurve().back().x, 0.24f, 0.05f);
+    EXPECT_NEAR(tc->latchedCurve().back().y, -0.18f, 0.05f);
+    EXPECT_GT(std::fabs(shift1_cmd.twist.linear.x), 1e-3);
+    {
+      mppi::models::State st_s;
+      st_s.reset(2, 10);
+      st_s.pose.header.frame_id = "map";
+      st_s.pose.pose = shift1_pose.pose;
+      st_s.speed.linear.x = 0.10f;
+      mppi::models::Trajectories tr_s;
+      tr_s.reset(2, 10);
+      for (size_t k = 0; k < 10; ++k) {
+        tr_s.x(0, k) = static_cast<float>(shift1_pose.pose.position.x) + 0.025f * k;
+        tr_s.y(0, k) = static_cast<float>(shift1_pose.pose.position.y) + 0.005f * k;
+        tr_s.yaws(0, k) = 0.0f;
+        tr_s.x(1, k) = static_cast<float>(shift1_pose.pose.position.x) + 0.015f * k;
+        tr_s.y(1, k) = static_cast<float>(shift1_pose.pose.position.y) - 0.12f;
+        tr_s.yaws(1, k) = -0.30f;
+      }
+      mppi::models::Path mp_s;
+      mp_s.reset(7);
+      for (size_t i = 0; i < 7; ++i) {
+        mp_s.x(i) = -0.06f + 0.05f * static_cast<float>(i);
+        mp_s.y(i) = -0.18f;
+        mp_s.yaws(i) = 0.0f;
+      }
+      geometry_msgs::msg::Pose shifted_goal;
+      shifted_goal.position.x = 0.24;
+      shifted_goal.position.y = -0.18;
+      shifted_goal.orientation.w = 1.0;
+      xt::xtensor<float, 1> shift_costs = xt::zeros<float>({2});
+      float dt_s = 0.05f;
+      mppi::CriticData shift_data = {
+        st_s, tr_s, mp_s, shifted_goal, shift_costs, dt_s,
+        false, nullptr, nullptr, std::nullopt, std::nullopt};
+      tc->score(shift_data);
+      EXPECT_GT(shift_costs(0) + shift_costs(1), 0.0f);
+      EXPECT_LT(shift_costs(0), shift_costs(1));
+    }
+
+    // Tick 2 (spent-budget case): a second 0.30 m local goal shift after redraw budget is spent
+    // (redrawCount() == 1 == max_redraws) must NOT receive another replacement and must abort!
+    setGlobalToMapTransform(0.48, -0.36);
+    auto shift2_pose = pose({-0.30 + 0.48, -0.06 - 0.36, 0.0});
+    try {
+      controller.computeVelocityCommands(shift2_pose, speed, nullptr);
+      FAIL() << "Expected LOCAL_GOAL_SHIFT_EXCEEDED once redraw budget (1/1) is spent";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=LOCAL_GOAL_SHIFT_EXCEEDED"),
+        std::string::npos) << ex.what();
+    }
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 1);
+
+    // Direct max_redraws = 0 regression on the same local-goal shift:
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_redraws", 0)})[0].successful);
+    setGlobalToMapTransform(0.0, 0.0);
+    controller.reset();
+    controller.setPlan(global_plan);
+    EXPECT_NO_THROW(controller.computeVelocityCommands(init_pose, speed, nullptr));
+    ASSERT_TRUE(tc->isLatched());
+    setGlobalToMapTransform(0.24, -0.18);
+    try {
+      controller.computeVelocityCommands(shift1_pose, speed, nullptr);
+      FAIL() << "Expected LOCAL_GOAL_SHIFT_EXCEEDED on first shift when max_redraws=0";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=LOCAL_GOAL_SHIFT_EXCEEDED"),
+        std::string::npos) << ex.what();
+    }
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 0);
+
+    // (8b) Score-detected gear-flip branch (L2305-2336) through score() with max_redraws = 1:
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_redraws", 1)})[0].successful);
+    setGlobalToMapTransform(0.0, 0.0);
+    controller.reset();
+    controller.setPlan(early_sc.message());
+    EXPECT_NO_THROW(controller.computeVelocityCommands(init_pose, speed, nullptr));
+    ASSERT_TRUE(tc->isLatched());
+    ASSERT_FALSE(tc->latchedCurve().empty());
+    EXPECT_LT(tc->latchedCurve().front().x, 0.0f);
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 0);
+
+    // Construct CriticData representing a score()-detected gear flip (path_gear = -1.0 while
+    // latched_gear_ = +1.0, without onNewPlan()) at a feasible reverse pose (0.30, 0.06, 0):
+    mppi::models::State st;
+    st.reset(2, 10);
+    st.pose.header.frame_id = "map";
+    st.pose.pose.position.x = 0.30;
+    st.pose.pose.position.y = 0.06;
+    st.pose.pose.orientation.w = 1.0;
+    st.speed.linear.x = -0.10f;
+    mppi::models::Trajectories tr;
+    tr.reset(2, 10);
+    for (size_t k = 0; k < 10; ++k) {
+      tr.x(0, k) = 0.30f - 0.025f * static_cast<float>(k);
+      tr.y(0, k) = 0.06f - 0.005f * static_cast<float>(k);
+      tr.yaws(0, k) = 0.0f;
+      tr.x(1, k) = 0.30f - 0.015f * static_cast<float>(k);
+      tr.y(1, k) = 0.16f;
+      tr.yaws(1, k) = 0.30f;
+    }
+    mppi::models::Path rev_mp;
+    rev_mp.reset(7);
+    for (size_t i = 0; i < 7; ++i) {
+      rev_mp.x(i) = 0.30f - 0.05f * static_cast<float>(i);
+      rev_mp.y(i) = 0.0f;
+      rev_mp.yaws(i) = 0.0f;
+    }
+    geometry_msgs::msg::Pose goal_pose;
+    goal_pose.orientation.w = 1.0;
+    xt::xtensor<float, 1> flip_costs = xt::zeros<float>({2});
+    float model_dt = 0.05f;
+    mppi::CriticData flip_data = {
+      st, tr, rev_mp, goal_pose, flip_costs, model_dt,
+      false, nullptr, nullptr, std::nullopt, std::nullopt};
+
+    // Tick 1 (score-detected gear flip +1 -> -1 with unused redraw budget 0/1):
+    // Must release latch_consumed_, latch a reverse replacement curve, and score rollouts (> 0):
+    EXPECT_NO_THROW(tc->score(flip_data));
+    EXPECT_TRUE(tc->isLatched())
+      << "Permitted score-detected gear-flip redraw (max_redraws=1) must latch replacement curve";
+    EXPECT_FALSE(tc->isReferencePathLatched());
+    ASSERT_FALSE(tc->latchedCurve().empty());
+    EXPECT_GT(tc->latchedCurve().front().x, 0.25f);
+    EXPECT_TRUE(tc->isLatchConsumed());
+    EXPECT_EQ(tc->redrawCount(), 1);
+    EXPECT_GT(flip_costs(0) + flip_costs(1), 0.0f);
+    EXPECT_LT(flip_costs(0), flip_costs(1));
+
+    // Tick 2 (spent-budget case): flip gear back (-1 -> +1) once redraw budget (1/1) is spent ->
+    // must NOT grant another replacement and must throw GEAR_FLIP_WHILE_LATCHED!
+    st.pose.pose.position.x = -0.30;
+    st.pose.pose.position.y = -0.06;
+    st.speed.linear.x = 0.10f;
+    mppi::models::Path fwd_mp;
+    fwd_mp.reset(7);
+    for (size_t i = 0; i < 7; ++i) {
+      fwd_mp.x(i) = -0.30f + 0.05f * static_cast<float>(i);
+      fwd_mp.y(i) = 0.0f;
+      fwd_mp.yaws(i) = 0.0f;
+    }
+    flip_costs.fill(0.0f);
+    mppi::CriticData flip_back_data = {
+      st, tr, fwd_mp, goal_pose, flip_costs, model_dt,
+      false, nullptr, nullptr, std::nullopt, std::nullopt};
+    try {
+      tc->score(flip_back_data);
+      FAIL() << "Expected GEAR_FLIP_WHILE_LATCHED once redraw budget (1/1) is spent";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=GEAR_FLIP_WHILE_LATCHED"),
+        std::string::npos) << ex.what();
+    }
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 1);
+
+    // Direct max_redraws = 0 regression on score-detected gear flip:
+    ASSERT_TRUE(
+      parent->set_parameters({
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.max_redraws", 0)})[0].successful);
+    controller.reset();
+    controller.setPlan(early_sc.message());
+    EXPECT_NO_THROW(controller.computeVelocityCommands(init_pose, speed, nullptr));
+    ASSERT_TRUE(tc->isLatched());
+    st.pose.pose.position.x = 0.30;
+    st.pose.pose.position.y = 0.06;
+    st.speed.linear.x = -0.10f;
+    flip_costs.fill(0.0f);
+    try {
+      tc->score(flip_data);
+      FAIL() <<
+        "Expected GEAR_FLIP_WHILE_LATCHED on first score-detected gear flip when max_redraws=0";
+    } catch (const nav2_core::InvalidPath & ex) {
+      EXPECT_NE(
+        std::string(ex.what()).find("reason=GEAR_FLIP_WHILE_LATCHED"),
+        std::string::npos) << ex.what();
+    }
+    EXPECT_FALSE(tc->isLatched());
+    EXPECT_EQ(tc->redrawCount(), 0);
+  }
 }
 }  // namespace
 

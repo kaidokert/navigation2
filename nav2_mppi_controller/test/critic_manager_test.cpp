@@ -202,10 +202,10 @@ TEST(CriticManagerTests, CriticLoadingTest)
   models::Trajectories tr;
   tr.reset(2, 10);
   for (size_t k = 0; k < 10; ++k) {
-    tr.x(0, k) = 1.80f + 0.02f * static_cast<float>(k);
+    tr.x(0, k) = 1.80f + 0.05f * static_cast<float>(k);
     tr.y(0, k) = 1.95f + 0.005f * static_cast<float>(k);
     tr.yaws(0, k) = 0.0f;
-    tr.x(1, k) = 1.80f + 0.01f * static_cast<float>(k);
+    tr.x(1, k) = 1.80f + 0.05f * static_cast<float>(k);
     tr.y(1, k) = 2.08f;
     tr.yaws(1, k) = 0.25f;
   }
@@ -225,18 +225,48 @@ TEST(CriticManagerTests, CriticLoadingTest)
   CriticData data = {
     st, tr, mp, goal, costs, model_dt, false, nullptr, nullptr, std::nullopt, std::nullopt};
 
+  auto resetEvalState = [&]() {
+      costs.fill(0.0f);
+      data.fail_flag = false;
+      data.furthest_reached_path_point.reset();
+      data.path_pts_valid.reset();
+    };
+
+  resetEvalState();
+  pfc->score(data);
+  const float pfc_overlap_cost = costs(0) + costs(1);
+  EXPECT_GT(pfc_overlap_cost, 0.0f);
+
+  resetEvalState();
+  pac->score(data);
+  const float pac_overlap_cost = costs(0) + costs(1);
+  EXPECT_GT(pac_overlap_cost, 0.0f);
+
+  resetEvalState();
   pfc->score(data);
   pac->score(data);
   const float stock_overlap_cost = costs(0) + costs(1);
   EXPECT_GT(stock_overlap_cost, 0.0f);
+  EXPECT_NEAR(stock_overlap_cost, pfc_overlap_cost + pac_overlap_cost, 1e-4f);
 
+  // Evaluate critic_manager from a clean zeroed cost accumulator so stock critics are NOT
+  // double-counted when comparing total_overlap_cost against stock_overlap_cost:
+  resetEvalState();
   critic_manager.evalTrajectoriesScores(data);
   const float total_overlap_cost = costs(0) + costs(1);
+  const float tac_overlap_delta = total_overlap_cost - stock_overlap_cost;
   EXPECT_TRUE(tac->isLatched());
   EXPECT_EQ(
     tac->guidanceOwnership(),
     critics::GuidanceOwnership::OVERLAP_SHARED);
+  EXPECT_GT(tac_overlap_delta, 0.0f);
   EXPECT_GT(total_overlap_cost, stock_overlap_cost);
+
+  resetEvalState();
+  tac->score(data);
+  const float tac_isolated_overlap_cost = costs(0) + costs(1);
+  EXPECT_GT(tac_isolated_overlap_cost, 0.0f);
+  EXPECT_NEAR(tac_overlap_delta, tac_isolated_overlap_cost, 1e-4f);
 
   // (b) Step inside the 0.35 m cutoff (d_goal = 0.25 m <= 0.35 m) and verify stock critics
   //     contribute 0.0f while TerminalApproachCritic owns TERMINAL_EXCLUSIVE guidance:
@@ -256,13 +286,12 @@ TEST(CriticManagerTests, CriticLoadingTest)
     mp.y(i) = 2.00f;
     mp.yaws(i) = 0.0f;
   }
-  costs.fill(0.0f);
-  data.furthest_reached_path_point.reset();
-  data.path_pts_valid.reset();
+  resetEvalState();
   pfc->score(data);
   pac->score(data);
   EXPECT_FLOAT_EQ(costs(0) + costs(1), 0.0f);
 
+  resetEvalState();
   critic_manager.evalTrajectoriesScores(data);
   EXPECT_TRUE(tac->isLatched());
   EXPECT_EQ(

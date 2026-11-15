@@ -457,7 +457,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     return;
   }
 
-  if (latch_consumed_ || latched_ || approach_escalated_) {
+  if (latch_consumed_ || latched_ || approach_escalated_ || redraw_count_ > 0) {
     if (!same_goal) {
       resetLatch();
     } else if (!same_gear) {
@@ -1931,7 +1931,7 @@ void TerminalApproachCritic::score(CriticData & data)
 {
   if (hasParameterChangedSinceLatch()) {
     if (latch_consumed_ || latched_ || approach_escalated_ ||
-      replan_pending_ || replan_allowance_consumed_)
+      replan_pending_ || replan_allowance_consumed_ || redraw_count_ > 0)
     {
       if (replan_signal_sent_) {
         if (is_active_ && replan_pub_ != nullptr && replan_pub_->is_activated()) {
@@ -2022,7 +2022,8 @@ void TerminalApproachCritic::score(CriticData & data)
   // new global goal in onNewPlan() never replenish replan_allowance_consumed_ or latch_consumed_.
   if (!latched_frame_id_.empty() &&
     (latch_consumed_ || latched_ || approach_escalated_ ||
-    replan_pending_ || replan_signal_sent_ || replan_allowance_consumed_))
+    replan_pending_ || replan_signal_sent_ || replan_allowance_consumed_ ||
+    redraw_count_ > 0))
   {
     const double step_dpos =
       std::hypot(goal_x - latched_goal_.position.x, goal_y - latched_goal_.position.y);
@@ -2045,10 +2046,10 @@ void TerminalApproachCritic::score(CriticData & data)
           latched_ && latched_is_reference_path_ &&
           (ref_cutoff > 0.0) && (goal_dist > ref_cutoff);
         clearActiveCurve();
-        latch_consumed_ = true;
         if (replan_allowance_consumed_ || max_redraws_ == 0 ||
           redraw_count_ >= max_redraws_ || !had_active_latch)
         {
+          latch_consumed_ = true;
           const char * r = replan_allowance_consumed_ ?
             "LOCAL_GOAL_SHIFT_AFTER_REPLAN_CONSUMED" : "LOCAL_GOAL_SHIFT_EXCEEDED";
           approach_escalated_ = true;
@@ -2065,6 +2066,7 @@ void TerminalApproachCritic::score(CriticData & data)
             requestReplanIfEligible(goal_dist);
           }
         } else {
+          latch_consumed_ = false;
           ++redraw_count_;
         }
       }
@@ -2292,6 +2294,7 @@ void TerminalApproachCritic::score(CriticData & data)
         break;
       }
     }
+    const bool had_gear_ctx = latched_ || approach_escalated_ || redraw_count_ > 0;
     if (!inferred_from_seg) {
       if (latched_ || approach_escalated_ || replan_pending_) {
         path_gear = latched_gear_;
@@ -2302,7 +2305,7 @@ void TerminalApproachCritic::score(CriticData & data)
           (goal_x - robot_x) * std::cos(goal_yaw) + (goal_y - robot_y) * std::sin(goal_yaw);
         path_gear = (d_nose < kReverseNoseThresholdM) ? -1.0 : 1.0;
       }
-    } else if ((latched_ || approach_escalated_) && (path_gear * latched_gear_ < 0.0)) {
+    } else if (had_gear_ctx && (path_gear * latched_gear_ < 0.0)) {
       const bool had_active_latch = latched_ && !approach_escalated_;
       const bool after_replan = replan_allowance_consumed_ && !replan_pending_;
       if (after_replan || max_redraws_ == 0 || redraw_count_ >= max_redraws_ || !had_active_latch) {
@@ -2328,6 +2331,7 @@ void TerminalApproachCritic::score(CriticData & data)
       } else {
         ++redraw_count_;
         clearActiveCurve();
+        latch_consumed_ = false;
       }
     }
 
