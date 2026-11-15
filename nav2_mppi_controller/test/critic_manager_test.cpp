@@ -18,6 +18,9 @@
 #include "gtest/gtest.h"
 #include "rclcpp/rclcpp.hpp"
 #include "nav2_mppi_controller/critic_manager.hpp"
+#include "nav2_mppi_controller/critics/path_align_critic.hpp"
+#include "nav2_mppi_controller/critics/path_follow_critic.hpp"
+#include "nav2_mppi_controller/critics/terminal_approach_critic.hpp"
 
 // Tests critic manager
 
@@ -101,6 +104,11 @@ public:
   {
     return critic_names_;
   }
+
+  critics::CriticFunction * getCritic(size_t idx) const
+  {
+    return idx < critics_.size() ? critics_[idx].get() : nullptr;
+  }
 };
 
 TEST(CriticManagerTests, BasicCriticOperations)
@@ -146,17 +154,81 @@ TEST(CriticManagerTests, CriticLoadingTest)
     "critic_manager.critics",
     rclcpp::ParameterValue(
       std::vector<std::string>{
-    "ConstraintCritic", "PreferForwardCritic", "TerminalApproachCritic"}));
+    "PathFollowCritic", "PathAlignCritic", "TerminalApproachCritic"}));
+  node->declare_parameter(
+    "critic_manager.PathFollowCritic.threshold_to_consider", rclcpp::ParameterValue(0.35));
+  node->declare_parameter(
+    "critic_manager.PathAlignCritic.threshold_to_consider", rclcpp::ParameterValue(0.35));
+  node->declare_parameter(
+    "critic_manager.TerminalApproachCritic.enabled", rclcpp::ParameterValue(true));
+  node->declare_parameter(
+    "critic_manager.TerminalApproachCritic.approach_radius", rclcpp::ParameterValue(0.65));
+  node->declare_parameter(
+    "critic_manager.TerminalApproachCritic.cutoff_radius", rclcpp::ParameterValue(0.35));
   auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "dummy_costmap", "", "dummy_costmap", true);
   ParametersHandler param_handler(node);
   rclcpp_lifecycle::State state;
   costmap_ros->on_configure(state);
+  auto * cm = costmap_ros->getCostmap();
+  cm->setDefaultValue(nav2_costmap_2d::FREE_SPACE);
+  cm->resetMap(0, 0, cm->getSizeInCellsX(), cm->getSizeInCellsY());
 
-  // This should grab the critics parameter and load the 3 requested plugins
+  // This should grab the critics parameter and load the 3 requested real plugins via pluginlib
   CriticManagerWrapperEnum critic_manager;
   critic_manager.on_configure(node, "critic_manager", costmap_ros, &param_handler);
   EXPECT_EQ(critic_manager.getCriticNum(), 3u);
   ASSERT_EQ(critic_manager.getCriticNames().size(), 3u);
+  EXPECT_EQ(critic_manager.getCriticNames()[0], "PathFollowCritic");
+  EXPECT_EQ(critic_manager.getCriticNames()[1], "PathAlignCritic");
   EXPECT_EQ(critic_manager.getCriticNames()[2], "TerminalApproachCritic");
+
+  auto * pfc = dynamic_cast<critics::PathFollowCritic *>(critic_manager.getCritic(0));
+  auto * pac = dynamic_cast<critics::PathAlignCritic *>(critic_manager.getCritic(1));
+  auto * tac = dynamic_cast<critics::TerminalApproachCritic *>(critic_manager.getCritic(2));
+  ASSERT_NE(pfc, nullptr);
+  ASSERT_NE(pac, nullptr);
+  ASSERT_NE(tac, nullptr);
+
+  // Build real trajectories and path inside the 0.35 m cutoff (d_goal = 0.25 m) within the
+  // [0, 5] x [0, 5] costmap and score through evalTrajectoriesScores() on the real loaded critics
+  models::State st;
+  st.reset(2, 10);
+  st.pose.pose.position.x = 2.00;
+  st.pose.pose.position.y = 2.00;
+  st.pose.pose.orientation.w = 1.0;
+  st.speed.linear.x = 0.15;
+  models::Trajectories tr;
+  tr.reset(2, 10);
+  for (size_t k = 0; k < 10; ++k) {
+    tr.x(0, k) = 2.00f + 0.02f * static_cast<float>(k);
+    tr.y(0, k) = 2.00f;
+    tr.yaws(0, k) = 0.0f;
+    tr.x(1, k) = 2.00f + 0.01f * static_cast<float>(k);
+    tr.y(1, k) = 2.08f;
+    tr.yaws(1, k) = 0.25f;
+  }
+  models::Path mp;
+  mp.reset(6);
+  for (size_t i = 0; i < 6; ++i) {
+    mp.x(i) = 2.00f + 0.05f * static_cast<float>(i);
+    mp.y(i) = 2.00f;
+    mp.yaws(i) = 0.0f;
+  }
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 2.25;
+  goal.position.y = 2.00;
+  goal.orientation.w = 1.0;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.05f;
+  CriticData data = {
+    st, tr, mp, goal, costs, model_dt, false, nullptr, nullptr, std::nullopt, std::nullopt};
+
+  critic_manager.evalTrajectoriesScores(data);
+  EXPECT_TRUE(tac->isLatched());
+  EXPECT_EQ(
+    tac->guidanceOwnership(),
+    critics::GuidanceOwnership::TERMINAL_EXCLUSIVE);
+  EXPECT_GT(costs(0) + costs(1), 0.0f);
+  EXPECT_LT(costs(0), costs(1));
 }

@@ -72,7 +72,8 @@ constexpr double kBoundedBiarcMaxXEndM = 0.015;             // ROBOT (UNDERIVED)
 constexpr double kBoundedBiarcXEndRatio = 0.05;             // ROBOT (UNDERIVED): Max 2a |X0| ratio
 constexpr double kGoalBoxXyTargetRatio = 0.25;              // ROOM (UNDERIVED): End XY / xy_tol
 constexpr double kGoalBoxYawTargetRatio = 0.75;             // ROOM (UNDERIVED): End yaw / yaw_tol
-constexpr double kTurnCorridorYawAllowanceRatio = 0.30;     // ROOM (UNDERIVED): Turn yaw ratio
+constexpr double kTurnCorridorYawAllowanceRatio = 0.35;     // ROOM (UNDERIVED): Radian yaw margin
+                                                            //   per rad of path-to-goal curvature
 constexpr double kMaxCollisionCheckStepM = 0.025;           // GENERIC: Max collision step (m)
 constexpr double kMaxGhostRunwayScanM = 1.00;               // ROOM (UNDERIVED): Max runway scan (m)
 constexpr double kGoalMatchPosTolM = 0.05;                  // GENERIC: Max pos diff for goal (m)
@@ -87,7 +88,8 @@ constexpr double kLatchRadiusHysteresisM = 0.05;            // ROOM (UNDERIVED):
 constexpr double kReverseNoseThresholdM = -0.02;            // GENERIC: Reverse nose threshold (m)
 constexpr double kReleaseZoneGoalDistM = 0.05;              // ROBOT (UNDERIVED): Release dist (m)
 constexpr float kCurveYawErrorScaleSq = 0.36f;              // ROBOT (UNDERIVED): (0.6 m/rad)^2
-constexpr float kFollowTerminalWeightRatio = 0.60f;         // ROBOT (UNDERIVED): Terminal share
+constexpr float kFollowTerminalWeightRatio = 0.65f;         // ROBOT (UNDERIVED): Dimensionless
+                                                            //   terminal-horizon geodesic share
 constexpr float kFollowMeanWeightRatio =                    // GENERIC: Complement (1 - terminal)
   1.0f - kFollowTerminalWeightRatio;
 constexpr float kSettleAngularSpeedScale = 0.25f;           // ROBOT (UNDERIVED): Settle wz scale
@@ -325,6 +327,7 @@ void TerminalApproachCritic::clearActiveCurve()
   in_cusp_braking_transient_ = false;
   reversal_motion_established_ = false;
   max_observed_rollback_m_ = 0.0;
+  min_post_reversal_rollback_m_ = 0.0;
   latch_initial_cross_track_ = 0.0;
   latch_path_cross_track_ = 0.0;
   last_curve_lateral_err_ = 0.0;
@@ -637,6 +640,30 @@ const char * TerminalApproachCritic::ownershipName(GuidanceOwnership ownership)
     default:
       return "NONE";
   }
+}
+
+GuidanceOwnership TerminalApproachCritic::computeOwnership(
+  double goal_dist, bool is_latched, bool is_ref_path) const
+{
+  const double radius_limit =
+    static_cast<double>(std::max(kMinRadiusFloorM, approach_radius_)) +
+    ((latched_ || approach_escalated_ || replan_pending_) ? kLatchRadiusHysteresisM : 0.0);
+  if (goal_dist > radius_limit) {
+    return GuidanceOwnership::NONE;
+  }
+  const double ref_cutoff = effectiveRefCutoff();
+  const double handoff_cutoff = effectiveHandoffCutoff();
+  if (!is_latched) {
+    return (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) ?
+           GuidanceOwnership::PREPARE : GuidanceOwnership::TERMINAL_EXCLUSIVE;
+  }
+  if (is_ref_path && ref_cutoff > 0.0 && goal_dist > ref_cutoff) {
+    return GuidanceOwnership::PREPARE;
+  }
+  if (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) {
+    return GuidanceOwnership::OVERLAP_SHARED;
+  }
+  return GuidanceOwnership::TERMINAL_EXCLUSIVE;
 }
 
 void TerminalApproachCritic::snapshotLatchParameters()
@@ -1094,6 +1121,7 @@ CurveProjection TerminalApproachCritic::projectOntoCurve(
       static_cast<double>(curve[i].y) - static_cast<double>(curve[i - 1u].y));
   }
   const double total_len = seg_s.back();
+  proj.total_curve_s = total_len;
 
   auto segmentUnitTangent = [&](size_t idx) -> std::pair<double, double> {
       const double ax = static_cast<double>(curve[idx].x);
@@ -1819,6 +1847,7 @@ void TerminalApproachCritic::handleInfeasible(
   escalation_reason_ = reason;
 
   clearActiveCurve();
+  latch_consumed_ = true;
   approach_escalated_ = true;
 
   RCLCPP_INFO(
@@ -1952,6 +1981,14 @@ void TerminalApproachCritic::score(CriticData & data)
   if (!stock_thresholds_checked_) {
     stock_thresholds_checked_ = true;
     syncStockCriticThresholds(true);
+  }
+  if (cutoff_radius_ > 0.0f && stock_thresholds_configured_ &&
+    stock_pfc_active_ && stock_pac_active_ &&
+    std::fabs(effective_pfc_cutoff_ - effective_pac_cutoff_) > 1e-3f)
+  {
+    throw nav2_core::InvalidPath(
+      "[TERMINAL_APPROACH_ABORT] reason=STOCK_THRESHOLD_MISMATCH "
+      "(PathFollowCritic and PathAlignCritic threshold_to_consider must match)");
   }
   if (data.path.x.shape(0) == 0u) {
     return;
@@ -2157,10 +2194,17 @@ void TerminalApproachCritic::score(CriticData & data)
     return;
   }
 
-  const double radius_limit =
-    static_cast<double>(std::max(kMinRadiusFloorM, approach_radius_)) +
-    ((latched_ || approach_escalated_ || replan_pending_) ? kLatchRadiusHysteresisM : 0.0);
-  if (goal_dist > radius_limit) {
+  if (!data.reuse_obstacles_cache) {
+    tick_evaluated_ = false;
+  }
+  if (data.reuse_obstacles_cache && tick_evaluated_) {
+    if (!latched_ || cached_active_path_.size() < 2u) {
+      return;
+    }
+  }
+
+  ownership_ = computeOwnership(goal_dist, latched_, latched_is_reference_path_);
+  if (ownership_ == GuidanceOwnership::NONE) {
     if (data.path.x.shape(0) >= 2u) {
       const size_t n_path = data.path.x.shape(0);
       for (size_t s = 0u; s + 1u < n_path; ++s) {
@@ -2175,7 +2219,6 @@ void TerminalApproachCritic::score(CriticData & data)
         }
       }
     }
-    ownership_ = GuidanceOwnership::NONE;
     return;
   }
 
@@ -2199,14 +2242,7 @@ void TerminalApproachCritic::score(CriticData & data)
     }
   }
 
-  if (!data.reuse_obstacles_cache) {
-    tick_evaluated_ = false;
-  }
-  if (data.reuse_obstacles_cache && tick_evaluated_) {
-    if (!latched_ || cached_active_path_.size() < 2u) {
-      return;
-    }
-  } else {
+  if (!tick_evaluated_) {
     tick_evaluated_ = true;
     const double path_cross_track = minDistanceToPath(robot_x, robot_y, data.path);
     double projected_path_yaw = static_cast<double>(data.path.yaws(0));
@@ -2332,7 +2368,6 @@ void TerminalApproachCritic::score(CriticData & data)
         }
         throw nav2_core::InvalidPath(last_abort_msg_);
       }
-      return;
     }
 
     const double gear = latched_ ? latched_gear_ : path_gear;
@@ -2343,6 +2378,7 @@ void TerminalApproachCritic::score(CriticData & data)
       in_cusp_braking_transient_ = true;
       reversal_motion_established_ = false;
       max_observed_rollback_m_ = 0.0;
+      min_post_reversal_rollback_m_ = 0.0;
     }
 
     const double path_yaw_err =
@@ -2359,9 +2395,6 @@ void TerminalApproachCritic::score(CriticData & data)
 
     if (!latched_ && latch_consumed_ && redraw_count_ == 0) {
       approach_escalated_ = true;
-      if (escalation_reason_.empty()) {
-        escalation_reason_ = "LATCH_ALREADY_CONSUMED";
-      }
       return;
     }
 
@@ -2377,12 +2410,13 @@ void TerminalApproachCritic::score(CriticData & data)
     }
     updateCachedActivePath(robot_x, robot_y);
   }
-  if (latched_ && latched_is_reference_path_ && ref_cutoff > 0.0 && goal_dist > ref_cutoff) {
-    ownership_ = GuidanceOwnership::PREPARE;
+  if (!latched_ || latched_curve_.size() < 2u) {
     return;
   }
-  ownership_ = (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) ?
-    GuidanceOwnership::OVERLAP_SHARED : GuidanceOwnership::TERMINAL_EXCLUSIVE;
+  ownership_ = computeOwnership(goal_dist, latched_, latched_is_reference_path_);
+  if (ownership_ == GuidanceOwnership::PREPARE || ownership_ == GuidanceOwnership::NONE) {
+    return;
+  }
   scoreLatchedRollouts(data, robot_x, robot_y, latched_gear_);
 }
 
@@ -2580,15 +2614,17 @@ bool TerminalApproachCritic::tryInitialLatch(
     (!needs_capture || is_curved_turn_entry ||
     (is_short_approach && (!outside_tracking_corridor || sub_min_kinematically_reachable))) &&
     (!is_sub_min_dist || sub_min_kinematically_reachable);
+  ownership_ = computeOwnership(goal_dist, false, false);
   if (prefer_reference_path && ref_cutoff > 0.0 && goal_dist > ref_cutoff &&
     !replan_allowance_consumed_)
   {
-    ownership_ = GuidanceOwnership::PREPARE;
-    return false;
+    ownership_ = computeOwnership(goal_dist, true, true);
+    if (ownership_ == GuidanceOwnership::PREPARE) {
+      return false;
+    }
   }
 
-  if (overlap_entry_deferred_ && handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) {
-    ownership_ = GuidanceOwnership::PREPARE;
+  if (overlap_entry_deferred_ && ownership_ == GuidanceOwnership::PREPARE) {
     return false;
   }
   overlap_entry_deferred_ = false;
@@ -2660,15 +2696,12 @@ bool TerminalApproachCritic::tryInitialLatch(
     solved_initial_latch = true;
   }
   if (!solved_initial_latch) {
-    // Section 7.2: Before guidance transfers to TerminalApproachCritic (goal_dist >
-    // handoff_cutoff), stock PathFollowCritic / PathAlignCritic still own guidance and
-    // TerminalApproachCritic has added no cost. Under "abort" / "fallback", defer latching
-    // until guidance actually transfers at handoff_cutoff without re-solving on every tick
-    // in the overlap ring; at handoff_cutoff, perform the single authoritative latch check.
-    if (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff &&
-      infeasible_policy_ != "replan_signal")
-    {
-      ownership_ = GuidanceOwnership::PREPARE;
+    // Section 7.2: Before guidance transfers to TerminalApproachCritic (ownership_ == PREPARE),
+    // stock PathFollowCritic / PathAlignCritic still own guidance and TerminalApproachCritic has
+    // added no cost. Under "abort" / "fallback", defer latching until guidance actually transfers
+    // at handoff_cutoff without re-solving on every tick in the overlap ring; at handoff_cutoff,
+    // perform the single authoritative latch check.
+    if (ownership_ == GuidanceOwnership::PREPARE && infeasible_policy_ != "replan_signal") {
       overlap_entry_deferred_ = true;
       latched_goal_ = latch_origin_goal_ = data.goal;
       latched_frame_id_ = data.state.pose.header.frame_id;
@@ -2679,8 +2712,6 @@ bool TerminalApproachCritic::tryInitialLatch(
       snapshotLatchParameters();
       return false;
     }
-    ownership_ = (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) ?
-      GuidanceOwnership::PREPARE : GuidanceOwnership::TERMINAL_EXCLUSIVE;
     latched_goal_ = latch_origin_goal_ = data.goal;
     latched_frame_id_ = data.state.pose.header.frame_id;
     latched_gear_ = gear;
@@ -2722,13 +2753,9 @@ bool TerminalApproachCritic::tryInitialLatch(
     in_cusp_braking_transient_ = true;
     reversal_motion_established_ = false;
     max_observed_rollback_m_ = init_proj.pre_start_rollback_m;
+    min_post_reversal_rollback_m_ = init_proj.pre_start_rollback_m;
   }
-  if (handoff_cutoff > 0.0 && goal_dist > handoff_cutoff) {
-    ownership_ = latched_is_reference_path_ ?
-      GuidanceOwnership::PREPARE : GuidanceOwnership::OVERLAP_SHARED;
-  } else {
-    ownership_ = GuidanceOwnership::TERMINAL_EXCLUSIVE;
-  }
+  ownership_ = computeOwnership(goal_dist, latched_, latched_is_reference_path_);
   snapshotLatchParameters();
   RCLCPP_INFO(
     logger_,
@@ -2756,19 +2783,8 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
   double goal_xy_tol,
   double goal_yaw_tol)
 {
-  const double ref_cutoff = effectiveRefCutoff();
   const double handoff_cutoff = effectiveHandoffCutoff();
-  const bool passive_overlap_ref =
-    latched_is_reference_path_ && (ref_cutoff > 0.0) && (goal_dist > ref_cutoff);
-  const bool in_shared_overlap =
-    (handoff_cutoff > 0.0) && (goal_dist > handoff_cutoff);
-  if (passive_overlap_ref) {
-    ownership_ = GuidanceOwnership::PREPARE;
-  } else if (in_shared_overlap) {
-    ownership_ = GuidanceOwnership::OVERLAP_SHARED;
-  } else {
-    ownership_ = GuidanceOwnership::TERMINAL_EXCLUSIVE;
-  }
+  ownership_ = computeOwnership(goal_dist, latched_, latched_is_reference_path_);
 
   size_t closest_curve_idx = 0u;
   double best_curve_pt_dist = std::numeric_limits<double>::infinity();
@@ -2865,13 +2881,23 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
   const bool latched_tol_violated =
     (end_err_xy > live_max_end_xy + 1e-5) || (end_err_yaw > live_max_end_yaw + 1e-5);
 
-  // Section 1: Separate longitudinal rollback / cusp braking transient from lateral tracking error.
+  // Section 1 & Follow-Up Section A: Separate longitudinal rollback / cusp braking transient from
+  // lateral tracking error, and enforce the post-reversal retreat contract against the best
+  // recovered along-track position (min_post_reversal_rollback_m_) rather than the historical peak.
   if (in_cusp_braking_transient_) {
+    const bool was_established = reversal_motion_established_;
     if (last_measured_vx_ * latched_gear_ >= kReversalEstablishedVelMps) {
       reversal_motion_established_ = true;
     }
     if (!reversal_motion_established_) {
       max_observed_rollback_m_ = std::max(max_observed_rollback_m_, proj.pre_start_rollback_m);
+      min_post_reversal_rollback_m_ = max_observed_rollback_m_;
+    } else if (!was_established) {
+      min_post_reversal_rollback_m_ =
+        std::min(max_observed_rollback_m_, proj.pre_start_rollback_m);
+    } else {
+      min_post_reversal_rollback_m_ =
+        std::min(min_post_reversal_rollback_m_, proj.pre_start_rollback_m);
     }
     if (reversal_motion_established_ &&
       proj.pre_start_rollback_m <= 1e-4 &&
@@ -2888,21 +2914,17 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     } else if (proj.pre_start_rollback_m > kMaxCuspBrakingRollbackM) {
       rollback_violated = true;
     } else {
-      if (
-        reversal_motion_established_ &&
-        proj.pre_start_rollback_m > max_observed_rollback_m_ + kMaxPostReversalRetreatM)
-      {
+      const double max_post_reversal_rb =
+        min_post_reversal_rollback_m_ + kMaxPostReversalRetreatM;
+      if (reversal_motion_established_ && proj.pre_start_rollback_m > max_post_reversal_rb) {
         rollback_violated = true;
       }
     }
   }
 
-  // Section 2: Align lateral drift enforcement with actual guidance ownership.
-  // In the overlap ring (goal_dist > handoff_cutoff), stock PathFollowCritic / PathAlignCritic
-  // still guide toward the original planner path. Do not tighten or enforce exclusive curve
-  // tracking while the vehicle stays within the shared-control reference corridor and the
-  // prepared curve remains joinable at the cutoff; establish the active tracking envelope at
-  // the actual transfer of guidance (goal_dist <= handoff_cutoff).
+  // Section 2 & Follow-Up Section C: Align lateral drift enforcement with actual guidance
+  // ownership and validate bounded Ackermann joinability (min_turning_radius_) across the
+  // overlap ring and at the cutoff transition.
   const double travel_goal_yaw =
     latched_gear_ < 0.0 ? angles::normalize_angle(goal_yaw + M_PI) : goal_yaw;
   const double dx_g = robot_x - goal_x, dy_g = robot_y - goal_y;
@@ -2912,30 +2934,62 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     latched_gear_ < 0.0 ? angles::normalize_angle(robot_yaw + M_PI) : robot_yaw;
   const double theta0_goal =
     angles::shortest_angular_distance(travel_goal_yaw, robot_travel_yaw);
+  const double curve_travel_yaw =
+    latched_gear_ < 0.0 ? angles::normalize_angle(proj.segment_yaw + M_PI) : proj.segment_yaw;
+  const double curve_yaw_err =
+    angles::shortest_angular_distance(curve_travel_yaw, robot_travel_yaw);
+  const double r_min =
+    std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_));
+  const double s_rem = std::max(0.0, proj.total_curve_s - proj.along_track_s);
+  bool curve_kinematically_joinable =
+    (lon_remaining > kMinBehindGoalLonM) &&
+    (std::fabs(theta0_goal) < kMaxCaptureAngleRad) &&
+    (std::fabs(curve_yaw_err) < kMaxCaptureAngleRad);
+  if (curve_kinematically_joinable && !in_cusp_braking_transient_ &&
+    std::fabs(curve_yaw_err) > goal_yaw_tol)
+  {
+    const double psi_abs = std::fabs(curve_yaw_err);
+    const double join_yaw_tol =
+      std::min(goal_yaw_tol, kMaxCaptureAngleRad - 1e-3);
+    const double sin_tol = std::sin(join_yaw_tol);
+    const double cos_tol = std::cos(join_yaw_tol);
+    const double dx_align = r_min * std::max(0.0, std::sin(psi_abs) - sin_tol);
+    const double dy_align =
+      std::copysign(r_min * std::max(0.0, cos_tol - std::cos(psi_abs)), curve_yaw_err);
+    const double y_apex = std::fabs(proj.signed_lateral + dy_align);
+    const double corridor_lat =
+      latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
+    const double excess_lat = std::max(0.0, y_apex - corridor_lat);
+    const double dx_s_turn = 2.0 * std::sqrt(
+      std::max(0.0, r_min * excess_lat - 0.25 * excess_lat * excess_lat));
+    if (dx_align + dx_s_turn > s_rem + kGoalBoxXyTargetRatio * goal_xy_tol) {
+      curve_kinematically_joinable = false;
+    }
+  }
   const double max_join_lat = std::max(
     static_cast<double>(viable_path_tracking_ratio_) * goal_xy_tol,
     latch_origin_cross_track_ + 2.0 * static_cast<double>(max_tracking_drift_));
   const bool overlap_handoff_joinable =
-    (lon_remaining > kMinBehindGoalLonM) &&
-    (std::fabs(theta0_goal) < kMaxCaptureAngleRad) &&
-    (proj.lateral_dist <= max_join_lat);
+    curve_kinematically_joinable && (proj.lateral_dist <= max_join_lat);
   const bool in_shared_ref_corridor =
     !local_goal_shift_caused_drift_ &&
     (path_cross_track <= latch_path_cross_track_ + static_cast<double>(max_tracking_drift_));
 
-  if (passive_overlap_ref ||
-    (in_shared_overlap && in_shared_ref_corridor && overlap_handoff_joinable))
+  if (ownership_ == GuidanceOwnership::PREPARE ||
+    (ownership_ == GuidanceOwnership::OVERLAP_SHARED &&
+    in_shared_ref_corridor && overlap_handoff_joinable))
   {
     latch_initial_cross_track_ = std::min(max_join_lat, proj.lateral_dist);
   }
   const double effective_max_drift =
     latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
   last_effective_lat_limit_ = effective_max_drift;
-  const bool overlap_unjoinable =
-    in_shared_overlap && !passive_overlap_ref && !overlap_handoff_joinable;
+  const bool unjoinable_or_drifted =
+    (ownership_ == GuidanceOwnership::OVERLAP_SHARED) ?
+    (!overlap_handoff_joinable || (proj.lateral_dist > effective_max_drift)) :
+    (!curve_kinematically_joinable || (proj.lateral_dist > effective_max_drift));
   const bool drift_violated =
-    !passive_overlap_ref &&
-    (overlap_unjoinable || (proj.lateral_dist > effective_max_drift));
+    (ownership_ != GuidanceOwnership::PREPARE) && unjoinable_or_drifted;
   const bool already_in_goal_box =
     !latched_blocked && !latched_tol_violated && !rollback_violated &&
     (goal_dist <= goal_xy_tol) &&
@@ -2948,7 +3002,7 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
       (latched_tol_violated ? "LATCHED_TOLERANCE_VIOLATED" :
       (rollback_violated ? "ROLLBACK_EXCEEDED" :
       (local_goal_shift_caused_drift_ ? "LOCALIZATION_JUMP" : "DRIFT_EXCEEDED")));
-    if (redraw_count_ < max_redraws_) {
+    if (redraw_count_ < max_redraws_ && curve_kinematically_joinable) {
       std::vector<utils::Pose2D> redrawn;
       std::string redrawn_family;
       double redrawn_r = 0.0;
@@ -2968,6 +3022,11 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
         last_pre_start_rollback_m_ = redraw_proj.pre_start_rollback_m;
         last_effective_lat_limit_ =
           latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
+        in_cusp_braking_transient_ = false;
+        reversal_motion_established_ = false;
+        max_observed_rollback_m_ = redraw_proj.pre_start_rollback_m;
+        min_post_reversal_rollback_m_ = redraw_proj.pre_start_rollback_m;
+        ownership_ = computeOwnership(goal_dist, latched_, latched_is_reference_path_);
         latch_origin_goal_ = data.goal;
         ++redraw_count_;
         snapshotLatchParameters();
@@ -2985,15 +3044,16 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     latched_goal_ = data.goal;
     latch_origin_goal_ = data.goal;
     latched_frame_id_ = data.state.pose.header.frame_id;
-    // Section 7.2: If a passive reference_path latch in the overlap/hysteresis zone (where
-    // TerminalApproachCritic has not steered yet) becomes blocked or violates tightened
-    // tolerances while stock critics still own guidance, unlatch and record escalation
-    // (or request a replacement plan under replan_signal), deferring any InvalidPath throw
-    // until guidance transfers at handoff_cutoff.
-    if (passive_overlap_ref && handoff_cutoff > 0.0 && goal_dist > handoff_cutoff &&
-      infeasible_policy_ != "replan_signal")
+    // Section 7.2: If a passive reference_path latch in the overlap/hysteresis zone
+    // (ownership_ == PREPARE, where TerminalApproachCritic has not steered yet) becomes blocked
+    // or violates tightened tolerances while stock critics still own guidance, unlatch and record
+    // escalation (or request a replacement plan under replan_signal), deferring any InvalidPath
+    // throw until guidance transfers at handoff_cutoff.
+    if (ownership_ == GuidanceOwnership::PREPARE && handoff_cutoff > 0.0 &&
+      goal_dist > handoff_cutoff && infeasible_policy_ != "replan_signal")
     {
       clearActiveCurve();
+      ownership_ = GuidanceOwnership::PREPARE;
       latch_consumed_ = true;
       approach_escalated_ = true;
       escalation_reason_ = fail_reason;
@@ -3002,13 +3062,11 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     handleInfeasible(fail_reason, path_cross_track, goal_dist, path_yaw_err);
     return false;
   }
-  if (!passive_overlap_ref && !in_shared_overlap &&
+  if (ownership_ == GuidanceOwnership::TERMINAL_EXCLUSIVE &&
     !in_cusp_braking_transient_ && proj.pre_start_rollback_m <= 1e-4)
   {
     double yaw_align_floor = 0.0;
     if (latched_is_reference_path_) {
-      const double r_min =
-        std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_));
       yaw_align_floor =
         r_min * (1.0 - std::cos(std::min(path_yaw_err, goal_yaw_tol)));
     }
@@ -3197,8 +3255,10 @@ void TerminalApproachCritic::scoreLatchedRollouts(
     stock_thresholds_configured_ ?
     (stock_pfc_active_ && (goal_dist > static_cast<double>(effective_pfc_cutoff_))) :
     (goal_dist > static_cast<double>(cutoff_radius_)));
+  const bool suppress_follow_for_shared_pfc =
+    (ownership_ == GuidanceOwnership::OVERLAP_SHARED) || pfc_active_at_goal_dist;
   const float effective_follow_weight =
-    (latched_ && !in_release_zone && pfc_active_at_goal_dist) ? 0.0f : follow_weight_;
+    (latched_ && !in_release_zone && suppress_follow_for_shared_pfc) ? 0.0f : follow_weight_;
   const bool has_state_vel =
     (data.state.vx.shape(0) == batch_size) &&
     (data.state.wz.shape(0) == batch_size) &&

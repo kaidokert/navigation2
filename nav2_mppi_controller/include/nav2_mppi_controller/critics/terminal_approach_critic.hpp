@@ -59,6 +59,7 @@ struct CurveProjection
   double lateral_dist{std::numeric_limits<double>::infinity()};
   double signed_lateral{0.0};
   double along_track_s{0.0};
+  double total_curve_s{0.0};
   double pre_start_rollback_m{0.0};
   double post_end_overshoot_m{0.0};
   double euclidean_dist{std::numeric_limits<double>::infinity()};
@@ -287,6 +288,38 @@ public:
   }
 
   /**
+   * @brief Inspect whether the cusp-braking longitudinal transient is currently active
+   */
+  bool inCuspBrakingTransient() const
+  {
+    return in_cusp_braking_transient_;
+  }
+
+  /**
+   * @brief Inspect whether post-reversal motion in latched_gear_ has been established
+   */
+  bool isReversalMotionEstablished() const
+  {
+    return reversal_motion_established_;
+  }
+
+  /**
+   * @brief Inspect the minimum pre-start rollback (best recovered position) after reversal (m)
+   */
+  double minPostReversalRollbackM() const
+  {
+    return min_post_reversal_rollback_m_;
+  }
+
+  /**
+   * @brief Inspect whether the single initial latch allowance has been consumed for the approach
+   */
+  bool isLatchConsumed() const
+  {
+    return latch_consumed_;
+  }
+
+  /**
    * @brief Decompose pose projection onto a finite curve into orthogonal lateral error,
    *        along-track arc length, pre-start rollback, post-end overshoot, and endpoint distance
    */
@@ -405,6 +438,12 @@ protected:
   static const char * ownershipName(GuidanceOwnership ownership);
 
   /**
+   * @brief Authoritative guidance ownership state for a given goal distance and latch status
+   */
+  GuidanceOwnership computeOwnership(
+    double goal_dist, bool is_latched, bool is_ref_path) const;
+
+  /**
    * @brief Attempt to latch a reference path or synthetic capture curve upon entering the approach
    *        circle; returns false if scoring should return early (deferred or escalated)
    */
@@ -513,6 +552,7 @@ protected:
   bool in_cusp_braking_transient_{false};
   bool reversal_motion_established_{false};
   double max_observed_rollback_m_{0.0};
+  double min_post_reversal_rollback_m_{0.0};
   bool overlap_entry_deferred_{false};
   double latch_origin_cross_track_{0.0};
   double latch_initial_cross_track_{0.0};
