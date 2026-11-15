@@ -3895,6 +3895,52 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
       controller.computeVelocityCommands(pose({-0.136, -0.0432, -0.626}), cusp_speed, nullptr));
     EXPECT_TRUE(controller.terminalCritic()->isLatched());
 
+    // m8_v2_r1 (2-pose 4.56 cm terminal stub, |y0_goal| = 0.046 m > 0.045 m at entry, coasting
+    // inward at vx = -0.2553 m/s to |y_apex| = 0.020 m <= 0.045 m):
+    Scenario m8_v2_r1_stub = early_sc;
+    m8_v2_r1_stub.path = {
+      {-0.0456, 0.0020, -0.14},
+      {0.0, 0.0, 0.0}};
+    m8_v2_r1_stub.gears = {1};
+    controller.reset();
+    controller.setPlan(m8_v2_r1_stub.message());
+    cusp_speed.linear.x = -0.2553;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.079, -0.046, -0.470}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
+    // m8_v2_r4 (6-pose 22.3 cm post-cusp curve, handoff at goal_dist = 0.247 m >= 0.16 m with
+    // cross_track = 0.0016 m, yaw_err = 0.3093 rad, vx = -0.2029 m/s, followed by backward coast
+    // to apex and full-lock R_min = 0.56 m forward turn-in reaching curve_lat_err = 0.0474 m at
+    // goal_dist = 0.084 m): must hold latch without DRIFT_EXCEEDED:
+    Scenario m8_v2_r4_curve = early_sc;
+    m8_v2_r4_curve.path = {
+      {-0.214, 0.043, -0.36},
+      {-0.171, 0.026, -0.28},
+      {-0.128, 0.014, -0.20},
+      {-0.085, 0.005, -0.12},
+      {-0.043, 0.001, -0.05},
+      {0.0, 0.0, 0.0}};
+    m8_v2_r4_curve.gears = {1, 1, 1, 1, 1};
+    controller.reset();
+    controller.setPlan(m8_v2_r4_curve.message());
+    cusp_speed.linear.x = -0.2029;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.2409, 0.0545, -0.7082}), cusp_speed, nullptr));
+    ASSERT_TRUE(controller.terminalCritic()->isLatched());
+    cusp_speed.linear.x = -0.01;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.2767, 0.0815, -0.6127}), cusp_speed, nullptr));
+    cusp_speed.linear.x = 0.08;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.2114, 0.0250, -0.6113}), cusp_speed, nullptr));
+    cusp_speed.linear.x = 0.14;
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.1343, -0.0196, -0.4521}), cusp_speed, nullptr));
+    EXPECT_NO_THROW(
+      controller.computeVelocityCommands(pose({-0.0668, -0.0455, -0.3275}), cusp_speed, nullptr));
+    EXPECT_TRUE(controller.terminalCritic()->isLatched());
+
     // m6_r5 reverse-gear (gear = -1) handoff state: lon = 0.089 m, y0 = +0.0242 m,
     // th0 = +0.497 rad (nose yaw = M_PI + 0.497 = -2.6446 rad), vx = +0.247 m/s
     // (vx * gear = -0.247 m/s < 0), followed by coast to apex and reverse approach:

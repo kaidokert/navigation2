@@ -885,9 +885,11 @@ bool TerminalApproachCritic::buildReferencePathCurve(
           const double chord_th = std::atan2(by - ay, bx - ax);
           const double chord_err =
             std::fabs(angles::shortest_angular_distance(seg_travel_th, chord_th));
-          const double max_chord_err = std::max(
-            kMinRefChordAngleTolRad,
-            seg_len / (kRefCurvatureMarginRatio * min_turning_r));
+          const double max_chord_err = is_terminal_seg ?
+            std::max(kMinRefChordAngleTolRad, 0.5 * max_seg_dth) :
+            std::max(
+              kMinRefChordAngleTolRad,
+              seg_len / (kRefCurvatureMarginRatio * min_turning_r));
           if (chord_err > max_chord_err) {
             return false;
           }
@@ -2483,10 +2485,10 @@ bool TerminalApproachCritic::tryInitialLatch(
   bool has_cusp_coast_apex = false;
   double cusp_apex_wx = robot_x;
   double cusp_apex_wy = robot_y;
-  if (!sub_min_arc_reaches_goal_box && tick0_cusp_braking &&
+  if (tick0_cusp_braking &&
     lon_remaining >= kSubMinBehindGoalLonM &&
     std::fabs(theta0_goal) < kMaxCaptureAngleRad &&
-    std::fabs(y0_goal) <= static_cast<double>(max_tracking_drift_))
+    std::fabs(y0_goal) <= viable_cross_track_limit)
   {
     const double v_opp = std::max(0.0, -last_measured_vx_ * gear);
     if (v_opp >= kReversalEstablishedVelMps) {
@@ -2537,6 +2539,9 @@ bool TerminalApproachCritic::tryInitialLatch(
         }
       }
       if (std::fabs(y_apex) <= viable_cross_track_limit &&
+        (path_cross_track <= static_cast<double>(max_tracking_drift_) ||
+        std::fabs(y0_goal) <= static_cast<double>(max_tracking_drift_) ||
+        std::fabs(y_apex) <= static_cast<double>(max_tracking_drift_)) &&
         coast_collision_free &&
         evalArcReachesGoalBox(lon_apex, y_apex, th_apex, viable_cross_track_limit))
       {
@@ -2700,6 +2705,11 @@ bool TerminalApproachCritic::tryInitialLatch(
     const CurveProjection apex_proj =
       projectOntoCurve(cusp_apex_wx, cusp_apex_wy, latched_curve_, latched_gear_);
     init_lat = std::max(init_lat, apex_proj.lateral_dist);
+  }
+  if (latched_ref) {
+    const double yaw_align_sagitta =
+      r_min * (1.0 - std::cos(std::min(path_yaw_err, viable_yaw_limit)));
+    init_lat = std::min(viable_cross_track_limit, std::max(init_lat, yaw_align_sagitta));
   }
   latch_origin_cross_track_ = init_proj.lateral_dist;
   latch_initial_cross_track_ = init_lat;
@@ -2995,7 +3005,15 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
   if (!passive_overlap_ref && !in_shared_overlap &&
     !in_cusp_braking_transient_ && proj.pre_start_rollback_m <= 1e-4)
   {
-    latch_initial_cross_track_ = std::min(latch_initial_cross_track_, proj.lateral_dist);
+    double yaw_align_floor = 0.0;
+    if (latched_is_reference_path_) {
+      const double r_min =
+        std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_));
+      yaw_align_floor =
+        r_min * (1.0 - std::cos(std::min(path_yaw_err, goal_yaw_tol)));
+    }
+    latch_initial_cross_track_ = std::min(
+      latch_initial_cross_track_, std::max(proj.lateral_dist, yaw_align_floor));
     last_effective_lat_limit_ =
       latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
   }
