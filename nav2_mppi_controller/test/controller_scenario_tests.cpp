@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "rcutils/logging.h"
 #include "nav2_controller/plugins/stopped_goal_checker.hpp"
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_mppi_controller/controller.hpp"
@@ -138,6 +139,19 @@ public:
   mppi::critics::TerminalApproachCritic * terminalCritic() const
   {
     return terminal_critic_;
+  }
+  float evaluateTerminalCriticOnlyCost()
+  {
+    if (terminal_critic_ == nullptr) {
+      return 0.0f;
+    }
+    xt::xtensor<float, 1> tc_costs = xt::zeros<float>({costs_.shape(0)});
+    mppi::CriticData tc_data = {
+      state_, generated_trajectories_, path_, goal_,
+      tc_costs, settings_.model_dt, false, nullptr, nullptr,
+      std::nullopt, std::nullopt};
+    terminal_critic_->score(tc_data);
+    return xt::sum(tc_costs)();
   }
   void addCritic(
     std::unique_ptr<mppi::critics::CriticFunction> critic, const std::string & name)
@@ -292,37 +306,8 @@ protected:
     m5_rec.diagnostic_only = true;
     atlas->cases.push_back(std::move(m5_rec));
 
-    // m6_cusp_recorded and wp1_overlap_recorded are loaded directly from the shared fixture
-    // file nav2_mppi_controller/test/fixtures/approach_atlas.json (extracted by
-    // inspect_wp1_and_extract_fixtures.py in the 20261114_fa_critic_v3 study bundle).
-
-    // Extracted from scratch/terminal_approach_a11_fa_critic_study/20261114_fa_critic_v3/raw/
-    // arm2_candidate_a11_fa_critic/suite2_matrix/nav2_matrix_8_lateral_shift_right_course/
-    // nav2_course_summary.json, episodes[0] (Repeat 1), k=130..153 (elapsed_s=7.735..8.885 s,
-    // wall_s=1794709904.210..1794709905.360; controller.log:177 latch at 1794709904.689).
-    Scenario m8_cusp;
-    m8_cusp.id = "m8_cusp_recorded";
-    m8_cusp.path = {
-      {-0.088800, 0.272300, -1.051600},
-      {-0.107500, 0.311400, -1.028300},
-      {-0.126600, 0.341500, -0.990100},
-      {-0.149300, 0.377800, -0.913800},
-      {-0.173500, 0.404800, -0.851700},
-      {-0.197400, 0.433000, -0.768700},
-      {-0.214000, 0.448000, -0.368500},  // Cusp vertex (inversion index 7)
-      {-0.178000, 0.433000, -0.300000},
-      {-0.142000, 0.420000, -0.230000},
-      {-0.106000, 0.410000, -0.160000},
-      {-0.070000, 0.403500, -0.100000},
-      {-0.035000, 0.400800, -0.050000},
-      {0.000000, 0.400000, 0.000000}};
-    m8_cusp.gears = {-1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1};
-    m8_cusp.starts = {
-      {"pre_cusp_fast", {-0.178000, 0.409900, -0.840100}},
-      {"cusp_handoff", {-0.233300, 0.463600, -0.668200}}};
-    m8_cusp.obstacles = {};
-    m8_cusp.diagnostic_only = true;
-    atlas->cases.push_back(std::move(m8_cusp));
+    // m6_cusp_recorded, wp1_overlap_recorded, and m8_cusp_recorded are loaded directly from
+    // the shared fixture file nav2_mppi_controller/test/fixtures/approach_atlas.json.
 
     cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
       "scenario_map", "", "scenario_map", true);
@@ -820,7 +805,7 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ClosedLoopCaptureAndInvaria
         parent->declare_parameter(
           "FollowPath.TerminalApproachCritic.cutoff_radius", rclcpp::ParameterValue(0.35));
         parent->declare_parameter(
-          "FollowPath.TerminalApproachCritic.min_turning_radius", rclcpp::ParameterValue(0.5605));
+          "FollowPath.TerminalApproachCritic.min_turning_radius", rclcpp::ParameterValue(0.56));
         parent->declare_parameter(
           "FollowPath.TerminalApproachCritic.max_redraws", rclcpp::ParameterValue(0));
         parent->declare_parameter(
@@ -2109,10 +2094,10 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11PullthroughTaperFootprintAn
         std::string::npos) << ex.what();
     }
 
-    // Restore default min_turning_radius (0.5605 m) and reset for next block
+    // Restore default min_turning_radius (0.56 m) and reset for next block
     ASSERT_TRUE(
       parent->set_parameters({
-        rclcpp::Parameter("FollowPath.TerminalApproachCritic.min_turning_radius", 0.5605)})[0]
+        rclcpp::Parameter("FollowPath.TerminalApproachCritic.min_turning_radius", 0.56)})[0]
       .successful);
     optimizer.resetCritics();
   }
@@ -3993,8 +3978,10 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
       EXPECT_FALSE(optimizer.terminalCritic()->isReferencePathLatched()) << "step " << idx;
       EXPECT_TRUE(optimizer.terminalCritic()->isLatchConsumed()) << "step " << idx;
       EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0) << "step " << idx;
-      // Non-zero critic cost contribution on every single tick across the 0.35 m cutoff:
+      // Non-zero total critic cost AND non-zero TerminalApproachCritic cost contribution on
+      // every single tick across the 0.35 m cutoff:
       EXPECT_GT(xt::sum(optimizer.costs())(), 0.0f) << "step " << idx;
+      EXPECT_GT(optimizer.evaluateTerminalCriticOnlyCost(), 0.0f) << "step " << idx;
       const double d_goal = std::hypot(
         goal_msg.position.x - actual.pose.position.x,
         goal_msg.position.y - actual.pose.position.y);
@@ -4472,6 +4459,24 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
 
     // Stock critics align the robot onto the straight reference path by d_goal = 0.30 m <= 0.35 m:
     // authoritative handoff check latches cleanly with 0 aborts!
+    // Capture [TERMINAL_APPROACH_LATCH] and [TERMINAL_APPROACH_ESCALATE] via rcutils_logging
+    // (Section 4 Items 27 & 28) and verify all 6 required diagnostic fields are emitted:
+    static std::vector<std::string> captured_tac_logs;
+    captured_tac_logs.clear();
+    rcutils_logging_output_handler_t prev_handler = rcutils_logging_get_output_handler();
+    rcutils_logging_set_output_handler(
+      [](const rcutils_log_location_t *, int, const char *, rcutils_time_point_value_t,
+      const char * format, va_list * args) {
+        char buf[1024];
+        va_list copy;
+        va_copy(copy, *args);
+        std::vsnprintf(buf, sizeof(buf), format, copy);
+        va_end(copy);
+        std::string line(buf);
+        if (line.find("[TERMINAL_APPROACH_") != std::string::npos) {
+          captured_tac_logs.push_back(std::move(line));
+        }
+      });
     auto aligned_handoff_pose = pose({-0.30, 0.01, 0.05});
     EXPECT_NO_THROW(controller.computeVelocityCommands(aligned_handoff_pose, speed, nullptr));
     EXPECT_TRUE(controller.terminalCritic()->isLatched());
@@ -4485,6 +4490,29 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
     EXPECT_THROW(
       controller.computeVelocityCommands(pose({-0.30, 0.18, 0.45}), speed, nullptr),
       nav2_core::InvalidPath);
+    rcutils_logging_set_output_handler(prev_handler);
+
+    std::string latch_log;
+    std::string escalate_log;
+    for (const auto & ln : captured_tac_logs) {
+      if (ln.find("[TERMINAL_APPROACH_LATCH]") != std::string::npos) {
+        latch_log = ln;
+      }
+      if (ln.find("[TERMINAL_APPROACH_ESCALATE]") != std::string::npos) {
+        escalate_log = ln;
+      }
+    }
+    ASSERT_FALSE(latch_log.empty());
+    ASSERT_FALSE(escalate_log.empty());
+    for (const char * field : {
+        "cross_track=", "curve_lat_err=", "rollback=",
+        "ownership=", "lat_limit=", "eff_cutoff="})
+    {
+      EXPECT_NE(latch_log.find(field), std::string::npos) << latch_log;
+      EXPECT_NE(escalate_log.find(field), std::string::npos) << escalate_log;
+      EXPECT_NE(controller.terminalCritic()->lastAbortMessage().find(field), std::string::npos)
+        << controller.terminalCritic()->lastAbortMessage();
+    }
   }
 
   // (5) Section 7.6: Live weight change (align_weight) while latched must NOT abort with

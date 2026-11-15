@@ -208,6 +208,7 @@ void TerminalApproachCritic::initialize()
             const bool had_active_latch = latched_ && !approach_escalated_;
             clearActiveCurve();
             if (replan_allowance_consumed_) {
+              latch_consumed_ = true;
               approach_escalated_ = true;
               escalation_reason_ = "PARAM_CHANGED_AFTER_REPLAN_CONSUMED";
               if (last_abort_msg_.empty()) {
@@ -221,6 +222,7 @@ void TerminalApproachCritic::initialize()
                 "goal_dist=0.0000 cross_track=0.0000 yaw_err=0.0000 redraws=%d/%d replans=%d",
                 infeasible_policy_.c_str(), redraw_count_, max_redraws_, replan_count_);
             } else if (max_redraws_ == 0 || redraw_count_ >= max_redraws_ || !had_active_latch) {
+              latch_consumed_ = true;
               approach_escalated_ = true;
               if (escalation_reason_.empty()) {
                 escalation_reason_ = "PARAM_CHANGE_WHILE_LATCHED";
@@ -234,6 +236,7 @@ void TerminalApproachCritic::initialize()
                 requestReplanIfEligible(0.0);
               }
             } else {
+              latch_consumed_ = false;
               ++redraw_count_;
             }
             tick_evaluated_ = false;
@@ -437,6 +440,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
       return;
     }
     clearActiveCurve();
+    latch_consumed_ = true;
     approach_escalated_ = true;
     tick_evaluated_ = false;
     last_abort_msg_ =
@@ -459,9 +463,9 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     } else if (!same_gear) {
       const bool had_active_latch = latched_ && !approach_escalated_;
       clearActiveCurve();
-      latch_consumed_ = true;
       tick_evaluated_ = false;
       if (max_redraws_ == 0 || redraw_count_ >= max_redraws_ || !had_active_latch) {
+        latch_consumed_ = true;
         approach_escalated_ = true;
         if (escalation_reason_.empty()) {
           escalation_reason_ = "GEAR_FLIP_ON_SAME_GOAL";
@@ -474,6 +478,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
           requestReplanIfEligible(0.0);
         }
       } else {
+        latch_consumed_ = false;
         ++redraw_count_;
       }
     } else {
@@ -505,6 +510,9 @@ void TerminalApproachCritic::resetLatch()
   in_cusp_braking_transient_ = false;
   reversal_motion_established_ = false;
   max_observed_rollback_m_ = 0.0;
+  min_post_reversal_rollback_m_ = 0.0;
+  has_prev_tick_gear_ = false;
+  prev_tick_gear_ = 0.0;
   overlap_entry_deferred_ = false;
   latch_origin_cross_track_ = 0.0;
   latch_initial_cross_track_ = 0.0;
@@ -647,7 +655,7 @@ GuidanceOwnership TerminalApproachCritic::computeOwnership(
 {
   const double radius_limit =
     static_cast<double>(std::max(kMinRadiusFloorM, approach_radius_)) +
-    ((latched_ || approach_escalated_ || replan_pending_) ? kLatchRadiusHysteresisM : 0.0);
+    ((is_latched || approach_escalated_ || replan_pending_) ? kLatchRadiusHysteresisM : 0.0);
   if (goal_dist > radius_limit) {
     return GuidanceOwnership::NONE;
   }
@@ -1944,6 +1952,7 @@ void TerminalApproachCritic::score(CriticData & data)
       {
         const char * r = replan_allowance_consumed_ ?
           "PARAM_CHANGED_AFTER_REPLAN_CONSUMED" : "PARAM_CHANGE_WHILE_LATCHED";
+        latch_consumed_ = true;
         approach_escalated_ = true;
         if (replan_allowance_consumed_ || escalation_reason_.empty()) {
           escalation_reason_ = r;
@@ -1961,6 +1970,7 @@ void TerminalApproachCritic::score(CriticData & data)
           }
         }
       } else {
+        latch_consumed_ = false;
         ++redraw_count_;
       }
       tick_evaluated_ = false;
@@ -2341,7 +2351,8 @@ void TerminalApproachCritic::score(CriticData & data)
       return;
     }
 
-    if (approach_escalated_) {
+    if (!latched_ && latch_consumed_) {
+      approach_escalated_ = true;
       const bool inside_cutoff =
         (handoff_cutoff > 0.0) && (goal_dist <= handoff_cutoff);
       if (inside_cutoff ||
@@ -2368,6 +2379,7 @@ void TerminalApproachCritic::score(CriticData & data)
         }
         throw nav2_core::InvalidPath(last_abort_msg_);
       }
+      return;
     }
 
     const double gear = latched_ ? latched_gear_ : path_gear;
@@ -2390,11 +2402,6 @@ void TerminalApproachCritic::score(CriticData & data)
         data, robot_x, robot_y, robot_yaw, goal_x, goal_y, goal_yaw, goal_dist,
         path_cross_track, path_yaw_err, goal_xy_tol, goal_yaw_tol))
     {
-      return;
-    }
-
-    if (!latched_ && latch_consumed_ && redraw_count_ == 0) {
-      approach_escalated_ = true;
       return;
     }
 
@@ -2751,7 +2758,8 @@ bool TerminalApproachCritic::tryInitialLatch(
     latch_initial_cross_track_ + static_cast<double>(max_tracking_drift_);
   if (last_measured_vx_ * gear < -1e-3 || in_cusp_braking_transient_) {
     in_cusp_braking_transient_ = true;
-    reversal_motion_established_ = false;
+    reversal_motion_established_ =
+      (last_measured_vx_ * gear >= kReversalEstablishedVelMps);
     max_observed_rollback_m_ = init_proj.pre_start_rollback_m;
     min_post_reversal_rollback_m_ = init_proj.pre_start_rollback_m;
   }
@@ -2945,9 +2953,7 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     (lon_remaining > kMinBehindGoalLonM) &&
     (std::fabs(theta0_goal) < kMaxCaptureAngleRad) &&
     (std::fabs(curve_yaw_err) < kMaxCaptureAngleRad);
-  if (curve_kinematically_joinable && !in_cusp_braking_transient_ &&
-    std::fabs(curve_yaw_err) > goal_yaw_tol)
-  {
+  if (curve_kinematically_joinable && !in_cusp_braking_transient_) {
     const double psi_abs = std::fabs(curve_yaw_err);
     const double join_yaw_tol =
       std::min(goal_yaw_tol, kMaxCaptureAngleRad - 1e-3);
@@ -3002,7 +3008,9 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
       (latched_tol_violated ? "LATCHED_TOLERANCE_VIOLATED" :
       (rollback_violated ? "ROLLBACK_EXCEEDED" :
       (local_goal_shift_caused_drift_ ? "LOCALIZATION_JUMP" : "DRIFT_EXCEEDED")));
-    if (redraw_count_ < max_redraws_ && curve_kinematically_joinable) {
+    const bool allow_redraw =
+      !in_cusp_braking_transient_ && overlap_handoff_joinable;
+    if (redraw_count_ < max_redraws_ && allow_redraw) {
       std::vector<utils::Pose2D> redrawn;
       std::string redrawn_family;
       double redrawn_r = 0.0;

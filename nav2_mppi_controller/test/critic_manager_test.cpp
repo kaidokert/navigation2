@@ -190,28 +190,29 @@ TEST(CriticManagerTests, CriticLoadingTest)
   ASSERT_NE(pac, nullptr);
   ASSERT_NE(tac, nullptr);
 
-  // Build real trajectories and path inside the 0.35 m cutoff (d_goal = 0.25 m) within the
-  // [0, 5] x [0, 5] costmap and score through evalTrajectoriesScores() on the real loaded critics
+  // (a) Evaluate in OVERLAP_SHARED (d_goal = 0.4528 m in (0.35, 0.65] m, lateral offset 5 cm so
+  //     TerminalApproachCritic latches a synthetic capture curve while stock critics remain
+  //     active) and verify BOTH stock critics AND TerminalApproachCritic add positive cost:
   models::State st;
   st.reset(2, 10);
-  st.pose.pose.position.x = 2.00;
-  st.pose.pose.position.y = 2.00;
+  st.pose.pose.position.x = 1.80;
+  st.pose.pose.position.y = 1.95;
   st.pose.pose.orientation.w = 1.0;
   st.speed.linear.x = 0.15;
   models::Trajectories tr;
   tr.reset(2, 10);
   for (size_t k = 0; k < 10; ++k) {
-    tr.x(0, k) = 2.00f + 0.02f * static_cast<float>(k);
-    tr.y(0, k) = 2.00f;
+    tr.x(0, k) = 1.80f + 0.02f * static_cast<float>(k);
+    tr.y(0, k) = 1.95f + 0.005f * static_cast<float>(k);
     tr.yaws(0, k) = 0.0f;
-    tr.x(1, k) = 2.00f + 0.01f * static_cast<float>(k);
+    tr.x(1, k) = 1.80f + 0.01f * static_cast<float>(k);
     tr.y(1, k) = 2.08f;
     tr.yaws(1, k) = 0.25f;
   }
   models::Path mp;
-  mp.reset(6);
-  for (size_t i = 0; i < 6; ++i) {
-    mp.x(i) = 2.00f + 0.05f * static_cast<float>(i);
+  mp.reset(10);
+  for (size_t i = 0; i < 10; ++i) {
+    mp.x(i) = 1.80f + 0.05f * static_cast<float>(i);
     mp.y(i) = 2.00f;
     mp.yaws(i) = 0.0f;
   }
@@ -223,6 +224,44 @@ TEST(CriticManagerTests, CriticLoadingTest)
   float model_dt = 0.05f;
   CriticData data = {
     st, tr, mp, goal, costs, model_dt, false, nullptr, nullptr, std::nullopt, std::nullopt};
+
+  pfc->score(data);
+  pac->score(data);
+  const float stock_overlap_cost = costs(0) + costs(1);
+  EXPECT_GT(stock_overlap_cost, 0.0f);
+
+  critic_manager.evalTrajectoriesScores(data);
+  const float total_overlap_cost = costs(0) + costs(1);
+  EXPECT_TRUE(tac->isLatched());
+  EXPECT_EQ(
+    tac->guidanceOwnership(),
+    critics::GuidanceOwnership::OVERLAP_SHARED);
+  EXPECT_GT(total_overlap_cost, stock_overlap_cost);
+
+  // (b) Step inside the 0.35 m cutoff (d_goal = 0.25 m <= 0.35 m) and verify stock critics
+  //     contribute 0.0f while TerminalApproachCritic owns TERMINAL_EXCLUSIVE guidance:
+  st.pose.pose.position.x = 2.00;
+  st.pose.pose.position.y = 2.00;
+  for (size_t k = 0; k < 10; ++k) {
+    tr.x(0, k) = 2.00f + 0.02f * static_cast<float>(k);
+    tr.y(0, k) = 2.00f;
+    tr.yaws(0, k) = 0.0f;
+    tr.x(1, k) = 2.00f + 0.01f * static_cast<float>(k);
+    tr.y(1, k) = 2.08f;
+    tr.yaws(1, k) = 0.25f;
+  }
+  mp.reset(6);
+  for (size_t i = 0; i < 6; ++i) {
+    mp.x(i) = 2.00f + 0.05f * static_cast<float>(i);
+    mp.y(i) = 2.00f;
+    mp.yaws(i) = 0.0f;
+  }
+  costs.fill(0.0f);
+  data.furthest_reached_path_point.reset();
+  data.path_pts_valid.reset();
+  pfc->score(data);
+  pac->score(data);
+  EXPECT_FLOAT_EQ(costs(0) + costs(1), 0.0f);
 
   critic_manager.evalTrajectoriesScores(data);
   EXPECT_TRUE(tac->isLatched());
