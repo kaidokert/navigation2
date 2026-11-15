@@ -133,6 +133,17 @@ public:
    */
   void reset(bool reset_dynamic_speed_limits = true);
 
+  /**
+   * @brief Reset internal state of all loaded critics on new plan or task reset
+   */
+  void resetCritics();
+
+  /**
+   * @brief Notify all loaded critics that a new global plan arrived via setPlan()
+   * @param plan Incoming global plan in its original frame before pruning
+   */
+  void onNewPlan(const nav_msgs::msg::Path & plan = nav_msgs::msg::Path{});
+
 protected:
   /**
    * @brief Main function to generate, score, and return trajectories

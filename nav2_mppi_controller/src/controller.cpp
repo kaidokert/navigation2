@@ -50,9 +50,9 @@ void MPPIController::configure(
 
 void MPPIController::cleanup()
 {
+  parameters_handler_.reset();
   optimizer_.shutdown();
   trajectory_visualizer_.on_cleanup();
-  parameters_handler_.reset();
   RCLCPP_INFO(logger_, "Cleaned up MPPI Controller: %s", name_.c_str());
 }
 
@@ -60,7 +60,9 @@ void MPPIController::activate()
 {
   trajectory_visualizer_.on_activate();
   optimizer_.on_activate();
-  parameters_handler_->start();
+  if (parameters_handler_ != nullptr) {
+    parameters_handler_->start();
+  }
   RCLCPP_INFO(logger_, "Activated MPPI Controller: %s", name_.c_str());
 }
 
@@ -73,7 +75,12 @@ void MPPIController::deactivate()
 
 void MPPIController::reset()
 {
+  std::unique_lock<std::mutex> param_lock;
+  if (parameters_handler_ != nullptr) {
+    param_lock = std::unique_lock<std::mutex>(*parameters_handler_->getLock());
+  }
   optimizer_.reset(false /*Don't reset zone-based speed limits between requests*/);
+  optimizer_.resetCritics();
 }
 
 geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
@@ -86,7 +93,10 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
 #endif
 
   auto stage_start = nav2_util::ControlTiming::Clock::now();
-  std::lock_guard<std::mutex> param_lock(*parameters_handler_->getLock());
+  std::unique_lock<std::mutex> param_lock;
+  if (parameters_handler_ != nullptr) {
+    param_lock = std::unique_lock<std::mutex>(*parameters_handler_->getLock());
+  }
   nav2_util::ControlTiming::stageCurrent(nav2_util::ControlTiming::Stage::ParameterLockWait,
       stage_start);
   stage_start = nav2_util::ControlTiming::Clock::now();
@@ -133,7 +143,12 @@ void MPPIController::visualize(
 
 void MPPIController::setPlan(const nav_msgs::msg::Path & path)
 {
+  std::unique_lock<std::mutex> param_lock;
+  if (parameters_handler_ != nullptr) {
+    param_lock = std::unique_lock<std::mutex>(*parameters_handler_->getLock());
+  }
   path_handler_.setPath(path);
+  optimizer_.onNewPlan(path);
 }
 
 void MPPIController::setSpeedLimit(const double & speed_limit, const bool & percentage)

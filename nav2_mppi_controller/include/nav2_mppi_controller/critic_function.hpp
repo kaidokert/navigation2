@@ -18,6 +18,7 @@
 #include <string>
 #include <memory>
 
+#include "nav_msgs/msg/path.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 
@@ -78,10 +79,50 @@ public:
     parameters_handler_ = param_handler;
 
     auto getParam = parameters_handler_->getParamGetter(name_);
-    getParam(enabled_, "enabled", true);
+    getParam(enabled_, "enabled", defaultEnabled());
 
     initialize();
   }
+
+  /**
+    * @brief Default enabled state when parameter is not declared
+    * @return true by default; experimental critics may override to false
+    */
+  virtual bool defaultEnabled() const
+  {
+    return true;
+  }
+
+  /**
+    * @brief Activate critic lifecycle resources
+    */
+  virtual void on_activate() {}
+
+  /**
+    * @brief Deactivate critic lifecycle resources
+    */
+  virtual void on_deactivate() {}
+
+  /**
+    * @brief Cleanup critic lifecycle resources
+    */
+  virtual void on_cleanup() {}
+
+  /**
+    * @brief Reset internal critic state between plans or controller resets
+    */
+  virtual void reset() {}
+
+  /**
+    * @brief Notify critic that a new global plan was received via setPlan()
+    * @param plan Incoming global plan in its original frame before pruning
+    */
+  virtual void onNewPlan(const nav_msgs::msg::Path & /*plan*/) {}
+
+  /**
+    * @brief Reset per-tick critic state at the start of each evalControl() tick
+    */
+  virtual void onTickStart() {}
 
   /**
     * @brief Main function to score trajectory

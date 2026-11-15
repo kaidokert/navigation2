@@ -189,6 +189,16 @@ void Optimizer::reset(bool reset_dynamic_speed_limits)
   RCLCPP_INFO(logger_, "Optimizer reset");
 }
 
+void Optimizer::resetCritics()
+{
+  critic_manager_.reset();
+}
+
+void Optimizer::onNewPlan(const nav_msgs::msg::Path & plan)
+{
+  critic_manager_.onNewPlan(plan);
+}
+
 bool Optimizer::isHolonomic() const
 {
   return motion_model_->isHolonomic();
@@ -341,6 +351,7 @@ void Optimizer::prepare(
   critics_data_.motion_model = motion_model_;
   critics_data_.furthest_reached_path_point.reset();
   critics_data_.path_pts_valid.reset();
+  critic_manager_.onTickStart();
 }
 
 void Optimizer::shiftControlSequence()

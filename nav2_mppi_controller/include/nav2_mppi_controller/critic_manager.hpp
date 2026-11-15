@@ -90,6 +90,22 @@ public:
   void on_cleanup();
 
   /**
+    * @brief Reset internal state of all loaded critics
+    */
+  void reset();
+
+  /**
+    * @brief Notify all loaded critics that a new plan was received via setPlan()
+    * @param plan Incoming global plan in its original frame before pruning
+    */
+  void onNewPlan(const nav_msgs::msg::Path & plan);
+
+  /**
+    * @brief Reset per-tick state of all loaded critics at the start of each evalControl() tick
+    */
+  void onTickStart();
+
+  /**
     * @brief Score trajectories by the set of loaded critic functions
     * @param CriticData Struct of necessary information to pass to the critic functions
     */

@@ -17,7 +17,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential cmake libxtensor-dev libxsimd-dev \
-            ros-jazzy-nav2-costmap-2d ros-jazzy-nav2-core ros-jazzy-nav2-util \
+            ros-jazzy-angles ros-jazzy-nav2-costmap-2d ros-jazzy-nav2-core ros-jazzy-nav2-util \
             ros-jazzy-tf2-eigen ros-jazzy-ament-cmake-gtest ros-jazzy-yaml-cpp-vendor \
             ros-jazzy-nav2-mppi-controller
       - name: Compile production collision code and regressions
@@ -38,7 +38,9 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source /tmp/msg-install/setup.bash
           source /tmp/util-install/setup.bash
-          ctest --test-dir /tmp/collision-build --output-on-failure
+          AMENT_PREFIX_PATH="/tmp/collision-build/test_prefix:$AMENT_PREFIX_PATH" \
+            LD_LIBRARY_PATH="/tmp/collision-build/test_prefix/lib:$LD_LIBRARY_PATH" \
+            ctest --test-dir /tmp/collision-build --output-on-failure
       - name: Upload native test results
         if: always()
         uses: actions/upload-artifact@v4
