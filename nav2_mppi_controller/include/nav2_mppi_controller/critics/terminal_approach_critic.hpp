@@ -166,7 +166,7 @@ public:
   /**
    * @brief Reset any latched capture curve and escalation state
    */
-  void resetLatch();
+  void resetLatch(const char * reason = "LATCH_RESET", bool report_clear = true);
 
   /**
    * @brief Compute smooth tapered pull-through extension length past the goal
@@ -340,6 +340,7 @@ protected:
   using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
   void scoreImpl(CriticData & data);
   void captureDiagnosticState(bool include_curve);
+  void publishCurveEvent(const char * event, const char * reason);
   void publishDiagnostic(const char * event) noexcept;
   void diagnosticCheck(
     const char * name, bool passed,
@@ -444,7 +445,7 @@ protected:
   /**
    * @brief Clear only the active latched curve without wiping escalation or redraw state
    */
-  void clearActiveCurve();
+  void clearActiveCurve(const char * reason, bool capture_failure = false);
 
   /**
    * @brief Escalate infeasibility or excessive tracking drift according to infeasible_policy_

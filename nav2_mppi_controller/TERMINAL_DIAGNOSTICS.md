@@ -18,13 +18,15 @@ exporter or Optuna integration.
 An enabled critic publishes one `EVALUATED` message per `score()` invocation, or
 one `ABORT` message when that invocation throws a standard exception. The latter
 is published before rethrowing, even when normal `CriticsStats` never publishes.
-Multiple optimizer iterations can produce multiple evaluations per control tick;
-`feasibility_evaluated` and `reuse_obstacles_cache` distinguish fresh decisions
-from cached scoring. A dormant enabled critic still emits evaluations. A disabled
+Multiple optimizer iterations can produce multiple evaluations per control tick.
+`feasibility_evaluated` means the curve feasibility stage ran; early plan/configuration
+refusals can still abort with this flag false. `reuse_obstacles_cache` reports the
+input caching mode. Use `event`/`reason` to identify failures. A dormant enabled
+critic still emits evaluations. A disabled
 critic emits no evaluations; there is no claim to observe failures elsewhere in
 the planner, controller or external guards.
 
-`instance_id` changes on configure. `sequence` orders publications within that
+`instance_id` changes and all counters restart at zero on configure. `sequence` orders publications within that
 instance. `evaluation_id` counts enabled score calls, `task_id` advances at reset,
 `plan_id` at every incoming plan and `goal_id` at a changed global goal.
 `latch_id` advances whenever a curve is latched or redrawn. These are local IDs,
@@ -63,14 +65,27 @@ witness sample and its errors are included; use the validity flags. Live goal
 tolerances and interior ratios accompany them. A failed sufficient witness does
 not prove that every possible physical finish is impossible.
 
-`before_clear` marks the snapshot taken immediately before latch invalidation.
-Its latch/ownership/error/limit/budget fields describe that instant, not the
-cleared state after the exception. Curve geometry is included on latch, redraw,
+The witness follows the controller's existing evaluation order: it can run before
+the already-in-goal or lateral-departure decision. Its result is an observed
+component, not necessarily the final reason. `goal/already_inside`, `reason` and
+the lateral check explain which outcome was selected. `goal_tolerance_valid`
+is false if control returned before reading effective goal tolerances; no cached
+tolerances are presented as a fresh read.
+
+`before_clear` marks a snapshot immediately before invalidating an existing latch.
+Initial entry failures without a latch have `before_clear=false`. An invalidation
+followed by a new attempt emits a separate `CURVE_CLEARED` with its triggering
+reason; the final evaluation or abort describes the new attempt and its current
+budgets. A terminal failure that clears its failing latch keeps that pre-clear
+snapshot in `ABORT` (or `EVALUATED` for a nonthrowing failure policy).
+Curve geometry is included on latch, redraw,
 frame adjustment, abort, clear and reset. Unchanged successful evaluations omit
 it. At most 512 points and 96 checks are sent; truncation is explicit. A
-`CURVE_CLEARED` or `RESET` outside scoring has
+`CURVE_CLEARED` or `RESET` has
 `evaluation_context_valid=false`: pose/velocity/check fields must not be treated
 as a fresh observation. Link its curve and IDs to the preceding evaluation.
+These transition events use `goal_region_result=NOT_EVALUATED`, include a reason,
+and are silent while disabled. Cleared curves have no frame in later events.
 
 `header.stamp` is publication time on the node's ROS clock; `pose_stamp` is the
 input pose stamp. `header.frame_id` identifies the score input frame;

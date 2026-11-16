@@ -16,12 +16,15 @@ string reason
 string exception
 # False on lifecycle/plan/parameter events: robot_pose/goal/velocity are unavailable.
 bool evaluation_context_valid
+# True when the curve feasibility stage ran. Early plan/configuration refusals can
+# still abort with false; use event/reason, not this flag, to detect failures.
 bool feasibility_evaluated
 bool reuse_obstacles_cache
 geometry_msgs/Pose robot_pose
 geometry_msgs/Pose goal
 geometry_msgs/Twist velocity
 builtin_interfaces/Time pose_stamp
+# True only after score read the effective tolerances; false on earlier returns.
 bool goal_tolerance_valid
 float64 goal_xy_tolerance
 float64 goal_yaw_tolerance
@@ -47,7 +50,8 @@ float64 lateral_error
 float64 lateral_limit
 float64 rollback
 float64 cutoff
-# Snapshot immediately before clearing if an evaluation invalidated its latch.
+# Snapshot immediately before invalidating an existing latch, including transitions.
+# False on an entry failure that never had a latch; final states follow separate clears.
 bool before_clear
 # Full curve at latch/change/abort/clear. Empty on unchanged evaluations.
 uint32 curve_size

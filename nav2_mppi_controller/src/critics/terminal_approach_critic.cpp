@@ -118,6 +118,11 @@ TerminalApproachCritic::~TerminalApproachCritic()
 
 void TerminalApproachCritic::initialize()
 {
+  diagnostic_ = Diagnostic{};
+  diagnostic_evaluation_active_ = diagnostic_state_captured_ = diagnostic_curve_changed_ = false;
+  diagnostic_sequence_ = diagnostic_evaluation_ = diagnostic_task_ = 0;
+  diagnostic_plan_ = diagnostic_goal_ = diagnostic_latch_ = 0;
+  diagnostic_curve_frame_.clear();
   callback_guard_ = std::make_shared<bool>(true);
   if (auto node = parent_.lock()) {
     diagnostic_instance_ = std::to_string(std::random_device{}()) + "-" +
@@ -220,7 +225,8 @@ void TerminalApproachCritic::initialize()
             }
             replan_pending_ = false;
             const bool had_active_latch = latched_ && !approach_escalated_;
-            clearActiveCurve();
+            clearActiveCurve(replan_allowance_consumed_ ?
+              "PARAM_CHANGED_AFTER_REPLAN_CONSUMED" : "PARAM_CHANGE_WHILE_LATCHED");
             if (replan_allowance_consumed_) {
               latch_consumed_ = true;
               approach_escalated_ = true;
@@ -268,7 +274,7 @@ void TerminalApproachCritic::initialize()
   stock_thresholds_checked_ = false;
   warned_stock_threshold_mismatch_ = false;
   syncStockCriticThresholds(false);
-  resetLatch();
+  resetLatch("CONFIGURE", false);
 }
 
 void TerminalApproachCritic::on_activate()
@@ -288,7 +294,7 @@ void TerminalApproachCritic::on_activate()
   if (replan_pub_ != nullptr && !replan_pub_->is_activated()) {
     replan_pub_->on_activate();
   }
-  resetLatch();
+  resetLatch("ACTIVATE_RESET");
   if (pending_replan_clear_ && replan_pub_ != nullptr && replan_pub_->is_activated()) {
     std_msgs::msg::Bool sig;
     sig.data = false;
@@ -347,18 +353,17 @@ void TerminalApproachCritic::ensureReplanPublisher(bool activate_now)
   }
 }
 
-void TerminalApproachCritic::clearActiveCurve()
+void TerminalApproachCritic::clearActiveCurve(const char * reason, bool capture_failure)
 {
-  if (diagnostic_evaluation_active_ && !diagnostic_state_captured_) {
+  if (diagnostic_evaluation_active_ && capture_failure && latched_) {
     captureDiagnosticState(true);
-    diagnostic_.before_clear = true;
+    diagnostic_.before_clear = latched_;
     diagnostic_state_captured_ = true;
-  } else if (!diagnostic_evaluation_active_ && latched_) {
-    diagnostic_ = Diagnostic{};
-    captureDiagnosticState(true);
-    diagnostic_.header.frame_id = latched_frame_id_;
-    diagnostic_.before_clear = true;
-    publishDiagnostic("CURVE_CLEARED");
+  } else if (latched_) {
+    publishCurveEvent("CURVE_CLEARED", reason);
+  }
+  if (diagnostic_evaluation_active_) {
+    diagnostic_.reason = reason;
   }
   latched_ = false;
   latched_is_reference_path_ = false;
@@ -373,16 +378,14 @@ void TerminalApproachCritic::clearActiveCurve()
   last_effective_lat_limit_ = 0.0;
   ownership_ = GuidanceOwnership::NONE;
   latched_curve_.clear();
+  diagnostic_curve_frame_.clear();
   cached_active_path_.clear();
 }
 
 void TerminalApproachCritic::reset()
 {
   if (enabled_ && !diagnostic_evaluation_active_) {
-    diagnostic_ = Diagnostic{};
-    captureDiagnosticState(true);
-    diagnostic_.header.frame_id = latched_frame_id_;
-    publishDiagnostic("RESET");
+    publishCurveEvent("RESET", "TASK_RESET");
   }
   ++diagnostic_task_;
   replan_allowance_consumed_ = false;
@@ -395,7 +398,7 @@ void TerminalApproachCritic::reset()
   last_plan_goal_ = geometry_msgs::msg::Pose{};
   last_plan_frame_.clear();
   last_plan_gear_ = 1.0;
-  resetLatch();
+  resetLatch("TASK_RESET", false);
 }
 
 void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
@@ -467,7 +470,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
       replan_allowance_consumed_ = false;
       replan_count_ = 0;
     }
-    resetLatch();
+    resetLatch("REPLACEMENT_PLAN");
     savePlanMetadata();
     return;
   }
@@ -476,7 +479,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     if ((has_plan_goal_ || !latched_frame_id_.empty()) && !same_goal) {
       replan_allowance_consumed_ = false;
       replan_count_ = 0;
-      resetLatch();
+      resetLatch("NEW_GOAL");
       savePlanMetadata();
       return;
     }
@@ -485,7 +488,7 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
       savePlanMetadata();
       return;
     }
-    clearActiveCurve();
+    clearActiveCurve("SECOND_REPLACEMENT_PLAN_REJECTED");
     latch_consumed_ = true;
     approach_escalated_ = true;
     tick_evaluated_ = false;
@@ -498,17 +501,17 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
   if (approach_escalated_ && !last_abort_msg_.empty() &&
     infeasible_policy_ == "abort" && !replan_allowance_consumed_)
   {
-    resetLatch();
+    resetLatch("PLAN_AFTER_ABORT");
     savePlanMetadata();
     return;
   }
 
   if (latch_consumed_ || latched_ || approach_escalated_ || redraw_count_ > 0) {
     if (!same_goal) {
-      resetLatch();
+      resetLatch("NEW_GOAL");
     } else if (!same_gear) {
       const bool had_active_latch = latched_ && !approach_escalated_;
-      clearActiveCurve();
+      clearActiveCurve("GEAR_FLIP_ON_SAME_GOAL");
       tick_evaluated_ = false;
       if (max_redraws_ == 0 || redraw_count_ >= max_redraws_ || !had_active_latch) {
         latch_consumed_ = true;
@@ -535,12 +538,16 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     return;
   }
 
-  resetLatch();
+  resetLatch("PLAN_INITIALIZED");
   savePlanMetadata();
 }
 
-void TerminalApproachCritic::resetLatch()
+void TerminalApproachCritic::resetLatch(const char * reason, bool report_clear)
 {
+  if (report_clear && latched_) {
+    publishCurveEvent("CURVE_CLEARED", reason);
+  }
+  diagnostic_curve_frame_.clear();
   if (replan_signal_sent_) {
     if (is_active_ && replan_pub_ != nullptr && replan_pub_->is_activated()) {
       std_msgs::msg::Bool sig;
@@ -1768,9 +1775,8 @@ bool TerminalApproachCritic::solveCaptureCurve(
     }
   }
 
-  if (candidates.empty()) {
-    return recordCaptureResult(out_traces, false);
-  }
+  recordCaptureResult(out_traces, false);
+  if (candidates.empty()) {return false;}
 
   // Prefer exact endpoint curves (x_offset == 0, y_offset == 0, theta_end == 0), then smallest
   // |theta_end|, then smallest |y_offset|, then gentlest curvature (largest R).
@@ -1910,10 +1916,10 @@ bool TerminalApproachCritic::solveCaptureCurve(
     if (out_radius != nullptr) {
       *out_radius = cand.R;
     }
-    return recordCaptureResult(out_traces, true);
+    return true;
   }
 
-  return recordCaptureResult(out_traces, false);
+  return false;
 }
 
 void TerminalApproachCritic::handleInfeasible(
@@ -1948,7 +1954,7 @@ void TerminalApproachCritic::handleInfeasible(
     handoff_cutoff, redraw_count_, max_redraws_, replan_count_);
 
   // Both diagnostic records must describe the failing evaluation, before clearing its state.
-  clearActiveCurve();
+  clearActiveCurve(reason, true);
   latch_consumed_ = true;
   approach_escalated_ = true;
 
@@ -2076,7 +2082,7 @@ void TerminalApproachCritic::captureDiagnosticState(bool include_curve)
   diagnostic_.cutoff = effectiveHandoffCutoff();
   diagnostic_.curve_size = static_cast<uint32_t>(latched_curve_.size());
   if (include_curve) {
-    diagnostic_.curve_frame = diagnostic_curve_frame_;
+    diagnostic_.curve_frame = latched_curve_.empty() ? "" : diagnostic_curve_frame_;
     diagnostic_.curve.clear();
     const auto count = std::min<size_t>(512u, latched_curve_.size());
     diagnostic_.curve_truncated = count < latched_curve_.size();
@@ -2090,9 +2096,27 @@ void TerminalApproachCritic::captureDiagnosticState(bool include_curve)
   }
 }
 
+void TerminalApproachCritic::publishCurveEvent(const char * event, const char * reason)
+{
+  if (!enabled_ || !diagnostic_pub_ || !diagnostic_pub_->is_activated()) {
+    return;
+  }
+  // A transition is distinct from a subsequent latch attempt in the same evaluation.
+  // Preserve the in-flight checks; this event has no fresh pose/velocity context.
+  auto evaluation = std::move(diagnostic_);
+  diagnostic_ = Diagnostic{};
+  diagnostic_.goal_region_result = "NOT_EVALUATED";
+  diagnostic_.reason = reason;
+  captureDiagnosticState(true);
+  diagnostic_.header.frame_id = diagnostic_.curve_frame;
+  diagnostic_.before_clear = latched_;
+  publishDiagnostic(event);
+  diagnostic_ = std::move(evaluation);
+}
+
 void TerminalApproachCritic::publishDiagnostic(const char * event) noexcept
 {
-  if (!diagnostic_pub_ || !diagnostic_pub_->is_activated()) {
+  if (!enabled_ || !diagnostic_pub_ || !diagnostic_pub_->is_activated()) {
     return;
   }
   try {
@@ -2189,7 +2213,8 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
       }
       replan_pending_ = false;
       const bool had_active_latch = latched_ && !approach_escalated_;
-      clearActiveCurve();
+      clearActiveCurve(replan_allowance_consumed_ ?
+        "PARAM_CHANGED_AFTER_REPLAN_CONSUMED" : "PARAM_CHANGE_WHILE_LATCHED");
       if (replan_allowance_consumed_ || max_redraws_ == 0 ||
         redraw_count_ >= max_redraws_ || !had_active_latch)
       {
@@ -2296,7 +2321,8 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
         const bool passive_ref_before_handoff =
           latched_ && latched_is_reference_path_ &&
           (ref_cutoff > 0.0) && (goal_dist > ref_cutoff);
-        clearActiveCurve();
+        clearActiveCurve(replan_allowance_consumed_ ?
+          "LOCAL_GOAL_SHIFT_AFTER_REPLAN_CONSUMED" : "LOCAL_GOAL_SHIFT_EXCEEDED");
         if (replan_allowance_consumed_ || max_redraws_ == 0 ||
           redraw_count_ >= max_redraws_ || !had_active_latch)
         {
@@ -2386,7 +2412,8 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
 
   if (!has_terminal_goal) {
     if (latched_) {
-      clearActiveCurve();
+      clearActiveCurve(handoff_cutoff > 0.0 && goal_dist <= handoff_cutoff ?
+        "LATCHED_GOAL_LOST_INSIDE_CUTOFF" : "LATCHED_GOAL_LOST");
       approach_escalated_ = true;
       if (handoff_cutoff > 0.0 && goal_dist <= handoff_cutoff && escalation_reason_.empty()) {
         escalation_reason_ = "LATCHED_GOAL_LOST_INSIDE_CUTOFF";
@@ -2567,7 +2594,7 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
       if (after_replan || max_redraws_ == 0 || redraw_count_ >= max_redraws_ || !had_active_latch) {
         const char * r = after_replan ?
           "GEAR_FLIP_AFTER_REPLAN_CONSUMED" : "GEAR_FLIP_WHILE_LATCHED";
-        clearActiveCurve();
+        clearActiveCurve(r);
         latch_consumed_ = true;
         approach_escalated_ = true;
         if (escalation_reason_.empty()) {
@@ -2586,7 +2613,7 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
         }
       } else {
         ++redraw_count_;
-        clearActiveCurve();
+        clearActiveCurve("GEAR_FLIP_WHILE_LATCHED");
         latch_consumed_ = false;
         latched_gear_ = path_gear;
         if (has_plan_gear_) {
@@ -2709,6 +2736,10 @@ bool TerminalApproachCritic::tryInitialLatch(
   double goal_xy_tol,
   double goal_yaw_tol)
 {
+  // A new attempt has its own outcome; an earlier clear in this tick is a separate event.
+  diagnostic_state_captured_ = false;
+  diagnostic_.before_clear = false;
+  diagnostic_.reason.clear();
   const double ref_cutoff = effectiveRefCutoff();
   const double handoff_cutoff = effectiveHandoffCutoff();
   const double min_dist =
@@ -3439,6 +3470,7 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
           goal_xy_tol, goal_yaw_tol, nullptr, &redrawn_family, &redrawn_r))
       {
         latched_curve_ = std::move(redrawn);
+        diagnostic_curve_frame_ = data.state.pose.header.frame_id;
         diagnostic_curve_changed_ = true;
         ++diagnostic_latch_;
         latched_is_reference_path_ = false;
@@ -3482,7 +3514,7 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
       goal_dist > handoff_cutoff && infeasible_policy_ != "replan_signal")
     {
       diagnostic_.reason = fail_reason;
-      clearActiveCurve();
+      clearActiveCurve(fail_reason, true);
       ownership_ = GuidanceOwnership::PREPARE;
       latch_consumed_ = true;
       approach_escalated_ = true;

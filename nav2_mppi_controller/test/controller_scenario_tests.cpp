@@ -5104,12 +5104,14 @@ TEST_F(ControllerScenarios, TerminalGoalRegionKeepsGuidanceAndRejectsUnsafeArriv
 TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeClear)
 {
   using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
-  for (const std::string mode : {"accepted", "lateral", "blocked", "witness_blocked",
+  for (const std::string mode : {"accepted", "inside_goal", "lateral", "blocked", "witness_blocked",
       "tight_margin", "sample_budget", "entry", "empty_candidates", "pose_admission",
-      "stock_mismatch"})
+      "stock_mismatch", "capture_blocked"})
   {
     SCOPED_TRACE(mode);
-    const bool entry = mode == "entry" || mode == "empty_candidates" || mode == "pose_admission";
+    const bool succeeds = mode == "accepted" || mode == "inside_goal";
+    const bool entry = mode == "entry" || mode == "empty_candidates" || mode == "pose_admission" ||
+      mode == "capture_blocked";
     Scenario sc;
     sc.id = "terminal_diagnostics";
     sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
@@ -5159,17 +5161,29 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
     }
     const auto initial = receive();
     if (!entry) {
-      ASSERT_FALSE(initial.empty());
+      ASSERT_EQ(initial.size(), 3u);
       EXPECT_TRUE(initial.front().latched);
       EXPECT_FALSE(initial.front().curve.empty());
       EXPECT_EQ(initial.front().event, "EVALUATED");
+      for (size_t i = 0; i < initial.size(); ++i) {
+        EXPECT_EQ(initial[i].evaluation_id, initial[0].evaluation_id + i);
+        EXPECT_EQ(initial[i].sequence, initial[0].sequence + i);
+        EXPECT_EQ(initial[i].feasibility_evaluated, i == 0u);
+        EXPECT_EQ(initial[i].reuse_obstacles_cache, i != 0u);
+        if (i != 0u) {
+          EXPECT_TRUE(initial[i].checks.empty());
+          EXPECT_TRUE(initial[i].curve.empty());
+        }
+      }
     }
     Pose arrival{-0.0046, 0.0356, 0.3177};
+    if (mode == "inside_goal") {arrival = {0.09, 0.0, 0.20};}
     if (mode == "lateral") {arrival[1] = 0.09;}
     if (mode == "entry") {arrival = {-0.14, 0, 0.9};}
     if (mode == "empty_candidates") {arrival = {-0.20, 0.10, 1.2};}
     if (mode == "pose_admission") {arrival = {0.20, 0, 0.9};}
-    if (mode == "blocked") {
+    if (mode == "capture_blocked") {arrival = {-0.30, 0.04, 0.0};}
+    if (mode == "blocked" || mode == "capture_blocked") {
       unsigned int mx, my;
       ASSERT_TRUE(cm->getCostmap()->worldToMap(0, 0, mx, my));
       cm->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
@@ -5186,16 +5200,16 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
       ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
             "FollowPath.PathAlignCritic.threshold_to_consider", 0.01)).successful);
     }
-    if (mode == "accepted") {
+    if (succeeds) {
       ASSERT_NO_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr));
     } else {
       EXPECT_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr),
         nav2_core::InvalidPath);
     }
     const auto events = receive();
-    ASSERT_FALSE(events.empty());
+    ASSERT_EQ(events.size(), succeeds ? 3u : 1u);
     const auto & event = events.front();
-    EXPECT_EQ(event.event, mode == "accepted" ? "EVALUATED" : "ABORT");
+    EXPECT_EQ(event.event, succeeds ? "EVALUATED" : "ABORT");
     EXPECT_EQ(event.schema_version, 1u);
     EXPECT_FALSE(event.instance_id.empty());
     EXPECT_EQ(event.header.frame_id, path.header.frame_id);
@@ -5211,9 +5225,27 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
       EXPECT_EQ(event.goal_id, initial.front().goal_id);
       EXPECT_EQ(event.latch_id, initial.front().latch_id);
     }
-    if (mode == "accepted") {
-      EXPECT_EQ(event.goal_region_result, "REACHED_INTERIOR");
+    if (succeeds) {
+      EXPECT_EQ(event.goal_region_result, mode == "accepted" ? "REACHED_INTERIOR" :
+        "MISSED_INTERIOR");
+      if (mode == "inside_goal") {
+        const auto check = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name == "goal/already_inside";});
+        ASSERT_NE(check, event.checks.end());
+        EXPECT_TRUE(check->passed);
+        EXPECT_TRUE(event.reason.empty());
+      }
       EXPECT_TRUE(critic->isLatched());
+      for (size_t i = 1; i < events.size(); ++i) {
+        EXPECT_EQ(events[i].event, "EVALUATED");
+        EXPECT_EQ(events[i].evaluation_id, event.evaluation_id + i);
+        EXPECT_EQ(events[i].sequence, event.sequence + i);
+        EXPECT_FALSE(events[i].feasibility_evaluated);
+        EXPECT_TRUE(events[i].reuse_obstacles_cache);
+        EXPECT_TRUE(events[i].checks.empty());
+        EXPECT_TRUE(events[i].curve.empty());
+        EXPECT_EQ(events[i].goal_region_result, "NOT_EVALUATED");
+      }
     } else if (mode == "stock_mismatch") {
       EXPECT_EQ(event.reason, "STOCK_THRESHOLD_MISMATCH");
       EXPECT_FALSE(event.goal_tolerance_valid);
@@ -5223,8 +5255,24 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
     } else if (entry) {
       EXPECT_EQ(event.reason, "ENTRY_INFEASIBLE");
       EXPECT_FALSE(event.latched);
+      EXPECT_FALSE(event.before_clear);
+      EXPECT_TRUE(event.curve.empty());
+      EXPECT_TRUE(event.curve_frame.empty());
       EXPECT_FALSE(event.checks.empty());
-      if (mode != "entry") {
+      if (mode == "capture_blocked") {
+        const auto accepted = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name.find("/accepted_geometric") != std::string::npos;});
+        const auto blocked = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {
+              const bool capture = c.name.find("capture/") == 0u;
+              return capture && c.name.find("/collision_free") != std::string::npos;
+            });
+        ASSERT_NE(accepted, event.checks.end());
+        ASSERT_NE(blocked, event.checks.end());
+        EXPECT_LT(accepted - event.checks.begin(), blocked - event.checks.begin());
+        EXPECT_TRUE(accepted->passed);
+        EXPECT_FALSE(blocked->passed);
+      } else if (mode != "entry") {
         size_t capture_checks = 0u;
         for (const auto & check : event.checks) {
           if (check.name.find("capture/") != 0u) {continue;}
@@ -5269,6 +5317,7 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
         EXPECT_FALSE(event.witness_sample_valid);
       }
       if (mode == "lateral") {
+        EXPECT_EQ(event.goal_region_result, "LATERAL_ENVELOPE");
         const auto check = std::find_if(event.checks.begin(), event.checks.end(),
             [](const auto & c) {return c.name == "curve/lateral_le";});
         ASSERT_NE(check, event.checks.end());
@@ -5277,7 +5326,16 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
       }
     }
     critic->reset();
-    receive();
+    const auto resets = receive();
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets.front().event, "RESET");
+    EXPECT_EQ(resets.front().reason, "TASK_RESET");
+    EXPECT_EQ(resets.front().goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(resets.front().evaluation_context_valid);
+    const bool had_latch = succeeds || mode == "stock_mismatch";
+    EXPECT_EQ(resets.front().before_clear, had_latch);
+    EXPECT_EQ(resets.front().curve.empty(), !had_latch);
+    EXPECT_EQ(resets.front().curve_frame.empty(), !had_latch);
     grid(sc);
     critic->onNewPlan(path);
     if (mode == "accepted") {
@@ -5292,12 +5350,229 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
       optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
       EXPECT_TRUE(receive().empty());
       critic->on_activate();
+      receive();  // Activation clears the old latch; lifecycle cases are checked below.
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      ASSERT_TRUE(critic->isLatched());
+      receive();
       ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
             "FollowPath.TerminalApproachCritic.enabled", false)).successful);
-      receive();
+      EXPECT_TRUE(receive().empty());
       optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
       EXPECT_TRUE(receive().empty());
     }
+    optimizer.shutdown();
+  }
+}
+
+TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState)
+{
+  using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
+  for (const std::string mode : {"new_goal", "parameter", "disabled", "reconfigure",
+      "redraw_failure", "gear_redraw_failure", "fallback_shift", "replan_shift", "lost_goal",
+      "entry_replan"})
+  {
+    SCOPED_TRACE(mode);
+    Scenario sc;
+    sc.id = "terminal_diagnostic_transitions";
+    sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
+    sc.gears = {1, 1, 1};
+    grid(sc);
+    auto parent = node(true, 64, 0.325, 7, 0.35);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
+    const bool redraw = mode == "redraw_failure" || mode == "gear_redraw_failure";
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.max_redraws", redraw ? 1 : 0);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy",
+      mode == "fallback_shift" ? "fallback" :
+      ((mode == "replan_shift" || mode == "entry_replan") ? "replan_signal" : "abort"));
+    mppi::ParametersHandler params(parent);
+    params.start();
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    auto observer = std::make_shared<rclcpp::Node>("terminal_transition_observer");
+    auto sub = observer->create_subscription<Diagnostic>(
+      "/scenario_controller/terminal_approach_diagnostics", rclcpp::QoS(100).reliable(),
+      [](Diagnostic::ConstSharedPtr) {});
+    auto connect = [&]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (sub->get_publisher_count() == 0u && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return sub->get_publisher_count() > 0u;
+      };
+    ASSERT_TRUE(connect());
+    auto receive = [&]() {
+        std::vector<Diagnostic> messages;
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (std::chrono::steady_clock::now() < end) {
+          Diagnostic message;
+          rclcpp::MessageInfo info;
+          if (sub->take(message, info)) {messages.push_back(message);} else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        }
+        return messages;
+      };
+    auto path = sc.message();
+    auto goal = path.poses.back().pose;
+    auto actual = pose({-0.24, 0.022, 0});
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.15;
+    auto * critic = optimizer.terminalCritic();
+    critic->onNewPlan(path);
+    if (mode == "entry_replan") {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.50, 0.10, 1.2}), speed, path, goal, nullptr));
+      const auto entry_events = receive();
+      ASSERT_EQ(entry_events.size(), 3u);
+      const auto & entry_failure = entry_events.front();
+      EXPECT_EQ(entry_failure.event, "EVALUATED");
+      EXPECT_EQ(entry_failure.reason, "ENTRY_INFEASIBLE");
+      EXPECT_FALSE(entry_failure.latched);
+      EXPECT_FALSE(entry_failure.before_clear);
+      EXPECT_TRUE(entry_failure.latch_consumed);
+      EXPECT_TRUE(entry_failure.replan_allowance_consumed);
+      EXPECT_TRUE(entry_failure.replan_pending);
+      EXPECT_EQ(entry_failure.replan_count, 1);
+      EXPECT_TRUE(entry_failure.curve.empty());
+      EXPECT_TRUE(entry_failure.curve_frame.empty());
+      optimizer.shutdown();
+      continue;
+    }
+    ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+    ASSERT_TRUE(critic->isLatched());
+    const auto initial = receive();
+    ASSERT_EQ(initial.size(), 3u);
+
+    if (mode == "disabled") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.enabled", false)).successful);
+      EXPECT_TRUE(receive().empty());
+      critic->reset();
+      EXPECT_TRUE(receive().empty());
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      EXPECT_TRUE(receive().empty());
+      optimizer.shutdown();
+      continue;
+    }
+    if (mode == "reconfigure") {
+      critic->on_deactivate();
+      critic->on_cleanup();
+      critic->initialize();
+      critic->on_activate();
+      ASSERT_TRUE(connect());
+      EXPECT_TRUE(receive().empty());
+      critic->onNewPlan(path);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto fresh = receive();
+      ASSERT_EQ(fresh.size(), 3u);
+      EXPECT_NE(fresh.front().instance_id, initial.front().instance_id);
+      EXPECT_EQ(fresh.front().sequence, 1u);
+      EXPECT_EQ(fresh.front().evaluation_id, 1u);
+      EXPECT_EQ(fresh.front().task_id, 0u);
+      EXPECT_EQ(fresh.front().plan_id, 1u);
+      EXPECT_EQ(fresh.front().goal_id, 1u);
+      EXPECT_EQ(fresh.front().latch_id, 1u);
+      optimizer.shutdown();
+      continue;
+    }
+
+    const bool shifted = mode == "new_goal" || mode == "redraw_failure" ||
+      mode == "fallback_shift" || mode == "replan_shift";
+    if (shifted) {
+      for (auto & p : path.poses) {
+        p.pose.position.x += 0.30;
+      }
+      goal = path.poses.back().pose;
+      actual = pose(redraw ? Pose{0.16, 0, 0.9} : Pose{-0.20, 0.022, 0});
+    }
+    if (mode == "redraw_failure") {
+      path.header.frame_id = actual.header.frame_id = "odom";
+    }
+    if (mode == "gear_redraw_failure") {
+      for (auto & p : path.poses) {
+        p.pose.position.x = -p.pose.position.x;
+      }
+      actual = pose({0.14, 0, 0.9});
+    }
+    if (mode == "new_goal") {
+      critic->onNewPlan(path);
+    } else if (mode == "parameter") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.max_residual_y", 0.03)).successful);
+    } else {
+      if (mode == "lost_goal") {
+        for (auto & p : path.poses) {
+          p.pose.position.x -= 0.15;
+        }
+      }
+      if (redraw || mode == "lost_goal") {
+        EXPECT_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr),
+          nav2_core::InvalidPath);
+      } else {
+        ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      }
+    }
+    const auto events = receive();
+    ASSERT_FALSE(events.empty());
+    const auto & cleared = events.front();
+    EXPECT_EQ(cleared.event, "CURVE_CLEARED");
+    EXPECT_EQ(cleared.reason, mode == "new_goal" ? "NEW_GOAL" :
+      (mode == "parameter" ? "PARAM_CHANGE_WHILE_LATCHED" :
+      (mode == "gear_redraw_failure" ? "GEAR_FLIP_WHILE_LATCHED" :
+      (mode == "lost_goal" ? "LATCHED_GOAL_LOST_INSIDE_CUTOFF" : "LOCAL_GOAL_SHIFT_EXCEEDED"))));
+    EXPECT_TRUE(cleared.latched);
+    EXPECT_TRUE(cleared.before_clear);
+    EXPECT_FALSE(cleared.evaluation_context_valid);
+    EXPECT_FALSE(cleared.goal_tolerance_valid);
+    EXPECT_EQ(cleared.goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(cleared.curve.empty());
+    EXPECT_EQ(cleared.curve_frame, "map");
+    EXPECT_EQ(cleared.sequence, initial.back().sequence + 1u);
+    EXPECT_EQ(cleared.latch_id, initial.front().latch_id);
+    for (size_t i = 1; i < events.size(); ++i) {
+      EXPECT_EQ(events[i].sequence, cleared.sequence + i);
+    }
+    if (redraw) {
+      ASSERT_EQ(events.size(), 2u);
+      const auto & failure = events.back();
+      EXPECT_EQ(failure.event, "ABORT");
+      EXPECT_EQ(failure.reason, "ENTRY_INFEASIBLE");
+      EXPECT_EQ(failure.redraw_count, 1);
+      EXPECT_DOUBLE_EQ(failure.gear, mode == "gear_redraw_failure" ? -1.0 : 1.0);
+      EXPECT_FALSE(failure.latched);
+      EXPECT_FALSE(failure.before_clear);
+      EXPECT_TRUE(failure.curve.empty());
+      EXPECT_TRUE(failure.curve_frame.empty());
+      EXPECT_EQ(failure.header.frame_id, actual.header.frame_id);
+      EXPECT_TRUE(failure.evaluation_context_valid);
+      EXPECT_TRUE(failure.feasibility_evaluated);
+    } else if (mode == "fallback_shift" || mode == "replan_shift") {
+      ASSERT_EQ(events.size(), 4u);
+      const auto & final = events[1];
+      EXPECT_EQ(final.event, "EVALUATED");
+      EXPECT_EQ(final.reason, "LOCAL_GOAL_SHIFT_EXCEEDED");
+      EXPECT_FALSE(final.latched);
+      EXPECT_FALSE(final.before_clear);
+      EXPECT_EQ(final.replan_count, mode == "replan_shift" ? 1 : 0);
+      EXPECT_EQ(final.replan_pending, mode == "replan_shift");
+      EXPECT_TRUE(final.curve_frame.empty());
+    } else if (mode == "lost_goal") {
+      ASSERT_EQ(events.size(), 2u);
+      EXPECT_EQ(events.back().event, "ABORT");
+      EXPECT_EQ(events.back().reason, "LATCHED_GOAL_LOST_INSIDE_CUTOFF");
+      EXPECT_FALSE(events.back().feasibility_evaluated);
+      EXPECT_FALSE(events.back().goal_tolerance_valid);
+    } else {
+      ASSERT_EQ(events.size(), 1u);
+    }
+    critic->reset();
+    const auto reset = receive();
+    ASSERT_EQ(reset.size(), 1u);
+    EXPECT_EQ(reset.front().event, "RESET");
+    EXPECT_EQ(reset.front().reason, "TASK_RESET");
+    EXPECT_EQ(reset.front().goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(reset.front().before_clear);
+    EXPECT_TRUE(reset.front().curve.empty());
+    EXPECT_TRUE(reset.front().curve_frame.empty());
     optimizer.shutdown();
   }
 }
