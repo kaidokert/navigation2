@@ -1,5 +1,8 @@
 # Model Predictive Path Integral Controller
 
+For machine-readable terminal-approach failure records and the recording contract,
+see [Terminal approach diagnostics](TERMINAL_DIAGNOSTICS.md).
+
 ![](media/demo.gif)
 
 ## Overview

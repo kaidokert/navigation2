@@ -15,11 +15,13 @@
 #include "nav2_mppi_controller/critics/terminal_approach_critic.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <random>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -117,6 +119,13 @@ TerminalApproachCritic::~TerminalApproachCritic()
 void TerminalApproachCritic::initialize()
 {
   callback_guard_ = std::make_shared<bool>(true);
+  if (auto node = parent_.lock()) {
+    diagnostic_instance_ = std::to_string(std::random_device{}()) + "-" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    // GENERIC: bounded, reliable stream. Recorders must be connected before a trial.
+    diagnostic_pub_ = node->create_publisher<Diagnostic>(
+      "~/terminal_approach_diagnostics", rclcpp::QoS(100).reliable());
+  }
   auto getParam = parameters_handler_->getParamGetter(name_);
 
   // ROOM (UNDERIVED): Outer approach-circle entry radius around the terminal goal (m)
@@ -265,6 +274,9 @@ void TerminalApproachCritic::initialize()
 void TerminalApproachCritic::on_activate()
 {
   is_active_ = true;
+  if (diagnostic_pub_ != nullptr) {
+    diagnostic_pub_->on_activate();
+  }
   replan_allowance_consumed_ = false;
   replan_pending_ = false;
   replan_count_ = 0;
@@ -287,6 +299,9 @@ void TerminalApproachCritic::on_activate()
 
 void TerminalApproachCritic::on_deactivate()
 {
+  if (diagnostic_pub_ != nullptr && diagnostic_pub_->is_activated()) {
+    diagnostic_pub_->on_deactivate();
+  }
   is_active_ = false;
   replan_allowance_consumed_ = false;
   replan_pending_ = false;
@@ -298,6 +313,10 @@ void TerminalApproachCritic::on_deactivate()
 
 void TerminalApproachCritic::on_cleanup()
 {
+  if (diagnostic_pub_ != nullptr && diagnostic_pub_->is_activated()) {
+    diagnostic_pub_->on_deactivate();
+  }
+  diagnostic_pub_.reset();
   is_active_ = false;
   pending_replan_clear_ = false;
   replan_allowance_consumed_ = false;
@@ -330,6 +349,17 @@ void TerminalApproachCritic::ensureReplanPublisher(bool activate_now)
 
 void TerminalApproachCritic::clearActiveCurve()
 {
+  if (diagnostic_evaluation_active_ && !diagnostic_state_captured_) {
+    captureDiagnosticState(true);
+    diagnostic_.before_clear = true;
+    diagnostic_state_captured_ = true;
+  } else if (!diagnostic_evaluation_active_ && latched_) {
+    diagnostic_ = Diagnostic{};
+    captureDiagnosticState(true);
+    diagnostic_.header.frame_id = latched_frame_id_;
+    diagnostic_.before_clear = true;
+    publishDiagnostic("CURVE_CLEARED");
+  }
   latched_ = false;
   latched_is_reference_path_ = false;
   in_cusp_braking_transient_ = false;
@@ -348,6 +378,13 @@ void TerminalApproachCritic::clearActiveCurve()
 
 void TerminalApproachCritic::reset()
 {
+  if (enabled_ && !diagnostic_evaluation_active_) {
+    diagnostic_ = Diagnostic{};
+    captureDiagnosticState(true);
+    diagnostic_.header.frame_id = latched_frame_id_;
+    publishDiagnostic("RESET");
+  }
+  ++diagnostic_task_;
   replan_allowance_consumed_ = false;
   replan_pending_ = false;
   replan_count_ = 0;
@@ -363,6 +400,7 @@ void TerminalApproachCritic::reset()
 
 void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
 {
+  ++diagnostic_plan_;
   if (plan.poses.empty()) {
     reset();
     return;
@@ -407,6 +445,9 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     same_goal = (dpos <= kGlobalGoalPosTol) && (dyaw <= kGlobalGoalYawTol);
   }
   const double ref_gear = has_plan_gear_ ? last_plan_gear_ : latched_gear_;
+  if (!same_goal) {
+    ++diagnostic_goal_;
+  }
   const bool same_gear = !has_plan_gear || (plan_gear * ref_gear > 0.0);
 
   auto savePlanMetadata = [&]() {
@@ -749,22 +790,41 @@ float TerminalApproachCritic::computePullthroughLength(float along_track_remaini
 bool TerminalApproachCritic::isFootprintCollisionFree(
   double wx, double wy, double wyaw) const
 {
+  auto reject = [this, wx, wy, wyaw](const char * reason, double cost = -1.0) {
+      if (diagnostic_evaluation_active_) {
+        diagnostic_.collision_check_failed = true;
+        diagnostic_.collision_reason = reason;
+        diagnostic_.collision_pose.x = wx;
+        diagnostic_.collision_pose.y = wy;
+        diagnostic_.collision_pose.theta = wyaw;
+        diagnostic_.collision_cost = cost;
+      }
+      return false;
+    };
   if (costmap_ == nullptr || costmap_ros_ == nullptr ||
     !finiteValue(wx) || !finiteValue(wy) || !finiteValue(wyaw))
   {
-    return false;
+    return reject("INVALID_INPUT");
   }
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap_->getMutex()));
+  if (diagnostic_evaluation_active_) {
+    diagnostic_.costmap_resolution = costmap_->getResolution();
+    diagnostic_.collision_frame = costmap_ros_->getGlobalFrameID();
+    diagnostic_.costmap_origin_x = costmap_->getOriginX();
+    diagnostic_.costmap_origin_y = costmap_->getOriginY();
+    diagnostic_.costmap_size_x = costmap_->getSizeInCellsX();
+    diagnostic_.costmap_size_y = costmap_->getSizeInCellsY();
+  }
   unsigned int mx = 0u, my = 0u;
   if (!costmap_->worldToMap(wx, wy, mx, my)) {
-    return false;
+    return reject("CENTER_OUTSIDE_MAP");
   }
   const unsigned char center_cost = costmap_->getCost(mx, my);
   if (center_cost == nav2_costmap_2d::LETHAL_OBSTACLE ||
     center_cost == nav2_costmap_2d::NO_INFORMATION)
   {
-    return false;
+    return reject("CENTER_LETHAL_OR_UNKNOWN", center_cost);
   }
 
   auto * layered = costmap_ros_->getLayeredCostmap();
@@ -774,10 +834,11 @@ bool TerminalApproachCritic::isFootprintCollisionFree(
   if (costmap_ros_->getUseRadius() &&
     center_cost >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
   {
-    return false;
+    return reject("RADIUS_INSCRIBED", center_cost);
   }
   if (footprint.size() < 3u) {
-    return center_cost < nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
+    return center_cost < nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE ? true :
+           reject("POINT_INSCRIBED", center_cost);
   }
 
   const double cos_th = std::cos(wyaw);
@@ -787,7 +848,7 @@ bool TerminalApproachCritic::isFootprintCollisionFree(
     const double vy = wy + (pt.x * sin_th + pt.y * cos_th);
     unsigned int vmx = 0u, vmy = 0u;
     if (!costmap_->worldToMap(vx, vy, vmx, vmy)) {
-      return false;
+      return reject("VERTEX_OUTSIDE_MAP");
     }
   }
 
@@ -797,7 +858,7 @@ bool TerminalApproachCritic::isFootprintCollisionFree(
     fp_cost >= static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE) ||
     fp_cost == static_cast<double>(nav2_costmap_2d::NO_INFORMATION))
   {
-    return false;
+    return reject("FOOTPRINT_COST", fp_cost);
   }
   return true;
 }
@@ -855,21 +916,27 @@ bool TerminalApproachCritic::buildReferencePathCurve(
   std::vector<utils::Pose2D> & out_curve,
   double min_lead_distance) const
 {
+  auto reject = [this](const char * reason,
+    double value = std::numeric_limits<double>::quiet_NaN(),
+    double limit = std::numeric_limits<double>::quiet_NaN()) {
+      diagnosticCheck(reason, false, value, limit);
+      return false;
+    };
   out_curve.clear();
   const size_t n = path.x.shape(0);
   if (n == 0u || start_idx >= n) {
-    return false;
+    return reject("reference/invalid_start");
   }
   const size_t last_idx = std::min(goal_idx, n - 1u);
   if (start_idx > last_idx) {
-    return false;
+    return reject("reference/invalid_end");
   }
 
   const double goal_x = goal_pose.position.x;
   const double goal_y = goal_pose.position.y;
   const double goal_yaw = tf2::getYaw(goal_pose.orientation);
   if (!isFootprintCollisionFree(goal_x, goal_y, goal_yaw)) {
-    return false;
+    return reject("reference/goal_collision");
   }
 
   const double min_res = (costmap_ != nullptr) ?
@@ -906,7 +973,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
       const double bth = static_cast<double>(path.yaws(i + 1u));
       const double seg_len = std::hypot(bx - ax, by - ay);
       if (!finiteValue(seg_len)) {
-        return false;
+        return reject("reference/nonfinite_segment");
       }
       const double dth = angles::shortest_angular_distance(ath, bth);
       if (enforce_sub_min_curvature) {
@@ -918,7 +985,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
           std::max(kMinGoalYawToleranceFloorM, static_cast<double>(goal_yaw_tolerance_))) :
           base_max_seg_dth;
         if (std::fabs(dth) > max_seg_dth) {
-          return false;
+          return reject("reference/segment_yaw", std::fabs(dth), max_seg_dth);
         }
         if (seg_len > 1e-4) {
           const double seg_travel_th =
@@ -932,7 +999,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
               kMinRefChordAngleTolRad,
               seg_len / (kRefCurvatureMarginRatio * min_turning_r));
           if (chord_err > max_chord_err) {
-            return false;
+            return reject("reference/segment_chord", chord_err, max_chord_err);
           }
         }
       }
@@ -973,7 +1040,8 @@ bool TerminalApproachCritic::buildReferencePathCurve(
       if (std::fabs(dth) > 1e-3 &&
         end_d < kRefCurvatureMarginRatio * min_turning_r * std::fabs(dth))
       {
-        return false;
+        return reject("reference/end_turn_radius", end_d,
+            kRefCurvatureMarginRatio * min_turning_r * std::fabs(dth));
       }
       const double seg_travel_th =
         (gear < 0.0) ? angles::normalize_angle(ath + M_PI) : ath;
@@ -983,7 +1051,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
       const double max_chord_err = std::max(
         kMinRefChordAngleTolRad, end_d / (kRefCurvatureMarginRatio * min_turning_r));
       if (chord_err > max_chord_err) {
-        return false;
+        return reject("reference/end_chord", chord_err, max_chord_err);
       }
       const size_t sub_steps =
         std::max<size_t>(1u, static_cast<size_t>(std::ceil(end_d / kMaxCollisionCheckStepM)));
@@ -993,7 +1061,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
         const double my = ay + alpha * (goal_y - ay);
         const double mth = angles::normalize_angle(ath + alpha * dth);
         if (!isFootprintCollisionFree(mx, my, mth)) {
-          return false;
+          return reject("reference/end_collision");
         }
       }
       built.push_back(exact_goal);
@@ -1065,7 +1133,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
           const double ay = static_cast<double>(lead_pts[i].y);
           const double ath = static_cast<double>(lead_pts[i].theta);
           if (!isFootprintCollisionFree(ax, ay, ath)) {
-            return false;
+            return reject("reference/lead_pose_collision");
           }
           if (i + 1u < lead_pts.size()) {
             const double bx = static_cast<double>(lead_pts[i + 1u].x);
@@ -1082,7 +1150,7 @@ bool TerminalApproachCritic::buildReferencePathCurve(
                 const double my = ay + alpha * (by - ay);
                 const double mth = angles::normalize_angle(ath + alpha * dth);
                 if (!isFootprintCollisionFree(mx, my, mth)) {
-                  return false;
+                  return reject("reference/lead_segment_collision");
                 }
               }
             }
@@ -1313,6 +1381,10 @@ bool TerminalApproachCritic::solveCaptureCurve(
   std::string * out_family,
   double * out_radius) const
 {
+  std::vector<CaptureFamilyTrace> diagnostic_traces;
+  if (diagnostic_evaluation_active_ && out_traces == nullptr) {
+    out_traces = &diagnostic_traces;
+  }
   out_curve.clear();
   if (out_traces != nullptr) {
     out_traces->clear();
@@ -1363,7 +1435,7 @@ bool TerminalApproachCritic::solveCaptureCurve(
         {"pose_admission", false, 0.0, 0.0, 0.0, 0.0, Y0, theta0,
           (X0 >= kMinBehindGoalLonM) ? "X0 >= kMinBehindGoalLonM" : "|theta0| >= 85deg"});
     }
-    return false;
+    return recordCaptureResult(out_traces, false);
   }
 
   struct CandidateCurve
@@ -1697,7 +1769,7 @@ bool TerminalApproachCritic::solveCaptureCurve(
   }
 
   if (candidates.empty()) {
-    return false;
+    return recordCaptureResult(out_traces, false);
   }
 
   // Prefer exact endpoint curves (x_offset == 0, y_offset == 0, theta_end == 0), then smallest
@@ -1792,6 +1864,7 @@ bool TerminalApproachCritic::solveCaptureCurve(
       }
     }
     if (!collision_free) {
+      diagnosticCheck(("capture/" + cand.family + "/collision_free").c_str(), false);
       continue;
     }
 
@@ -1821,9 +1894,12 @@ bool TerminalApproachCritic::solveCaptureCurve(
     const double end_dyaw = std::fabs(
       angles::shortest_angular_distance(static_cast<double>(end_pose.theta), goal_nose_yaw));
     if (std::hypot(end_dx, end_dy) > max_end_xy + 1e-5 || end_dyaw > max_end_yaw + 1e-5) {
+      recordCaptureEndpoint(cand.family,
+        std::hypot(end_dx, end_dy), max_end_xy + 1e-5, end_dyaw, max_end_yaw + 1e-5);
       continue;
     }
     if (!isFootprintCollisionFree(end_pose.x, end_pose.y, end_pose.theta)) {
+      diagnosticCheck(("capture/" + cand.family + "/endpoint_collision_free").c_str(), false);
       continue;
     }
     built.push_back(end_pose);
@@ -1834,10 +1910,10 @@ bool TerminalApproachCritic::solveCaptureCurve(
     if (out_radius != nullptr) {
       *out_radius = cand.R;
     }
-    return true;
+    return recordCaptureResult(out_traces, true);
   }
 
-  return false;
+  return recordCaptureResult(out_traces, false);
 }
 
 void TerminalApproachCritic::handleInfeasible(
@@ -1859,6 +1935,7 @@ void TerminalApproachCritic::handleInfeasible(
     last_effective_lat_limit_, handoff_cutoff, redraw_count_, max_redraws_, replan_count_);
   last_abort_msg_ = msg_buf;
   escalation_reason_ = reason;
+  diagnostic_.reason = reason;
 
   RCLCPP_INFO(
     logger_,
@@ -1934,7 +2011,166 @@ void TerminalApproachCritic::requestReplanIfEligible(double goal_dist_m)
   }
 }
 
+bool TerminalApproachCritic::recordCaptureResult(
+  const std::vector<CaptureFamilyTrace> * traces, bool result) const
+{
+  if (traces == nullptr || !diagnostic_evaluation_active_) {
+    return result;
+  }
+  for (const auto & trace : *traces) {
+    const std::string key = "capture/" + trace.family + "/" + trace.rejection_reason;
+    if (trace.rejection_reason == "R < min_turning_r") {
+      diagnosticCheck(key.c_str(), trace.accepted, trace.R,
+        std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_)));
+    } else {
+      diagnosticCheck(key.c_str(), trace.accepted);
+    }
+  }
+  return result;
+}
+
+void TerminalApproachCritic::recordCaptureEndpoint(
+  const std::string & family, double xy, double xy_limit, double yaw, double yaw_limit) const
+{
+  diagnosticCheck(("capture/" + family + "/endpoint_xy").c_str(), xy <= xy_limit, xy, xy_limit);
+  diagnosticCheck(("capture/" + family + "/endpoint_yaw").c_str(),
+    yaw <= yaw_limit, yaw, yaw_limit);
+}
+
+void TerminalApproachCritic::diagnosticCheck(
+  const char * name, bool passed, double value, double limit) const
+{
+  if (!diagnostic_evaluation_active_) {
+    return;
+  }
+  if (diagnostic_.checks.size() == 96u) {
+    diagnostic_.checks_truncated = true;
+    return;
+  }
+  nav2_critics_msgs::msg::TerminalApproachCheck check;
+  check.name = name;
+  check.passed = passed;
+  check.value = value;
+  check.limit = limit;
+  diagnostic_.checks.push_back(std::move(check));
+}
+
+void TerminalApproachCritic::captureDiagnosticState(bool include_curve)
+{
+  diagnostic_.policy = infeasible_policy_;
+  diagnostic_.ownership = static_cast<uint8_t>(ownership_);
+  diagnostic_.latched = latched_;
+  diagnostic_.latch_consumed = latch_consumed_;
+  diagnostic_.reference_path = latched_is_reference_path_;
+  diagnostic_.cusp_braking = in_cusp_braking_transient_;
+  diagnostic_.reversal_established = reversal_motion_established_;
+  diagnostic_.replan_pending = replan_pending_;
+  diagnostic_.replan_allowance_consumed = replan_allowance_consumed_;
+  diagnostic_.redraw_count = redraw_count_;
+  diagnostic_.max_redraws = max_redraws_;
+  diagnostic_.replan_count = replan_count_;
+  diagnostic_.gear = latched_gear_;
+  diagnostic_.lateral_error = last_curve_lateral_err_;
+  diagnostic_.lateral_limit = last_effective_lat_limit_;
+  diagnostic_.rollback = last_pre_start_rollback_m_;
+  diagnostic_.cutoff = effectiveHandoffCutoff();
+  diagnostic_.curve_size = static_cast<uint32_t>(latched_curve_.size());
+  if (include_curve) {
+    diagnostic_.curve_frame = diagnostic_curve_frame_;
+    diagnostic_.curve.clear();
+    const auto count = std::min<size_t>(512u, latched_curve_.size());
+    diagnostic_.curve_truncated = count < latched_curve_.size();
+    for (size_t i = 0; i < count; ++i) {
+      geometry_msgs::msg::Pose2D p;
+      p.x = latched_curve_[i].x;
+      p.y = latched_curve_[i].y;
+      p.theta = latched_curve_[i].theta;
+      diagnostic_.curve.push_back(p);
+    }
+  }
+}
+
+void TerminalApproachCritic::publishDiagnostic(const char * event) noexcept
+{
+  if (!diagnostic_pub_ || !diagnostic_pub_->is_activated()) {
+    return;
+  }
+  try {
+    if (auto node = parent_.lock()) {
+      diagnostic_.header.stamp = node->now();
+    }
+    diagnostic_.critic = name_;
+    diagnostic_.instance_id = diagnostic_instance_;
+    diagnostic_.sequence = ++diagnostic_sequence_;
+    diagnostic_.evaluation_id = diagnostic_evaluation_;
+    diagnostic_.task_id = diagnostic_task_;
+    diagnostic_.plan_id = diagnostic_plan_;
+    diagnostic_.goal_id = diagnostic_goal_;
+    diagnostic_.latch_id = diagnostic_latch_;
+    diagnostic_.event = event;
+    diagnostic_pub_->publish(diagnostic_);
+  } catch (const std::exception & e) {
+    // A failed observer must not replace the controller's original decision/exception.
+    RCLCPP_ERROR(logger_, "Terminal approach diagnostic publication failed: %s", e.what());
+  }
+}
+
 void TerminalApproachCritic::score(CriticData & data)
+{
+  if (!enabled_) {
+    scoreImpl(data);
+    return;
+  }
+  diagnostic_ = Diagnostic{};
+  diagnostic_.goal_region_result = "NOT_EVALUATED";
+  diagnostic_.evaluation_context_valid = true;
+  diagnostic_.reuse_obstacles_cache = data.reuse_obstacles_cache;
+  diagnostic_.header.frame_id = data.state.pose.header.frame_id;
+  diagnostic_.robot_pose = data.state.pose.pose;
+  diagnostic_.goal = data.goal;
+  diagnostic_.velocity = data.state.speed;
+  diagnostic_.pose_stamp = data.state.pose.header.stamp;
+  diagnostic_.min_turning_radius = min_turning_radius_;
+  diagnostic_.goal_region_xy_ratio = goal_region_xy_ratio_;
+  diagnostic_.goal_region_yaw_ratio = goal_region_yaw_ratio_;
+  diagnostic_.goal_distance = std::hypot(
+    data.goal.position.x - data.state.pose.pose.position.x,
+    data.goal.position.y - data.state.pose.pose.position.y);
+  diagnostic_.goal_yaw_error = angles::shortest_angular_distance(
+    tf2::getYaw(data.state.pose.pose.orientation), tf2::getYaw(data.goal.orientation));
+  diagnostic_state_captured_ = false;
+  diagnostic_curve_changed_ = false;
+  diagnostic_evaluation_active_ = enabled_;
+  ++diagnostic_evaluation_;
+  try {
+    scoreImpl(data);
+  } catch (const std::exception & e) {
+    if (diagnostic_evaluation_active_) {
+      if (!diagnostic_state_captured_) {
+        captureDiagnosticState(true);
+      }
+      diagnostic_.exception = e.what();
+      if (diagnostic_.reason.empty()) {
+        const std::string message = e.what();
+        const auto begin = message.find("reason=");
+        diagnostic_.reason = begin == std::string::npos ? "UNEXPECTED_EXCEPTION" :
+          message.substr(begin + 7u, message.find_first_of(" \n", begin + 7u) - (begin + 7u));
+      }
+      publishDiagnostic("ABORT");
+    }
+    diagnostic_evaluation_active_ = false;
+    throw;
+  }
+  if (diagnostic_evaluation_active_) {
+    if (!diagnostic_state_captured_) {
+      captureDiagnosticState(diagnostic_curve_changed_);
+    }
+    publishDiagnostic("EVALUATED");
+  }
+  diagnostic_evaluation_active_ = false;
+}
+
+void TerminalApproachCritic::scoreImpl(CriticData & data)
 {
   if (hasParameterChangedSinceLatch()) {
     if (latch_consumed_ || latched_ || approach_escalated_ ||
@@ -2003,6 +2239,8 @@ void TerminalApproachCritic::score(CriticData & data)
     stock_pfc_active_ && stock_pac_active_ &&
     std::fabs(effective_pfc_cutoff_ - effective_pac_cutoff_) > 1e-3f)
   {
+    diagnosticCheck("stock/threshold_difference_le", false,
+      std::fabs(effective_pfc_cutoff_ - effective_pac_cutoff_), 1e-3f);
     throw nav2_core::InvalidPath(
       "[TERMINAL_APPROACH_ABORT] reason=STOCK_THRESHOLD_MISMATCH "
       "(PathFollowCritic and PathAlignCritic threshold_to_consider must match)");
@@ -2044,6 +2282,12 @@ void TerminalApproachCritic::score(CriticData & data)
       cum_dpos > static_cast<double>(goal_reset_pos_tol_) ||
       cum_dyaw > static_cast<double>(goal_reset_yaw_tol_))
     {
+      diagnosticCheck("goal_shift/frame_matches",
+        data.state.pose.header.frame_id == latched_frame_id_);
+      diagnosticCheck("goal_shift/position_le", cum_dpos <= goal_reset_pos_tol_,
+        cum_dpos, goal_reset_pos_tol_);
+      diagnosticCheck("goal_shift/yaw_le", cum_dyaw <= goal_reset_yaw_tol_,
+        cum_dyaw, goal_reset_yaw_tol_);
       latched_goal_ = data.goal;
       latch_origin_goal_ = data.goal;
       latched_frame_id_ = data.state.pose.header.frame_id;
@@ -2083,6 +2327,7 @@ void TerminalApproachCritic::score(CriticData & data)
           projectOntoCurve(robot_x, robot_y, latched_curve_, latched_gear_).lateral_dist;
         const double cos_d = std::cos(step_dyaw), sin_d = std::sin(step_dyaw);
         const double gx0 = latched_goal_.position.x, gy0 = latched_goal_.position.y;
+        diagnostic_curve_changed_ = true;
         for (auto & pt : latched_curve_) {
           const double rx = static_cast<double>(pt.x) - gx0, ry = static_cast<double>(pt.y) - gy0;
           pt.x = static_cast<float>(goal_x + (rx * cos_d - ry * sin_d));
@@ -2261,7 +2506,11 @@ void TerminalApproachCritic::score(CriticData & data)
     }
   }
 
+  diagnostic_.goal_tolerance_valid = true;
+  diagnostic_.goal_xy_tolerance = goal_xy_tol;
+  diagnostic_.goal_yaw_tolerance = goal_yaw_tol;
   if (!tick_evaluated_) {
+    diagnostic_.feasibility_evaluated = true;
     tick_evaluated_ = true;
     const double path_cross_track = minDistanceToPath(robot_x, robot_y, data.path);
     double projected_path_yaw = static_cast<double>(data.path.yaws(0));
@@ -2616,10 +2865,17 @@ bool TerminalApproachCritic::tryInitialLatch(
   const bool sub_min_kinematically_reachable =
     sub_min_arc_reaches_goal_box &&
     (path_cross_track <= viable_cross_track_limit);
+  diagnosticCheck("entry/sub_min_arc_reaches_goal_box", sub_min_arc_reaches_goal_box);
+  diagnosticCheck("entry/path_lateral_le", path_cross_track <= viable_cross_track_limit,
+    path_cross_track, viable_cross_track_limit);
+  diagnosticCheck("entry/path_yaw_le", path_yaw_err <= viable_yaw_limit,
+    path_yaw_err, viable_yaw_limit);
+  diagnosticCheck("entry/behind_goal_ok", behind_goal_ok, lon_remaining, kSubMinBehindGoalLonM);
   const bool ref_path_free =
     isReferencePathCollisionFree(data.path, closest_path_seg_idx, terminal_goal_idx);
   const bool viable_free = ref_path_free &&
     (path_cross_track <= viable_cross_track_limit) && (path_yaw_err <= viable_yaw_limit);
+  diagnosticCheck("entry/reference_collision_free", ref_path_free);
   const bool outside_tracking_corridor =
     path_cross_track > static_cast<double>(max_tracking_drift_);
   const bool needs_capture =
@@ -2636,6 +2892,8 @@ bool TerminalApproachCritic::tryInitialLatch(
     (!needs_capture || is_curved_turn_entry ||
     (is_short_approach && (!outside_tracking_corridor || sub_min_kinematically_reachable))) &&
     (!is_sub_min_dist || sub_min_kinematically_reachable);
+  diagnosticCheck("entry/prefer_reference_path", prefer_reference_path);
+  diagnosticCheck("entry/capture_distance_ge", goal_dist >= min_dist, goal_dist, min_dist);
   ownership_ = computeOwnership(goal_dist, false, false);
   if (prefer_reference_path && ref_cutoff > 0.0 && goal_dist > ref_cutoff &&
     !replan_allowance_consumed_ && redraw_count_ == 0)
@@ -2718,6 +2976,7 @@ bool TerminalApproachCritic::tryInitialLatch(
     solved_initial_latch = true;
   }
   if (!solved_initial_latch) {
+    diagnosticCheck("entry/solved", false);
     // Section 7.2: Before guidance transfers to TerminalApproachCritic (ownership_ == PREPARE),
     // stock PathFollowCritic / PathAlignCritic still own guidance and TerminalApproachCritic has
     // added no cost. Under "abort" / "fallback", defer latching until guidance actually transfers
@@ -2745,12 +3004,18 @@ bool TerminalApproachCritic::tryInitialLatch(
   }
 
   latched_ = latch_consumed_ = true;
+  diagnosticCheck("entry/solved", true);
+  diagnostic_state_captured_ = false;
+  diagnostic_.before_clear = false;
+  diagnostic_curve_changed_ = true;
+  ++diagnostic_latch_;
   latched_is_reference_path_ = latched_ref;
   approach_escalated_ = replan_signal_sent_ = false;
   latched_goal_ = latch_origin_goal_ = data.goal;
   latched_frame_id_ = data.state.pose.header.frame_id;
   latched_gear_ = gear;
   latched_curve_ = std::move(curve);
+  diagnostic_curve_frame_ = data.state.pose.header.frame_id;
   const CurveProjection init_proj =
     projectOntoCurve(robot_x, robot_y, latched_curve_, latched_gear_);
   double init_lat = init_proj.lateral_dist;
@@ -2797,6 +3062,10 @@ bool TerminalApproachCritic::canReachGoalRegion(
   double goal_x, double goal_y, double goal_yaw,
   double goal_xy_tol, double goal_yaw_tol) const
 {
+  auto result = [this](const char * reason, bool reached = false) {
+      diagnostic_.goal_region_result = reason;
+      return reached;
+    };
   // A sufficient local witness, not an exhaustive path solver. Invalid margins fail closed.
   // No steering reversal, opposite-gear motion, loop, new latch or mutable cache is involved.
   if (costmap_ros_ == nullptr || costmap_ == nullptr ||
@@ -2808,11 +3077,12 @@ bool TerminalApproachCritic::canReachGoalRegion(
     goal_region_xy_ratio_ <= 0.0f || goal_region_xy_ratio_ >= 1.0f ||
     goal_region_yaw_ratio_ <= 0.0f || goal_region_yaw_ratio_ >= 1.0f)
   {
-    return false;
+    return result("INVALID_INPUT");
   }
   const double yaw_error = angles::shortest_angular_distance(goal_yaw, robot_yaw);
   if (std::fabs(yaw_error) >= kMaxCaptureAngleRad) {
-    return false;
+    diagnosticCheck("witness/capture_angle_lt", false, std::fabs(yaw_error), kMaxCaptureAngleRad);
+    return result("CAPTURE_ANGLE");
   }
   const double radius =
     std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_));
@@ -2826,18 +3096,22 @@ bool TerminalApproachCritic::canReachGoalRegion(
   }
   const double resolution = costmap_->getResolution();
   if (!finiteValue(resolution) || resolution <= 0.0) {
-    return false;
+    diagnosticCheck("witness/resolution_positive_finite", false, resolution, 0.0);
+    return result("RESOLUTION");
   }
   const double step = std::min(
     kMaxCollisionCheckStepM, 0.5 * resolution / (1.0 + footprint_radius / radius));
   if (!finiteValue(step) || step <= 0.0) {
-    return false;
+    diagnosticCheck("witness/sample_step_positive_finite", false, step, 0.0);
+    return result("SAMPLE_STEP");
   }
   const double sample_count = std::ceil(length / step);
   if (!finiteValue(sample_count) || sample_count > kMaxGoalRegionSamples) {
-    return false;
+    diagnosticCheck("witness/sample_budget_le", false, sample_count, kMaxGoalRegionSamples);
+    return result("SAMPLE_BUDGET");
   }
   const size_t steps = std::max<size_t>(1u, static_cast<size_t>(sample_count));
+  diagnostic_.witness_sample_count = static_cast<uint32_t>(steps + 1u);
   double witness_cross_track = latch_initial_cross_track_;
   for (size_t i = 0u; i <= steps; ++i) {
     const double angle = turn * length * static_cast<double>(i) / steps / radius;
@@ -2846,8 +3120,16 @@ bool TerminalApproachCritic::canReachGoalRegion(
     const double y = robot_y - radius / turn *
       (std::cos(travel_yaw + angle) - std::cos(travel_yaw));
     const double yaw = angles::normalize_angle(robot_yaw + angle);
+    diagnostic_.witness_sample_valid = true;
+    diagnostic_.witness_lateral_evaluated = false;
+    diagnostic_.witness_sample_index = static_cast<uint32_t>(i);
+    diagnostic_.witness_pose.x = x;
+    diagnostic_.witness_pose.y = y;
+    diagnostic_.witness_pose.theta = yaw;
+    diagnostic_.witness_xy_error = std::hypot(x - goal_x, y - goal_y);
+    diagnostic_.witness_yaw_error = std::fabs(angles::shortest_angular_distance(yaw, goal_yaw));
     if (!isFootprintCollisionFree(x, y, yaw)) {
-      return false;
+      return result("FOOTPRINT_BLOCKED");
     }
     const double xy_error = std::hypot(x - goal_x, y - goal_y);
     const double heading_error = std::fabs(angles::shortest_angular_distance(yaw, goal_yaw));
@@ -2855,8 +3137,11 @@ bool TerminalApproachCritic::canReachGoalRegion(
     // Otherwise accepting it now merely postpones DRIFT_EXCEEDED to the next tick.
     if (xy_error > goal_xy_tol || heading_error > goal_yaw_tol) {
       const double lateral = projectOntoCurve(x, y, latched_curve_, latched_gear_).lateral_dist;
+      diagnostic_.witness_lateral_evaluated = true;
+      diagnostic_.witness_lateral = lateral;
+      diagnostic_.witness_lateral_limit = witness_cross_track + max_tracking_drift_;
       if (lateral > witness_cross_track + static_cast<double>(max_tracking_drift_)) {
-        return false;
+        return result("LATERAL_ENVELOPE");
       }
       // Account conservatively for the live envelope's ratchet along the continuation.
       // Omitting its optional yaw-alignment floor can only reject an extra witness.
@@ -2865,10 +3150,10 @@ bool TerminalApproachCritic::canReachGoalRegion(
     if (xy_error <= goal_region_xy_ratio_ * goal_xy_tol &&
       heading_error <= goal_region_yaw_ratio_ * goal_yaw_tol)
     {
-      return true;
+      return result("REACHED_INTERIOR", true);
     }
   }
-  return false;
+  return result("MISSED_INTERIOR");
 }
 
 bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
@@ -2982,6 +3267,11 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     angles::shortest_angular_distance(static_cast<double>(end_pt.theta), goal_yaw));
   const bool latched_tol_violated =
     (end_err_xy > live_max_end_xy + 1e-5) || (end_err_yaw > live_max_end_yaw + 1e-5);
+  diagnosticCheck("curve/collision_free", !latched_blocked);
+  diagnosticCheck("curve/end_xy_le", end_err_xy <= live_max_end_xy + 1e-5,
+    end_err_xy, live_max_end_xy + 1e-5);
+  diagnosticCheck("curve/end_yaw_le", end_err_yaw <= live_max_end_yaw + 1e-5,
+    end_err_yaw, live_max_end_yaw + 1e-5);
 
   // Section 1 & Follow-Up Section A: Separate longitudinal rollback / cusp braking transient from
   // lateral tracking error, and enforce the post-reversal retreat contract against the best
@@ -3025,6 +3315,14 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
   }
 
   // Section 2 & Follow-Up Section C: Align lateral drift enforcement with actual guidance
+  const double diagnostic_rollback_limit = !in_cusp_braking_transient_ ?
+    static_cast<double>(max_tracking_drift_) :
+    (reversal_motion_established_ ?
+    std::min(kMaxCuspBrakingRollbackM, min_post_reversal_rollback_m_ + kMaxPostReversalRetreatM) :
+    kMaxCuspBrakingRollbackM);
+  diagnosticCheck("curve/rollback_le", !rollback_violated,
+    proj.pre_start_rollback_m, diagnostic_rollback_limit);
+
   // ownership and validate bounded Ackermann joinability (min_turning_radius_) across the
   // overlap ring and at the cutoff transition.
   const double travel_goal_yaw =
@@ -3047,6 +3345,12 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     (lon_remaining > kMinBehindGoalLonM) &&
     (std::fabs(theta0_goal) < kMaxCaptureAngleRad) &&
     (std::fabs(curve_yaw_err) < kMaxCaptureAngleRad);
+  diagnosticCheck("join/longitude_gt", lon_remaining > kMinBehindGoalLonM,
+    lon_remaining, kMinBehindGoalLonM);
+  diagnosticCheck("join/goal_angle_lt", std::fabs(theta0_goal) < kMaxCaptureAngleRad,
+    std::fabs(theta0_goal), kMaxCaptureAngleRad);
+  diagnosticCheck("join/curve_angle_lt", std::fabs(curve_yaw_err) < kMaxCaptureAngleRad,
+    std::fabs(curve_yaw_err), kMaxCaptureAngleRad);
   if (curve_kinematically_joinable && !in_cusp_braking_transient_) {
     const double psi_abs = std::fabs(curve_yaw_err);
     const double join_yaw_tol =
@@ -3062,6 +3366,9 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     const double excess_lat = std::max(0.0, y_apex - corridor_lat);
     const double dx_s_turn = 2.0 * std::sqrt(
       std::max(0.0, r_min * excess_lat - 0.25 * excess_lat * excess_lat));
+    diagnosticCheck("join/runway_le", dx_align + dx_s_turn <=
+      s_rem + kGoalBoxXyTargetRatio * goal_xy_tol,
+      dx_align + dx_s_turn, s_rem + kGoalBoxXyTargetRatio * goal_xy_tol);
     if (dx_align + dx_s_turn > s_rem + kGoalBoxXyTargetRatio * goal_xy_tol) {
       curve_kinematically_joinable = false;
     }
@@ -3101,11 +3408,17 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     (!curve_kinematically_joinable || (proj.lateral_dist > effective_max_drift));
   const bool drift_violated =
     (ownership_ != GuidanceOwnership::PREPARE) && unjoinable_or_drifted;
+  diagnosticCheck("join/kinematically_joinable", curve_kinematically_joinable);
+  diagnosticCheck("join/overlap_lateral_le", proj.lateral_dist <= max_join_lat,
+    proj.lateral_dist, max_join_lat);
+  diagnosticCheck("curve/lateral_le", proj.lateral_dist <= effective_max_drift,
+    proj.lateral_dist, effective_max_drift);
   const bool already_in_goal_box =
     !latched_blocked && !latched_tol_violated && !rollback_violated &&
     (goal_dist <= goal_xy_tol) &&
     (std::fabs(angles::shortest_angular_distance(robot_yaw, goal_yaw)) <= goal_yaw_tol);
   if (already_in_goal_box) {
+    diagnosticCheck("goal/already_inside", true);
     return true;
   }
   if (latched_blocked || latched_tol_violated || rollback_violated || drift_violated) {
@@ -3126,6 +3439,8 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
           goal_xy_tol, goal_yaw_tol, nullptr, &redrawn_family, &redrawn_r))
       {
         latched_curve_ = std::move(redrawn);
+        diagnostic_curve_changed_ = true;
+        ++diagnostic_latch_;
         latched_is_reference_path_ = false;
         const CurveProjection redraw_proj =
           projectOntoCurve(robot_x, robot_y, latched_curve_, latched_gear_);
@@ -3166,6 +3481,7 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     if (ownership_ == GuidanceOwnership::PREPARE && handoff_cutoff > 0.0 &&
       goal_dist > handoff_cutoff && infeasible_policy_ != "replan_signal")
     {
+      diagnostic_.reason = fail_reason;
       clearActiveCurve();
       ownership_ = GuidanceOwnership::PREPARE;
       latch_consumed_ = true;

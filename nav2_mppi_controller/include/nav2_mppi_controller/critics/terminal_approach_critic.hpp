@@ -15,12 +15,14 @@
 #ifndef NAV2_MPPI_CONTROLLER__CRITICS__TERMINAL_APPROACH_CRITIC_HPP_
 #define NAV2_MPPI_CONTROLLER__CRITICS__TERMINAL_APPROACH_CRITIC_HPP_
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "geometry_msgs/msg/pose.hpp"
+#include "nav2_critics_msgs/msg/terminal_approach_diagnostics.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 #include "std_msgs/msg/bool.hpp"
 
@@ -334,6 +336,28 @@ public:
   double effectiveHandoffCutoff() const;
 
 protected:
+  // Observations only: never used by feasibility, scoring, or latch decisions.
+  using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
+  void scoreImpl(CriticData & data);
+  void captureDiagnosticState(bool include_curve);
+  void publishDiagnostic(const char * event) noexcept;
+  void diagnosticCheck(
+    const char * name, bool passed,
+    double value = std::numeric_limits<double>::quiet_NaN(),
+    double limit = std::numeric_limits<double>::quiet_NaN()) const;
+  bool recordCaptureResult(const std::vector<CaptureFamilyTrace> * traces, bool result) const;
+  void recordCaptureEndpoint(
+    const std::string & family, double xy, double xy_limit, double yaw, double yaw_limit) const;
+  mutable Diagnostic diagnostic_;
+  bool diagnostic_evaluation_active_{false};
+  bool diagnostic_state_captured_{false};
+  bool diagnostic_curve_changed_{false};
+  uint64_t diagnostic_sequence_{0}, diagnostic_evaluation_{0}, diagnostic_task_{0};
+  uint64_t diagnostic_plan_{0}, diagnostic_goal_{0}, diagnostic_latch_{0};
+  std::string diagnostic_instance_;
+  std::string diagnostic_curve_frame_;
+  rclcpp_lifecycle::LifecyclePublisher<Diagnostic>::SharedPtr diagnostic_pub_;
+
   /**
    * @brief Lazily create (and optionally activate) ~/terminal_replan_requested publisher
    */

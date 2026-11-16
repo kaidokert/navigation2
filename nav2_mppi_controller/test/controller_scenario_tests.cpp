@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <random>
 #include <string>
@@ -5097,6 +5098,207 @@ TEST_F(ControllerScenarios, TerminalGoalRegionKeepsGuidanceAndRejectsUnsafeArriv
         optimizer.shutdown();
       }
     }
+  }
+}
+
+TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeClear)
+{
+  using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
+  for (const std::string mode : {"accepted", "lateral", "blocked", "witness_blocked",
+      "tight_margin", "sample_budget", "entry", "empty_candidates", "pose_admission",
+      "stock_mismatch"})
+  {
+    SCOPED_TRACE(mode);
+    const bool entry = mode == "entry" || mode == "empty_candidates" || mode == "pose_admission";
+    Scenario sc;
+    sc.id = "terminal_diagnostics";
+    sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
+    sc.gears = {1, 1, 1};
+    grid(sc);
+    auto parent = node(true, 64, 0.325, 7, 0.35);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy", "abort");
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.min_turning_radius",
+      mode == "sample_budget" ? 1e38 : 0.56);
+    mppi::ParametersHandler params(parent);
+    params.start();
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    auto observer = std::make_shared<rclcpp::Node>("terminal_diagnostic_observer");
+    auto sub = observer->create_subscription<Diagnostic>(
+      "/scenario_controller/terminal_approach_diagnostics", rclcpp::QoS(100).reliable(),
+      [](Diagnostic::ConstSharedPtr) {});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (sub->get_publisher_count() == 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_GT(sub->get_publisher_count(), 0u);
+    auto receive = [&]() {
+        std::vector<Diagnostic> messages;
+        auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (std::chrono::steady_clock::now() < end) {
+          Diagnostic message;
+          rclcpp::MessageInfo info;
+          if (sub->take(message, info)) {
+            messages.push_back(message);
+          } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        }
+        return messages;
+      };
+    const auto path = sc.message();
+    const auto goal = path.poses.back().pose;
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.15;
+    auto * critic = optimizer.terminalCritic();
+    critic->onNewPlan(path);
+    if (!entry) {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      ASSERT_TRUE(critic->isLatched());
+    }
+    const auto initial = receive();
+    if (!entry) {
+      ASSERT_FALSE(initial.empty());
+      EXPECT_TRUE(initial.front().latched);
+      EXPECT_FALSE(initial.front().curve.empty());
+      EXPECT_EQ(initial.front().event, "EVALUATED");
+    }
+    Pose arrival{-0.0046, 0.0356, 0.3177};
+    if (mode == "lateral") {arrival[1] = 0.09;}
+    if (mode == "entry") {arrival = {-0.14, 0, 0.9};}
+    if (mode == "empty_candidates") {arrival = {-0.20, 0.10, 1.2};}
+    if (mode == "pose_admission") {arrival = {0.20, 0, 0.9};}
+    if (mode == "blocked") {
+      unsigned int mx, my;
+      ASSERT_TRUE(cm->getCostmap()->worldToMap(0, 0, mx, my));
+      cm->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
+    if (mode == "witness_blocked") {
+      sc.obstacles = {{0.30, 0.19, 0.33, 0.22, 0.1}};
+      grid(sc);
+    }
+    if (mode == "tight_margin") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.goal_region_xy_ratio", 0.1)).successful);
+    }
+    if (mode == "stock_mismatch") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.PathAlignCritic.threshold_to_consider", 0.01)).successful);
+    }
+    if (mode == "accepted") {
+      ASSERT_NO_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr));
+    } else {
+      EXPECT_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr),
+        nav2_core::InvalidPath);
+    }
+    const auto events = receive();
+    ASSERT_FALSE(events.empty());
+    const auto & event = events.front();
+    EXPECT_EQ(event.event, mode == "accepted" ? "EVALUATED" : "ABORT");
+    EXPECT_EQ(event.schema_version, 1u);
+    EXPECT_FALSE(event.instance_id.empty());
+    EXPECT_EQ(event.header.frame_id, path.header.frame_id);
+    EXPECT_TRUE(event.evaluation_context_valid);
+    EXPECT_DOUBLE_EQ(event.robot_pose.position.x, arrival[0]);
+    EXPECT_DOUBLE_EQ(event.velocity.linear.x, 0.15);
+    EXPECT_FALSE(event.checks_truncated);
+    EXPECT_FALSE(event.curve_truncated);
+    EXPECT_EQ(event.redraw_count, 0);
+    EXPECT_EQ(event.replan_count, 0);
+    if (!initial.empty()) {
+      EXPECT_GT(event.sequence, initial.back().sequence);
+      EXPECT_EQ(event.goal_id, initial.front().goal_id);
+      EXPECT_EQ(event.latch_id, initial.front().latch_id);
+    }
+    if (mode == "accepted") {
+      EXPECT_EQ(event.goal_region_result, "REACHED_INTERIOR");
+      EXPECT_TRUE(critic->isLatched());
+    } else if (mode == "stock_mismatch") {
+      EXPECT_EQ(event.reason, "STOCK_THRESHOLD_MISMATCH");
+      EXPECT_FALSE(event.goal_tolerance_valid);
+      ASSERT_EQ(event.checks.size(), 1u);
+      EXPECT_EQ(event.checks.front().name, "stock/threshold_difference_le");
+      EXPECT_GT(event.checks.front().value, event.checks.front().limit);
+    } else if (entry) {
+      EXPECT_EQ(event.reason, "ENTRY_INFEASIBLE");
+      EXPECT_FALSE(event.latched);
+      EXPECT_FALSE(event.checks.empty());
+      if (mode != "entry") {
+        size_t capture_checks = 0u;
+        for (const auto & check : event.checks) {
+          if (check.name.find("capture/") != 0u) {continue;}
+          ++capture_checks;
+          EXPECT_FALSE(check.passed) << check.name;
+          if (check.name.find("R < min_turning_r") != std::string::npos) {
+            EXPECT_DOUBLE_EQ(check.limit, static_cast<double>(0.56f));
+          } else {
+            // Bit check survives the production -ffast-math compiler policy.
+            uint64_t bits;
+            std::memcpy(&bits, &check.value, sizeof(bits));
+            EXPECT_EQ(bits & 0x7ff0000000000000ULL, 0x7ff0000000000000ULL) << check.name;
+            EXPECT_NE(bits & 0x000fffffffffffffULL, 0u) << check.name;
+            std::memcpy(&bits, &check.limit, sizeof(bits));
+            EXPECT_EQ(bits & 0x7ff0000000000000ULL, 0x7ff0000000000000ULL) << check.name;
+            EXPECT_NE(bits & 0x000fffffffffffffULL, 0u) << check.name;
+          }
+        }
+        EXPECT_GE(capture_checks, mode == "pose_admission" ? 1u : 4u);
+      }
+    } else {
+      EXPECT_FALSE(critic->isLatched());
+      EXPECT_TRUE(event.latched);  // Failing state survived clearActiveCurve().
+      EXPECT_TRUE(event.before_clear);
+      EXPECT_FALSE(event.curve.empty());
+      EXPECT_GT(event.lateral_limit, 0.04);
+      EXPECT_NEAR(event.lateral_error, std::fabs(arrival[1]), 1e-5);
+      EXPECT_EQ(event.reason, mode == "lateral" ? "DRIFT_EXCEEDED" :
+        (mode == "blocked" ? "LATCHED_CURVE_BLOCKED" : "CURVE_UNJOINABLE"));
+      if (mode == "tight_margin") {
+        EXPECT_EQ(event.goal_region_result, "MISSED_INTERIOR");
+        EXPECT_TRUE(event.witness_sample_valid);
+        EXPECT_EQ(event.witness_sample_index + 1u, event.witness_sample_count);
+      }
+      if (mode == "witness_blocked") {
+        EXPECT_EQ(event.goal_region_result, "FOOTPRINT_BLOCKED");
+        EXPECT_TRUE(event.collision_check_failed);
+        EXPECT_FALSE(event.collision_reason.empty());
+      }
+      if (mode == "sample_budget") {
+        EXPECT_EQ(event.goal_region_result, "SAMPLE_BUDGET");
+        EXPECT_FALSE(event.witness_sample_valid);
+      }
+      if (mode == "lateral") {
+        const auto check = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name == "curve/lateral_le";});
+        ASSERT_NE(check, event.checks.end());
+        EXPECT_FALSE(check->passed);
+        EXPECT_GT(check->value, check->limit);
+      }
+    }
+    critic->reset();
+    receive();
+    grid(sc);
+    critic->onNewPlan(path);
+    if (mode == "accepted") {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      auto next = receive();
+      ASSERT_FALSE(next.empty());
+      EXPECT_GT(next.front().task_id, event.task_id);
+      EXPECT_GT(next.front().plan_id, event.plan_id);
+      EXPECT_TRUE(next.front().reason.empty());
+      EXPECT_EQ(next.front().goal_region_result, "NOT_EVALUATED");
+      critic->on_deactivate();
+      optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
+      EXPECT_TRUE(receive().empty());
+      critic->on_activate();
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.enabled", false)).successful);
+      receive();
+      optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
+      EXPECT_TRUE(receive().empty());
+    }
+    optimizer.shutdown();
   }
 }
 
