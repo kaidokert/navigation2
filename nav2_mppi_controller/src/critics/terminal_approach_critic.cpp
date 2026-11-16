@@ -403,9 +403,9 @@ void TerminalApproachCritic::reset()
 
 void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
 {
-  ++diagnostic_plan_;
   if (plan.poses.empty()) {
     reset();
+    ++diagnostic_plan_;
     return;
   }
 
@@ -448,12 +448,14 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     same_goal = (dpos <= kGlobalGoalPosTol) && (dyaw <= kGlobalGoalYawTol);
   }
   const double ref_gear = has_plan_gear_ ? last_plan_gear_ : latched_gear_;
-  if (!same_goal) {
-    ++diagnostic_goal_;
-  }
   const bool same_gear = !has_plan_gear || (plan_gear * ref_gear > 0.0);
 
   auto savePlanMetadata = [&]() {
+      // Outgoing curve events belong to the preceding plan and goal.
+      ++diagnostic_plan_;
+      if (!same_goal) {
+        ++diagnostic_goal_;
+      }
       last_plan_goal_ = plan_goal;
       last_plan_frame_ = plan_frame;
       has_plan_goal_ = true;
@@ -466,20 +468,21 @@ void TerminalApproachCritic::onNewPlan(const nav_msgs::msg::Path & plan)
     };
 
   if (replan_pending_) {
-    if ((has_plan_goal_ || !latched_frame_id_.empty()) && !same_goal) {
+    const bool new_goal = (has_plan_goal_ || !latched_frame_id_.empty()) && !same_goal;
+    resetLatch("REPLACEMENT_PLAN");
+    if (new_goal) {
       replan_allowance_consumed_ = false;
       replan_count_ = 0;
     }
-    resetLatch("REPLACEMENT_PLAN");
     savePlanMetadata();
     return;
   }
 
   if (replan_allowance_consumed_) {
     if ((has_plan_goal_ || !latched_frame_id_.empty()) && !same_goal) {
+      resetLatch("NEW_GOAL");
       replan_allowance_consumed_ = false;
       replan_count_ = 0;
-      resetLatch("NEW_GOAL");
       savePlanMetadata();
       return;
     }
@@ -2537,7 +2540,6 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
   diagnostic_.goal_xy_tolerance = goal_xy_tol;
   diagnostic_.goal_yaw_tolerance = goal_yaw_tol;
   if (!tick_evaluated_) {
-    diagnostic_.feasibility_evaluated = true;
     tick_evaluated_ = true;
     const double path_cross_track = minDistanceToPath(robot_x, robot_y, data.path);
     double projected_path_yaw = static_cast<double>(data.path.yaws(0));
@@ -2612,8 +2614,8 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
           requestReplanIfEligible(goal_dist);
         }
       } else {
-        ++redraw_count_;
         clearActiveCurve("GEAR_FLIP_WHILE_LATCHED");
+        ++redraw_count_;
         latch_consumed_ = false;
         latched_gear_ = path_gear;
         if (has_plan_gear_) {
@@ -2689,6 +2691,7 @@ void TerminalApproachCritic::scoreImpl(CriticData & data)
     const double path_to_goal_yaw_diff =
       std::fabs(angles::shortest_angular_distance(projected_path_yaw, goal_yaw));
 
+    diagnostic_.feasibility_evaluated = true;
     if (latched_ && !verifyLatchedCurveOrRedraw(
         data, robot_x, robot_y, robot_yaw, goal_x, goal_y, goal_yaw, goal_dist,
         path_cross_track, path_yaw_err, goal_xy_tol, goal_yaw_tol))

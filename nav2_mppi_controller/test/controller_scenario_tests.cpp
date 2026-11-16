@@ -5367,23 +5367,29 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeCle
 TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState)
 {
   using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
-  for (const std::string mode : {"new_goal", "parameter", "disabled", "reconfigure",
+  for (const std::string mode : {"new_goal", "empty_plan", "same_goal", "plan_gear_flip",
+      "in_place_redraw", "parameter", "disabled", "reconfigure",
       "redraw_failure", "gear_redraw_failure", "fallback_shift", "replan_shift", "lost_goal",
-      "entry_replan"})
+      "entry_replan", "new_goal_after_replan"})
   {
     SCOPED_TRACE(mode);
     Scenario sc;
     sc.id = "terminal_diagnostic_transitions";
     sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
     sc.gears = {1, 1, 1};
+    if (mode == "in_place_redraw") {
+      sc = atlas->at("curved_capture");
+    }
     grid(sc);
     auto parent = node(true, 64, 0.325, 7, 0.35);
     parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
-    const bool redraw = mode == "redraw_failure" || mode == "gear_redraw_failure";
+    const bool redraw = mode == "redraw_failure" || mode == "gear_redraw_failure" ||
+      mode == "in_place_redraw" || mode == "plan_gear_flip";
     parent->declare_parameter("FollowPath.TerminalApproachCritic.max_redraws", redraw ? 1 : 0);
     parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy",
       mode == "fallback_shift" ? "fallback" :
-      ((mode == "replan_shift" || mode == "entry_replan") ? "replan_signal" : "abort"));
+      ((mode == "replan_shift" || mode == "entry_replan" || mode == "new_goal_after_replan") ?
+      "replan_signal" : "abort"));
     mppi::ParametersHandler params(parent);
     params.start();
     ScenarioOptimizer optimizer;
@@ -5415,11 +5421,19 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
     auto path = sc.message();
     auto goal = path.poses.back().pose;
     auto actual = pose({-0.24, 0.022, 0});
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    if (mode == "in_place_redraw") {
+      actual = pose(sc.starts.at("inside"));
+      handler.initialize(parent, "FollowPath", cm, buffer, &params);
+      handler.setPath(path);
+      path = handler.transformPath(actual);
+    }
     geometry_msgs::msg::Twist speed;
     speed.linear.x = 0.15;
     auto * critic = optimizer.terminalCritic();
     critic->onNewPlan(path);
-    if (mode == "entry_replan") {
+    if (mode == "entry_replan" || mode == "new_goal_after_replan") {
       ASSERT_NO_THROW(optimizer.evalControl(pose({-0.50, 0.10, 1.2}), speed, path, goal, nullptr));
       const auto entry_events = receive();
       ASSERT_EQ(entry_events.size(), 3u);
@@ -5434,13 +5448,108 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
       EXPECT_EQ(entry_failure.replan_count, 1);
       EXPECT_TRUE(entry_failure.curve.empty());
       EXPECT_TRUE(entry_failure.curve_frame.empty());
-      optimizer.shutdown();
-      continue;
+      EXPECT_TRUE(entry_failure.feasibility_evaluated);
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.50, 0.10, 1.2}), speed, path, goal, nullptr));
+      const auto pending = receive();
+      ASSERT_EQ(pending.size(), 3u);
+      for (const auto & event : pending) {
+        EXPECT_FALSE(event.feasibility_evaluated);
+        EXPECT_TRUE(event.replan_pending);
+        EXPECT_EQ(event.replan_count, 1);
+      }
+      if (mode == "entry_replan") {
+        EXPECT_THROW(optimizer.evalControl(pose({-0.30, 0.10, 1.2}), speed, path, goal, nullptr),
+          nav2_core::InvalidPath);
+        const auto cutoff = receive();
+        ASSERT_EQ(cutoff.size(), 1u);
+        EXPECT_EQ(cutoff.front().reason, "REPLAN_NOT_READY_BY_CUTOFF");
+        EXPECT_FALSE(cutoff.front().feasibility_evaluated);
+        optimizer.shutdown();
+        continue;
+      }
+      // Accept the same-goal replacement with its one replan allowance already consumed.
+      critic->onNewPlan(path);
     }
     ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
     ASSERT_TRUE(critic->isLatched());
     const auto initial = receive();
     ASSERT_EQ(initial.size(), 3u);
+
+    if (mode == "empty_plan" || mode == "same_goal" || mode == "plan_gear_flip") {
+      if (mode == "plan_gear_flip") {
+        for (auto & p : path.poses) {
+          p.pose.position.x = -p.pose.position.x;
+        }
+        actual = pose({0.24, 0.022, 0});
+        speed.linear.x = -0.15;
+      }
+      critic->onNewPlan(mode == "empty_plan" ? nav_msgs::msg::Path{} : path);
+      const auto transition = receive();
+      if (mode == "same_goal") {
+        EXPECT_TRUE(transition.empty());
+      } else {
+        ASSERT_EQ(transition.size(), 1u);
+        const auto & outgoing = transition.front();
+        EXPECT_EQ(outgoing.event, mode == "empty_plan" ? "RESET" : "CURVE_CLEARED");
+        EXPECT_EQ(outgoing.reason, mode == "empty_plan" ? "TASK_RESET" : "GEAR_FLIP_ON_SAME_GOAL");
+        EXPECT_EQ(outgoing.plan_id, initial.front().plan_id);
+        EXPECT_EQ(outgoing.goal_id, initial.front().goal_id);
+        EXPECT_EQ(outgoing.task_id, initial.front().task_id);
+        EXPECT_EQ(outgoing.latch_id, initial.front().latch_id);
+        EXPECT_EQ(outgoing.redraw_count, 0);
+        EXPECT_TRUE(outgoing.before_clear);
+        EXPECT_EQ(outgoing.curve, initial.front().curve);
+      }
+      if (mode == "empty_plan") {
+        critic->onNewPlan(path);
+      }
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      EXPECT_EQ(replacement.front().plan_id, initial.front().plan_id +
+        (mode == "empty_plan" ? 2u : 1u));
+      EXPECT_EQ(replacement.front().goal_id, initial.front().goal_id +
+        (mode == "empty_plan" ? 1u : 0u));
+      EXPECT_EQ(replacement.front().task_id, initial.front().task_id +
+        (mode == "empty_plan" ? 1u : 0u));
+      EXPECT_EQ(replacement.front().latch_id, initial.front().latch_id +
+        (mode == "same_goal" ? 0u : 1u));
+      EXPECT_EQ(replacement.front().redraw_count, mode == "plan_gear_flip" ? 1 : 0);
+      EXPECT_TRUE(replacement.front().latched);
+      optimizer.shutdown();
+      continue;
+    }
+    if (mode == "in_place_redraw") {
+      actual.pose.position.y -= 0.055;
+      path = handler.transformPath(actual);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      const auto & event = replacement.front();
+      EXPECT_EQ(event.event, "EVALUATED");
+      EXPECT_FALSE(event.before_clear);
+      EXPECT_TRUE(event.latched);
+      EXPECT_TRUE(event.feasibility_evaluated);
+      EXPECT_EQ(event.plan_id, initial.front().plan_id);
+      EXPECT_EQ(event.goal_id, initial.front().goal_id);
+      EXPECT_EQ(event.latch_id, initial.front().latch_id + 1u);
+      EXPECT_EQ(event.redraw_count, 1);
+      EXPECT_EQ(event.curve_frame, actual.header.frame_id);
+      ASSERT_FALSE(event.curve.empty());
+      EXPECT_NE(event.curve, initial.front().curve);
+      EXPECT_TRUE(std::any_of(event.checks.begin(), event.checks.end(), [](const auto & check) {
+          return check.name == "curve/lateral_le" && !check.passed;
+        }));
+      for (size_t i = 1; i < replacement.size(); ++i) {
+        EXPECT_EQ(replacement[i].event, "EVALUATED");
+        EXPECT_EQ(replacement[i].latch_id, event.latch_id);
+        EXPECT_EQ(replacement[i].sequence, event.sequence + i);
+        EXPECT_FALSE(replacement[i].feasibility_evaluated);
+        EXPECT_TRUE(replacement[i].curve.empty());
+      }
+      optimizer.shutdown();
+      continue;
+    }
 
     if (mode == "disabled") {
       ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
@@ -5475,7 +5584,8 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
       continue;
     }
 
-    const bool shifted = mode == "new_goal" || mode == "redraw_failure" ||
+    const bool new_goal = mode == "new_goal" || mode == "new_goal_after_replan";
+    const bool shifted = new_goal || mode == "redraw_failure" ||
       mode == "fallback_shift" || mode == "replan_shift";
     if (shifted) {
       for (auto & p : path.poses) {
@@ -5493,7 +5603,7 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
       }
       actual = pose({0.14, 0, 0.9});
     }
-    if (mode == "new_goal") {
+    if (new_goal) {
       critic->onNewPlan(path);
     } else if (mode == "parameter") {
       ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
@@ -5515,7 +5625,7 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
     ASSERT_FALSE(events.empty());
     const auto & cleared = events.front();
     EXPECT_EQ(cleared.event, "CURVE_CLEARED");
-    EXPECT_EQ(cleared.reason, mode == "new_goal" ? "NEW_GOAL" :
+    EXPECT_EQ(cleared.reason, new_goal ? "NEW_GOAL" :
       (mode == "parameter" ? "PARAM_CHANGE_WHILE_LATCHED" :
       (mode == "gear_redraw_failure" ? "GEAR_FLIP_WHILE_LATCHED" :
       (mode == "lost_goal" ? "LATCHED_GOAL_LOST_INSIDE_CUTOFF" : "LOCAL_GOAL_SHIFT_EXCEEDED"))));
@@ -5528,6 +5638,11 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
     EXPECT_EQ(cleared.curve_frame, "map");
     EXPECT_EQ(cleared.sequence, initial.back().sequence + 1u);
     EXPECT_EQ(cleared.latch_id, initial.front().latch_id);
+    EXPECT_EQ(cleared.plan_id, initial.front().plan_id);
+    EXPECT_EQ(cleared.goal_id, initial.front().goal_id);
+    EXPECT_EQ(cleared.redraw_count, initial.front().redraw_count);
+    EXPECT_EQ(cleared.replan_count, initial.front().replan_count);
+    EXPECT_EQ(cleared.replan_allowance_consumed, initial.front().replan_allowance_consumed);
     for (size_t i = 1; i < events.size(); ++i) {
       EXPECT_EQ(events[i].sequence, cleared.sequence + i);
     }
@@ -5555,6 +5670,15 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
       EXPECT_EQ(final.replan_count, mode == "replan_shift" ? 1 : 0);
       EXPECT_EQ(final.replan_pending, mode == "replan_shift");
       EXPECT_TRUE(final.curve_frame.empty());
+      EXPECT_FALSE(final.feasibility_evaluated);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto waiting = receive();
+      ASSERT_EQ(waiting.size(), 3u);
+      for (const auto & event : waiting) {
+        EXPECT_FALSE(event.feasibility_evaluated);
+        EXPECT_FALSE(event.latched);
+        EXPECT_TRUE(event.latch_consumed);
+      }
     } else if (mode == "lost_goal") {
       ASSERT_EQ(events.size(), 2u);
       EXPECT_EQ(events.back().event, "ABORT");
@@ -5563,6 +5687,24 @@ TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState
       EXPECT_FALSE(events.back().goal_tolerance_valid);
     } else {
       ASSERT_EQ(events.size(), 1u);
+    }
+    if (new_goal) {
+      if (mode == "new_goal_after_replan") {
+        EXPECT_EQ(cleared.replan_count, 1);
+        EXPECT_TRUE(cleared.replan_allowance_consumed);
+      }
+      actual = pose({0.06, 0.022, 0});
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      EXPECT_EQ(replacement.front().plan_id, initial.front().plan_id + 1u);
+      EXPECT_EQ(replacement.front().goal_id, initial.front().goal_id + 1u);
+      EXPECT_EQ(replacement.front().latch_id, initial.front().latch_id + 1u);
+      EXPECT_TRUE(replacement.front().latched);
+      EXPECT_EQ(replacement.front().replan_count, 0);
+      EXPECT_FALSE(replacement.front().replan_allowance_consumed);
+      optimizer.shutdown();
+      continue;
     }
     critic->reset();
     const auto reset = receive();

@@ -78,12 +78,20 @@ followed by a new attempt emits a separate `CURVE_CLEARED` with its triggering
 reason; the final evaluation or abort describes the new attempt and its current
 budgets. A terminal failure that clears its failing latch keeps that pre-clear
 snapshot in `ABORT` (or `EVALUATED` for a nonthrowing failure policy).
+An in-place redraw that succeeds without clearing the latch emits the replacement
+directly in `EVALUATED`, with an incremented `latch_id` and `redraw_count`, the
+replacement geometry, and `before_clear=false`; there is no `CURVE_CLEARED` event.
+Its checks describe the outgoing curve's refusal and the replacement solve in
+execution order. Use the latest preceding curve-bearing event with the outgoing
+`latch_id` for its geometry, including any intervening frame adjustment.
 Curve geometry is included on latch, redraw,
 frame adjustment, abort, clear and reset. Unchanged successful evaluations omit
 it. At most 512 points and 96 checks are sent; truncation is explicit. A
 `CURVE_CLEARED` or `RESET` has
 `evaluation_context_valid=false`: pose/velocity/check fields must not be treated
 as a fresh observation. Link its curve and IDs to the preceding evaluation.
+Plan/goal IDs and redraw budgets advance after outgoing transition events;
+the next evaluation carries the incoming identifiers and updated budgets.
 These transition events use `goal_region_result=NOT_EVALUATED`, include a reason,
 and are silent while disabled. Cleared curves have no frame in later events.
 
