@@ -4028,15 +4028,11 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
     }
 
     // Section C (Items 13 & 18): Bounded Ackermann joinability check across overlap & handoff
-    // when lateral error is well within the corridor (<= 15 mm <= max_tracking_drift_ = 45 mm)
-    // and heading error is within the broad corridor allowance, but turning radius R_min = 0.56 m
-    // and remaining runway make joining the latched curve kinematically infeasible (retaining
-    // optimizer velocity and steering state across score() calls):
+    // Separately exercise actual lateral departure and insufficient Ackermann joining runway,
+    // retaining optimizer velocity and steering state across score() calls. Use diagnostics from
+    // the failing evaluation; clearActiveCurve() deliberately clears the live error getters.
     {
-      // (a) In OVERLAP_SHARED on WP1 (step 0 latched at k=295, then step 1 at k=316 position
-      //     (2.8375, -0.7825) right on the latched curve with yaw rotated +0.62 rad to -0.84 rad,
-      //     so lateral_dist < 10 mm and |goal_yaw_err| < M_PI/4, but min_join_lat =
-      //     0.56*(1-cos(0.62)) = 104 mm > 45 mm and evalArcReachesGoalBox is false):
+      // (a) OVERLAP_SHARED: 56.8 mm from the latched synthetic curve exceeds its 45 mm limit.
       handler.setPath(wp1_sc.message());
       optimizer.terminalCritic()->onNewPlan(wp1_sc.message());
       auto entry_actual = pose(wp1_states[0].first);
@@ -4049,24 +4045,33 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
       ASSERT_EQ(optimizer.terminalCritic()->guidanceOwnership(), Ownership::OVERLAP_SHARED);
 
       auto unjoinable_overlap = pose({2.837500, -0.782500, -2.150000});
+      const double overlap_lateral = optimizer.terminalCritic()->projectOntoCurve(
+        unjoinable_overlap.pose.position.x, unjoinable_overlap.pose.position.y,
+        optimizer.terminalCritic()->latchedCurve(), 1.0).lateral_dist;
       local_path = handler.transformPath(unjoinable_overlap);
       speed.linear.x = 0.2133;
       speed.angular.z = -0.0021;
       try {
         optimizer.evalControl(unjoinable_overlap, speed, local_path, goal_msg, gc.get());
-        FAIL() << "Expected DRIFT_EXCEEDED on kinematically unjoinable pose in OVERLAP_SHARED";
+        FAIL() << "Expected DRIFT_EXCEEDED on lateral departure in OVERLAP_SHARED";
       } catch (const nav2_core::InvalidPath & ex) {
         EXPECT_NE(
           std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
       }
-      EXPECT_LT(optimizer.terminalCritic()->lastCurveLateralErr(), 0.025);
+      const auto overlap_message = optimizer.terminalCritic()->lastAbortMessage();
+      const auto overlap_field = overlap_message.find("curve_lat_err=");
+      ASSERT_NE(overlap_field, std::string::npos);
+      EXPECT_NEAR(std::stod(overlap_message.substr(overlap_field + 14u)), overlap_lateral, 1e-4);
+      EXPECT_GT(overlap_lateral, 1e-4);
+      // The previous post-clear assertion read zero. This fixture actually departs laterally.
+      EXPECT_NEAR(overlap_lateral, 0.0568, 1e-4);
       EXPECT_TRUE(optimizer.terminalCritic()->isLatchConsumed());
       EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
 
       // (b) Crossing the 0.35 m cutoff into TERMINAL_EXCLUSIVE on WP1 (step 0..8 in
       //     OVERLAP_SHARED, retaining velocity and steering state, then crossing at k=319
-      //     (2.8447, -0.8167) at d_goal = 0.3450 m <= 0.35 m right on the curve (lateral_dist <
-      //     25 mm <= 45 mm) with yaw = -2.18 rad (|theta0_goal| = 0.35 rad << M_PI/4,
+      //     (2.8447, -0.8167) at d_goal = 0.3450 m <= 0.35 m, lateral_dist = 61.5 mm below
+      //     the live 104.9 mm envelope, with yaw = -2.18 rad (|theta0_goal| = 0.35 rad << M_PI/4,
       //     |curve_yaw_err| = 0.65 rad < M_PI/4, so the old corridor check passed, but the 2-arc
       //     Ackermann joinability check at R_min = 0.56 m requires 0.56 m > runway 0.35 m)):
       handler.setPath(wp1_sc.message());
@@ -4082,17 +4087,26 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistRegressions)
       ASSERT_EQ(optimizer.terminalCritic()->guidanceOwnership(), Ownership::OVERLAP_SHARED);
 
       auto unjoinable_cutoff = pose({2.844700, -0.816700, -2.180000});
+      const double cutoff_lateral = optimizer.terminalCritic()->projectOntoCurve(
+        unjoinable_cutoff.pose.position.x, unjoinable_cutoff.pose.position.y,
+        optimizer.terminalCritic()->latchedCurve(), 1.0).lateral_dist;
       local_path = handler.transformPath(unjoinable_cutoff);
       speed.linear.x = wp1_states[9].second.first;
       speed.angular.z = wp1_states[9].second.second;
       try {
         optimizer.evalControl(unjoinable_cutoff, speed, local_path, goal_msg, gc.get());
-        FAIL() << "Expected DRIFT_EXCEEDED when crossing 0.35 m cutoff with unjoinable heading";
+        FAIL() << "Expected CURVE_UNJOINABLE when crossing 0.35 m cutoff with unjoinable heading";
       } catch (const nav2_core::InvalidPath & ex) {
         EXPECT_NE(
-          std::string(ex.what()).find("reason=DRIFT_EXCEEDED"), std::string::npos) << ex.what();
+          std::string(ex.what()).find("reason=CURVE_UNJOINABLE"), std::string::npos) << ex.what();
       }
-      EXPECT_LT(optimizer.terminalCritic()->lastCurveLateralErr(), 0.025);
+      const auto cutoff_message = optimizer.terminalCritic()->lastAbortMessage();
+      const auto cutoff_field = cutoff_message.find("curve_lat_err=");
+      ASSERT_NE(cutoff_field, std::string::npos);
+      EXPECT_NEAR(std::stod(cutoff_message.substr(cutoff_field + 14u)), cutoff_lateral, 1e-4);
+      EXPECT_GT(cutoff_lateral, 1e-4);
+      // Actual error is below the live 0.1049 m limit, but was never below 25 mm.
+      EXPECT_NEAR(cutoff_lateral, 0.0615, 1e-4);
       EXPECT_TRUE(optimizer.terminalCritic()->isLatchConsumed());
       EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
     }
@@ -4946,6 +4960,145 @@ TEST_F(ControllerScenarios, TerminalApproachOptionA11ReviewPunchlistPart2Regress
   }
 }
 }  // namespace
+
+TEST_F(ControllerScenarios, TerminalGoalRegionKeepsGuidanceAndRejectsUnsafeArrivals)
+{
+  // Reconstruct the finite-runway defect using breadth M8 r1/r4/r7 and M3 log magnitudes.
+  // These are controlled straight-terminal geometries, not a claim to replay unrecorded
+  // latched curves. In particular the recorded path yaw error is not necessarily goal yaw.
+  const std::vector<Pose> arrivals = {
+    {-0.0734, 0.0531, 0.3474}, {-0.0445, 0.0542, 0.3220},
+    {-0.0046, 0.0356, 0.3177}, {-0.0300, 0.0438, 0.3500}};
+  for (const bool mirror : {false, true}) {
+    for (const bool reverse : {false, true}) {
+      for (size_t case_idx = 0; case_idx < arrivals.size() + 9u; ++case_idx) {
+        SCOPED_TRACE(
+          std::to_string(mirror) + "/" + std::to_string(reverse) + "/" +
+          std::to_string(case_idx));
+        Scenario base;
+        base.id = "terminal_goal_region";
+        base.path = {{-0.25, 0.0, 0.0}, {-0.15, 0.0, 0.0}, {-0.05, 0.0, 0.0}, {0, 0, 0}};
+        base.gears = {1, 1, 1};
+        base.starts = {{"entry", {-0.24, 0.022, 0.0}}};
+        Pose arrival = case_idx < arrivals.size() ? arrivals[case_idx] : arrivals.back();
+        const bool lateral_failure = case_idx == arrivals.size();
+        const bool unreachable = case_idx == arrivals.size() + 1u;
+        const bool blocked = case_idx == arrivals.size() + 2u;
+        const bool narrow_corridor = case_idx == arrivals.size() + 3u;
+        const bool witness_blocked = case_idx == arrivals.size() + 4u;
+        const bool bad_yaw = case_idx == arrivals.size() + 5u;
+        const bool huge_radius = case_idx == arrivals.size() + 6u;
+        const bool tight_margin = case_idx == arrivals.size() + 7u;
+        const bool ratchet_failure = case_idx == arrivals.size() + 8u;
+        if (witness_blocked && reverse) {continue;}
+        if (lateral_failure) {arrival[1] = 0.09;}
+        if (unreachable) {arrival[2] = 0.9;}
+        if (narrow_corridor) {arrival = arrivals.front();}
+        if (witness_blocked || tight_margin) {arrival = arrivals[2];}
+        if (ratchet_failure) {arrival = {-0.196, -0.050, 0.700};}
+        // The wider constructed examples need their full steering sagitta. This is not a
+        // replay of their recorded latch envelope. The r7 counterexample needs no wider gate.
+        if (case_idx == 0u || case_idx == 1u) {base.starts["entry"][1] = 0.04;}
+        base.starts["arrival"] = arrival;
+        const Scenario sc = base.variant(mirror, reverse);
+        grid(sc);
+        auto parent = node(true, 500, 0.325, 7, 0.35);
+        parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
+        parent->declare_parameter("FollowPath.TerminalApproachCritic.max_redraws", 0);
+        parent->declare_parameter(
+          "FollowPath.TerminalApproachCritic.min_turning_radius", huge_radius ? 1e38 : 0.56);
+        parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy", "abort");
+        parent->declare_parameter("goal_check.xy_goal_tolerance", 0.10);
+        parent->declare_parameter("goal_check.yaw_goal_tolerance", 0.25);
+        parent->declare_parameter("goal_check.trans_stopped_velocity", 0.04);
+        parent->declare_parameter("goal_check.rot_stopped_velocity", 0.12);
+        parent->declare_parameter("goal_check.stateful", false);
+        nav2_controller::StoppedGoalChecker gc;
+        gc.initialize(parent, "goal_check", cm);
+        mppi::ParametersHandler params(parent);
+        params.start();
+        ScenarioOptimizer optimizer;
+        optimizer.configure(parent, cm, &params, true);
+        const auto path = sc.message();
+        const auto goal = path.poses.back().pose;
+        geometry_msgs::msg::Twist speed;
+        speed.linear.x = reverse ? -0.15 : 0.15;
+        optimizer.terminalCritic()->onNewPlan(path);
+        ASSERT_NO_THROW(optimizer.evalControl(pose(sc.starts.at("entry")), speed, path, goal, &gc));
+        ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
+        const auto original_curve = optimizer.terminalCritic()->latchedCurve();
+        auto actual = pose(sc.starts.at("arrival"));
+        if (bad_yaw) {
+          actual.pose.orientation.z = std::numeric_limits<double>::quiet_NaN();
+        }
+        if (tight_margin) {
+          ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+                "FollowPath.TerminalApproachCritic.goal_region_xy_ratio", 0.1)).successful);
+          ASSERT_TRUE(optimizer.terminalCritic()->isLatched());
+        }
+        if (blocked) {
+          unsigned int mx, my;
+          ASSERT_TRUE(cm->getCostmap()->worldToMap(0.0, 0.0, mx, my));
+          cm->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+        }
+        if (witness_blocked) {
+          Scenario with_obstacle = sc;
+          with_obstacle.obstacles = mirror ?
+            std::vector<controller_test::Box>{{0.30, -0.22, 0.33, -0.19, 0.1}} :
+          std::vector<controller_test::Box>{{0.30, 0.19, 0.33, 0.22, 0.1}};
+          grid(with_obstacle);
+        }
+        if (lateral_failure || unreachable || blocked || narrow_corridor || witness_blocked ||
+          bad_yaw || huge_radius || tight_margin || ratchet_failure)
+        {
+          testing::internal::CaptureStderr();
+          EXPECT_THROW(optimizer.evalControl(actual, speed, path, goal, &gc),
+            nav2_core::InvalidPath);
+          const auto log = testing::internal::GetCapturedStderr();
+          const auto message = optimizer.terminalCritic()->lastAbortMessage();
+          const std::string reason = blocked ? "LATCHED_CURVE_BLOCKED" :
+            (lateral_failure ? "DRIFT_EXCEEDED" : "CURVE_UNJOINABLE");
+          EXPECT_NE(message.find("reason=" + reason), std::string::npos) << message;
+          const auto pos = message.find("curve_lat_err=");
+          ASSERT_NE(pos, std::string::npos);
+          // Inspect the failing evaluation, not lastCurveLateralErr() after latch clearing.
+          EXPECT_NEAR(std::stod(message.substr(pos + 14u)), std::fabs(arrival[1]), 1e-4);
+          const auto log_pos = log.find("curve_lat_err=");
+          ASSERT_NE(log_pos, std::string::npos) << log;
+          EXPECT_NEAR(std::stod(log.substr(log_pos + 14u)), std::fabs(arrival[1]), 1e-4);
+          EXPECT_EQ(log.find("lat_limit=0.0000"), std::string::npos) << log;
+          EXPECT_FALSE(optimizer.terminalCritic()->isLatched());
+        } else {
+          ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, &gc));
+          EXPECT_TRUE(optimizer.terminalCritic()->isLatched());
+          EXPECT_GT(optimizer.evaluateTerminalCriticOnlyCost(), 0.0f);
+          // Walk the bounded physical arc through score(), retaining optimizer state. An
+          // admission that merely defers an unavoidable lateral abort must fail this test.
+          for (int step = 1; step <= 12; ++step) {
+            const double yaw = arrival[2] + (0.18 - arrival[2]) * step / 12.0;
+            Pose next = {
+              arrival[0] + 0.56 * (std::sin(arrival[2]) - std::sin(yaw)),
+              arrival[1] + 0.56 * (std::cos(yaw) - std::cos(arrival[2])), yaw};
+            if (mirror) {next[1] = -next[1]; next[2] = -next[2];}
+            if (reverse) {next[2] = controller_test::wrap(next[2] + M_PI);}
+            ASSERT_NO_THROW(optimizer.evalControl(pose(next), speed, path, goal, &gc));
+            EXPECT_TRUE(optimizer.terminalCritic()->isLatched());
+          }
+          const auto & after = optimizer.terminalCritic()->latchedCurve();
+          ASSERT_EQ(after.size(), original_curve.size());
+          for (size_t i = 0u; i < after.size(); ++i) {
+            EXPECT_FLOAT_EQ(after[i].x, original_curve[i].x);
+            EXPECT_FLOAT_EQ(after[i].y, original_curve[i].y);
+            EXPECT_FLOAT_EQ(after[i].theta, original_curve[i].theta);
+          }
+        }
+        EXPECT_EQ(optimizer.terminalCritic()->redrawCount(), 0);
+        EXPECT_TRUE(optimizer.terminalCritic()->isLatchConsumed());
+        optimizer.shutdown();
+      }
+    }
+  }
+}
 
 int main(int argc, char ** argv)
 {
