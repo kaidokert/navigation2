@@ -72,6 +72,7 @@ constexpr double kBoundedBiarcMaxXEndM = 0.015;             // ROBOT (UNDERIVED)
 constexpr double kBoundedBiarcXEndRatio = 0.05;             // ROBOT (UNDERIVED): Max 2a |X0| ratio
 constexpr double kGoalBoxXyTargetRatio = 0.25;              // ROOM (UNDERIVED): End XY / xy_tol
 constexpr double kGoalBoxYawTargetRatio = 0.75;             // ROOM (UNDERIVED): End yaw / yaw_tol
+constexpr size_t kMaxGoalRegionSamples = 512u;             // GENERIC: Bounded feasibility work
 constexpr double kTurnCorridorYawAllowanceRatio = 0.35;     // ROOM (UNDERIVED): Radian yaw margin
                                                             //   per rad of path-to-goal curvature
 constexpr double kMaxCollisionCheckStepM = 0.025;           // GENERIC: Max collision step (m)
@@ -144,6 +145,10 @@ void TerminalApproachCritic::initialize()
   getParam(max_residual_y_, "max_residual_y", 0.025f);
   // ROBOT (UNDERIVED): Maximum short-range heading residual allowed at goal (rad)
   getParam(max_residual_yaw_, "max_residual_yaw", 0.19f);
+  // ROOM (UNDERIVED): Interior margins for a terminal arrival feasibility witness, not a
+  // replacement goal checker or curve. Read live on each check, including parameter updates.
+  getParam(goal_region_xy_ratio_, "goal_region_xy_ratio", 0.95f);
+  getParam(goal_region_yaw_ratio_, "goal_region_yaw_ratio", 0.75f);
   // ROBOT/ROOM (UNDERIVED): Maximum post-latch lateral tracking drift and AMCL jump threshold (m);
   // check against measured AMCL map->odom correction sizes near goal before enabling on robot
   getParam(max_tracking_drift_, "max_tracking_drift", 0.045f);
@@ -1855,10 +1860,6 @@ void TerminalApproachCritic::handleInfeasible(
   last_abort_msg_ = msg_buf;
   escalation_reason_ = reason;
 
-  clearActiveCurve();
-  latch_consumed_ = true;
-  approach_escalated_ = true;
-
   RCLCPP_INFO(
     logger_,
     "[TERMINAL_APPROACH_ESCALATE] policy=%s reason=%s goal_dist=%.4f cross_track=%.4f "
@@ -1868,6 +1869,11 @@ void TerminalApproachCritic::handleInfeasible(
     last_curve_lateral_err_, last_pre_start_rollback_m_, yaw_err_rad,
     last_measured_vx_, latched_gear_, own_str, last_effective_lat_limit_,
     handoff_cutoff, redraw_count_, max_redraws_, replan_count_);
+
+  // Both diagnostic records must describe the failing evaluation, before clearing its state.
+  clearActiveCurve();
+  latch_consumed_ = true;
+  approach_escalated_ = true;
 
   const bool inside_cutoff =
     (handoff_cutoff > 0.0) && (goal_dist_m <= handoff_cutoff);
@@ -2786,6 +2792,85 @@ bool TerminalApproachCritic::tryInitialLatch(
   return true;
 }
 
+bool TerminalApproachCritic::canReachGoalRegion(
+  double robot_x, double robot_y, double robot_yaw,
+  double goal_x, double goal_y, double goal_yaw,
+  double goal_xy_tol, double goal_yaw_tol) const
+{
+  // A sufficient local witness, not an exhaustive path solver. Invalid margins fail closed.
+  // No steering reversal, opposite-gear motion, loop, new latch or mutable cache is involved.
+  if (costmap_ros_ == nullptr || costmap_ == nullptr ||
+    !finiteValue(robot_x) || !finiteValue(robot_y) || !finiteValue(robot_yaw) ||
+    !finiteValue(goal_x) || !finiteValue(goal_y) || !finiteValue(goal_yaw) ||
+    !finiteValue(goal_xy_tol) || !finiteValue(goal_yaw_tol) ||
+    !finiteValue(min_turning_radius_) || goal_xy_tol <= 0.0 || goal_yaw_tol <= 0.0 ||
+    !finiteValue(goal_region_xy_ratio_) || !finiteValue(goal_region_yaw_ratio_) ||
+    goal_region_xy_ratio_ <= 0.0f || goal_region_xy_ratio_ >= 1.0f ||
+    goal_region_yaw_ratio_ <= 0.0f || goal_region_yaw_ratio_ >= 1.0f)
+  {
+    return false;
+  }
+  const double yaw_error = angles::shortest_angular_distance(goal_yaw, robot_yaw);
+  if (std::fabs(yaw_error) >= kMaxCaptureAngleRad) {
+    return false;
+  }
+  const double radius =
+    std::max(kMinTurningRadiusFloorM, static_cast<double>(min_turning_radius_));
+  const double turn = -std::copysign(1.0, yaw_error);
+  const double travel_yaw = robot_yaw + (latched_gear_ < 0.0 ? M_PI : 0.0);
+  const double length = radius * std::fabs(yaw_error);
+  // Bound movement of the footprint's furthest corner, not just the axle, to half a cell.
+  double footprint_radius = 0.0;
+  for (const auto & p : costmap_ros_->getRobotFootprint()) {
+    footprint_radius = std::max(footprint_radius, std::hypot(p.x, p.y));
+  }
+  const double resolution = costmap_->getResolution();
+  if (!finiteValue(resolution) || resolution <= 0.0) {
+    return false;
+  }
+  const double step = std::min(
+    kMaxCollisionCheckStepM, 0.5 * resolution / (1.0 + footprint_radius / radius));
+  if (!finiteValue(step) || step <= 0.0) {
+    return false;
+  }
+  const double sample_count = std::ceil(length / step);
+  if (!finiteValue(sample_count) || sample_count > kMaxGoalRegionSamples) {
+    return false;
+  }
+  const size_t steps = std::max<size_t>(1u, static_cast<size_t>(sample_count));
+  double witness_cross_track = latch_initial_cross_track_;
+  for (size_t i = 0u; i <= steps; ++i) {
+    const double angle = turn * length * static_cast<double>(i) / steps / radius;
+    const double x = robot_x + radius / turn *
+      (std::sin(travel_yaw + angle) - std::sin(travel_yaw));
+    const double y = robot_y - radius / turn *
+      (std::cos(travel_yaw + angle) - std::cos(travel_yaw));
+    const double yaw = angles::normalize_angle(robot_yaw + angle);
+    if (!isFootprintCollisionFree(x, y, yaw)) {
+      return false;
+    }
+    const double xy_error = std::hypot(x - goal_x, y - goal_y);
+    const double heading_error = std::fabs(angles::shortest_angular_distance(yaw, goal_yaw));
+    // A witness must survive the same lateral gate on its way to the live goal box.
+    // Otherwise accepting it now merely postpones DRIFT_EXCEEDED to the next tick.
+    if (xy_error > goal_xy_tol || heading_error > goal_yaw_tol) {
+      const double lateral = projectOntoCurve(x, y, latched_curve_, latched_gear_).lateral_dist;
+      if (lateral > witness_cross_track + static_cast<double>(max_tracking_drift_)) {
+        return false;
+      }
+      // Account conservatively for the live envelope's ratchet along the continuation.
+      // Omitting its optional yaw-alignment floor can only reject an extra witness.
+      witness_cross_track = std::min(witness_cross_track, lateral);
+    }
+    if (xy_error <= goal_region_xy_ratio_ * goal_xy_tol &&
+      heading_error <= goal_region_yaw_ratio_ * goal_yaw_tol)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
   const CriticData & data,
   double robot_x,
@@ -2981,6 +3066,17 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
       curve_kinematically_joinable = false;
     }
   }
+  // Finishing inside the goal region need not rejoin the finite curve before its endpoint.
+  // Keep scoring the original latch and retain all independent lateral/rollback/collision gates.
+  if (!curve_kinematically_joinable &&
+    ownership_ == GuidanceOwnership::TERMINAL_EXCLUSIVE &&
+    !in_cusp_braking_transient_ && !latched_blocked && !latched_tol_violated &&
+    !rollback_violated &&
+    canReachGoalRegion(
+      robot_x, robot_y, robot_yaw, goal_x, goal_y, goal_yaw, goal_xy_tol, goal_yaw_tol))
+  {
+    curve_kinematically_joinable = true;
+  }
   const double max_join_lat = std::max(
     static_cast<double>(viable_path_tracking_ratio_) * goal_xy_tol,
     latch_origin_cross_track_ + 2.0 * static_cast<double>(max_tracking_drift_));
@@ -3016,7 +3112,8 @@ bool TerminalApproachCritic::verifyLatchedCurveOrRedraw(
     const char * fail_reason = latched_blocked ? "LATCHED_CURVE_BLOCKED" :
       (latched_tol_violated ? "LATCHED_TOLERANCE_VIOLATED" :
       (rollback_violated ? "ROLLBACK_EXCEEDED" :
-      (local_goal_shift_caused_drift_ ? "LOCALIZATION_JUMP" : "DRIFT_EXCEEDED")));
+      (local_goal_shift_caused_drift_ ? "LOCALIZATION_JUMP" :
+      (proj.lateral_dist > effective_max_drift ? "DRIFT_EXCEEDED" : "CURVE_UNJOINABLE"))));
     const bool allow_redraw =
       !in_cusp_braking_transient_ && overlap_handoff_joinable;
     if (redraw_count_ < max_redraws_ && allow_redraw) {

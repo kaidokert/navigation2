@@ -345,6 +345,15 @@ protected:
   bool isFootprintCollisionFree(double wx, double wy, double wyaw) const;
 
   /**
+   * @brief Check a bounded, same-gear steering arc into the interior of the live goal region.
+   * This is a feasibility witness only; it never replaces or re-latches the guidance curve.
+   */
+  bool canReachGoalRegion(
+    double robot_x, double robot_y, double robot_yaw,
+    double goal_x, double goal_y, double goal_yaw,
+    double goal_xy_tol, double goal_yaw_tol) const;
+
+  /**
    * @brief Check if remaining reference path from start_idx to end_idx is footprint collision-free
    */
   bool isReferencePathCollisionFree(
@@ -510,6 +519,8 @@ protected:
   float viable_path_tracking_ratio_{0.95f};    // ROOM (UNDERIVED): Viable path corridor / xy_tol
   float max_residual_y_{0.025f};               // ROBOT (UNDERIVED): Max bounded-R_min lat res (m)
   float max_residual_yaw_{0.19f};              // ROBOT (UNDERIVED): Max short-range yaw res (rad)
+  float goal_region_xy_ratio_{0.95f};          // ROOM (UNDERIVED): Arrival witness XY / live tol
+  float goal_region_yaw_ratio_{0.75f};         // ROOM (UNDERIVED): Arrival witness yaw / live tol
   float max_tracking_drift_{0.045f};           // ROBOT/ROOM (UNDERIVED): Post-latch lat drift /
                                                //   AMCL jump tol (check on robot before enabling)
   float goal_reset_pos_tol_{0.25f};            // ROBOT/ROOM (UNDERIVED): Goal pos shift reset (m)
