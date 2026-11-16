@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <random>
 #include <string>
@@ -5097,6 +5098,624 @@ TEST_F(ControllerScenarios, TerminalGoalRegionKeepsGuidanceAndRejectsUnsafeArriv
         optimizer.shutdown();
       }
     }
+  }
+}
+
+TEST_F(ControllerScenarios, TerminalDiagnosticsPublishFailingEvaluationBeforeClear)
+{
+  using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
+  for (const std::string mode : {"accepted", "inside_goal", "lateral", "blocked", "witness_blocked",
+      "tight_margin", "sample_budget", "entry", "empty_candidates", "pose_admission",
+      "stock_mismatch", "capture_blocked"})
+  {
+    SCOPED_TRACE(mode);
+    const bool succeeds = mode == "accepted" || mode == "inside_goal";
+    const bool entry = mode == "entry" || mode == "empty_candidates" || mode == "pose_admission" ||
+      mode == "capture_blocked";
+    Scenario sc;
+    sc.id = "terminal_diagnostics";
+    sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
+    sc.gears = {1, 1, 1};
+    grid(sc);
+    auto parent = node(true, 64, 0.325, 7, 0.35);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy", "abort");
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.min_turning_radius",
+      mode == "sample_budget" ? 1e38 : 0.56);
+    mppi::ParametersHandler params(parent);
+    params.start();
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    auto observer = std::make_shared<rclcpp::Node>("terminal_diagnostic_observer");
+    auto sub = observer->create_subscription<Diagnostic>(
+      "/scenario_controller/terminal_approach_diagnostics", rclcpp::QoS(100).reliable(),
+      [](Diagnostic::ConstSharedPtr) {});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (sub->get_publisher_count() == 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_GT(sub->get_publisher_count(), 0u);
+    auto receive = [&]() {
+        std::vector<Diagnostic> messages;
+        auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (std::chrono::steady_clock::now() < end) {
+          Diagnostic message;
+          rclcpp::MessageInfo info;
+          if (sub->take(message, info)) {
+            messages.push_back(message);
+          } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        }
+        return messages;
+      };
+    const auto path = sc.message();
+    const auto goal = path.poses.back().pose;
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.15;
+    auto * critic = optimizer.terminalCritic();
+    critic->onNewPlan(path);
+    if (!entry) {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      ASSERT_TRUE(critic->isLatched());
+    }
+    const auto initial = receive();
+    if (!entry) {
+      ASSERT_EQ(initial.size(), 3u);
+      EXPECT_TRUE(initial.front().latched);
+      EXPECT_FALSE(initial.front().curve.empty());
+      EXPECT_EQ(initial.front().event, "EVALUATED");
+      for (size_t i = 0; i < initial.size(); ++i) {
+        EXPECT_EQ(initial[i].evaluation_id, initial[0].evaluation_id + i);
+        EXPECT_EQ(initial[i].sequence, initial[0].sequence + i);
+        EXPECT_EQ(initial[i].feasibility_evaluated, i == 0u);
+        EXPECT_EQ(initial[i].reuse_obstacles_cache, i != 0u);
+        if (i != 0u) {
+          EXPECT_TRUE(initial[i].checks.empty());
+          EXPECT_TRUE(initial[i].curve.empty());
+        }
+      }
+    }
+    Pose arrival{-0.0046, 0.0356, 0.3177};
+    if (mode == "inside_goal") {arrival = {0.09, 0.0, 0.20};}
+    if (mode == "lateral") {arrival[1] = 0.09;}
+    if (mode == "entry") {arrival = {-0.14, 0, 0.9};}
+    if (mode == "empty_candidates") {arrival = {-0.20, 0.10, 1.2};}
+    if (mode == "pose_admission") {arrival = {0.20, 0, 0.9};}
+    if (mode == "capture_blocked") {arrival = {-0.30, 0.04, 0.0};}
+    if (mode == "blocked" || mode == "capture_blocked") {
+      unsigned int mx, my;
+      ASSERT_TRUE(cm->getCostmap()->worldToMap(0, 0, mx, my));
+      cm->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
+    if (mode == "witness_blocked") {
+      sc.obstacles = {{0.30, 0.19, 0.33, 0.22, 0.1}};
+      grid(sc);
+    }
+    if (mode == "tight_margin") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.goal_region_xy_ratio", 0.1)).successful);
+    }
+    if (mode == "stock_mismatch") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.PathAlignCritic.threshold_to_consider", 0.01)).successful);
+    }
+    if (succeeds) {
+      ASSERT_NO_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr));
+    } else {
+      EXPECT_THROW(optimizer.evalControl(pose(arrival), speed, path, goal, nullptr),
+        nav2_core::InvalidPath);
+    }
+    const auto events = receive();
+    ASSERT_EQ(events.size(), succeeds ? 3u : 1u);
+    const auto & event = events.front();
+    EXPECT_EQ(event.event, succeeds ? "EVALUATED" : "ABORT");
+    EXPECT_EQ(event.schema_version, 1u);
+    EXPECT_FALSE(event.instance_id.empty());
+    EXPECT_EQ(event.header.frame_id, path.header.frame_id);
+    EXPECT_TRUE(event.evaluation_context_valid);
+    EXPECT_DOUBLE_EQ(event.robot_pose.position.x, arrival[0]);
+    EXPECT_DOUBLE_EQ(event.velocity.linear.x, 0.15);
+    EXPECT_FALSE(event.checks_truncated);
+    EXPECT_FALSE(event.curve_truncated);
+    EXPECT_EQ(event.redraw_count, 0);
+    EXPECT_EQ(event.replan_count, 0);
+    if (!initial.empty()) {
+      EXPECT_GT(event.sequence, initial.back().sequence);
+      EXPECT_EQ(event.goal_id, initial.front().goal_id);
+      EXPECT_EQ(event.latch_id, initial.front().latch_id);
+    }
+    if (succeeds) {
+      EXPECT_EQ(event.goal_region_result, mode == "accepted" ? "REACHED_INTERIOR" :
+        "MISSED_INTERIOR");
+      if (mode == "inside_goal") {
+        const auto check = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name == "goal/already_inside";});
+        ASSERT_NE(check, event.checks.end());
+        EXPECT_TRUE(check->passed);
+        EXPECT_TRUE(event.reason.empty());
+      }
+      EXPECT_TRUE(critic->isLatched());
+      for (size_t i = 1; i < events.size(); ++i) {
+        EXPECT_EQ(events[i].event, "EVALUATED");
+        EXPECT_EQ(events[i].evaluation_id, event.evaluation_id + i);
+        EXPECT_EQ(events[i].sequence, event.sequence + i);
+        EXPECT_FALSE(events[i].feasibility_evaluated);
+        EXPECT_TRUE(events[i].reuse_obstacles_cache);
+        EXPECT_TRUE(events[i].checks.empty());
+        EXPECT_TRUE(events[i].curve.empty());
+        EXPECT_EQ(events[i].goal_region_result, "NOT_EVALUATED");
+      }
+    } else if (mode == "stock_mismatch") {
+      EXPECT_EQ(event.reason, "STOCK_THRESHOLD_MISMATCH");
+      EXPECT_FALSE(event.goal_tolerance_valid);
+      ASSERT_EQ(event.checks.size(), 1u);
+      EXPECT_EQ(event.checks.front().name, "stock/threshold_difference_le");
+      EXPECT_GT(event.checks.front().value, event.checks.front().limit);
+    } else if (entry) {
+      EXPECT_EQ(event.reason, "ENTRY_INFEASIBLE");
+      EXPECT_FALSE(event.latched);
+      EXPECT_FALSE(event.before_clear);
+      EXPECT_TRUE(event.curve.empty());
+      EXPECT_TRUE(event.curve_frame.empty());
+      EXPECT_FALSE(event.checks.empty());
+      if (mode == "capture_blocked") {
+        const auto accepted = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name.find("/accepted_geometric") != std::string::npos;});
+        const auto blocked = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {
+              const bool capture = c.name.find("capture/") == 0u;
+              return capture && c.name.find("/collision_free") != std::string::npos;
+            });
+        ASSERT_NE(accepted, event.checks.end());
+        ASSERT_NE(blocked, event.checks.end());
+        EXPECT_LT(accepted - event.checks.begin(), blocked - event.checks.begin());
+        EXPECT_TRUE(accepted->passed);
+        EXPECT_FALSE(blocked->passed);
+      } else if (mode != "entry") {
+        size_t capture_checks = 0u;
+        for (const auto & check : event.checks) {
+          if (check.name.find("capture/") != 0u) {continue;}
+          ++capture_checks;
+          EXPECT_FALSE(check.passed) << check.name;
+          if (check.name.find("R < min_turning_r") != std::string::npos) {
+            EXPECT_DOUBLE_EQ(check.limit, static_cast<double>(0.56f));
+          } else {
+            // Bit check survives the production -ffast-math compiler policy.
+            uint64_t bits;
+            std::memcpy(&bits, &check.value, sizeof(bits));
+            EXPECT_EQ(bits & 0x7ff0000000000000ULL, 0x7ff0000000000000ULL) << check.name;
+            EXPECT_NE(bits & 0x000fffffffffffffULL, 0u) << check.name;
+            std::memcpy(&bits, &check.limit, sizeof(bits));
+            EXPECT_EQ(bits & 0x7ff0000000000000ULL, 0x7ff0000000000000ULL) << check.name;
+            EXPECT_NE(bits & 0x000fffffffffffffULL, 0u) << check.name;
+          }
+        }
+        EXPECT_GE(capture_checks, mode == "pose_admission" ? 1u : 4u);
+      }
+    } else {
+      EXPECT_FALSE(critic->isLatched());
+      EXPECT_TRUE(event.latched);  // Failing state survived clearActiveCurve().
+      EXPECT_TRUE(event.before_clear);
+      EXPECT_FALSE(event.curve.empty());
+      EXPECT_GT(event.lateral_limit, 0.04);
+      EXPECT_NEAR(event.lateral_error, std::fabs(arrival[1]), 1e-5);
+      EXPECT_EQ(event.reason, mode == "lateral" ? "DRIFT_EXCEEDED" :
+        (mode == "blocked" ? "LATCHED_CURVE_BLOCKED" : "CURVE_UNJOINABLE"));
+      if (mode == "tight_margin") {
+        EXPECT_EQ(event.goal_region_result, "MISSED_INTERIOR");
+        EXPECT_TRUE(event.witness_sample_valid);
+        EXPECT_EQ(event.witness_sample_index + 1u, event.witness_sample_count);
+      }
+      if (mode == "witness_blocked") {
+        EXPECT_EQ(event.goal_region_result, "FOOTPRINT_BLOCKED");
+        EXPECT_TRUE(event.collision_check_failed);
+        EXPECT_FALSE(event.collision_reason.empty());
+      }
+      if (mode == "sample_budget") {
+        EXPECT_EQ(event.goal_region_result, "SAMPLE_BUDGET");
+        EXPECT_FALSE(event.witness_sample_valid);
+      }
+      if (mode == "lateral") {
+        EXPECT_EQ(event.goal_region_result, "LATERAL_ENVELOPE");
+        const auto check = std::find_if(event.checks.begin(), event.checks.end(),
+            [](const auto & c) {return c.name == "curve/lateral_le";});
+        ASSERT_NE(check, event.checks.end());
+        EXPECT_FALSE(check->passed);
+        EXPECT_GT(check->value, check->limit);
+      }
+    }
+    critic->reset();
+    const auto resets = receive();
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets.front().event, "RESET");
+    EXPECT_EQ(resets.front().reason, "TASK_RESET");
+    EXPECT_EQ(resets.front().goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(resets.front().evaluation_context_valid);
+    const bool had_latch = succeeds || mode == "stock_mismatch";
+    EXPECT_EQ(resets.front().before_clear, had_latch);
+    EXPECT_EQ(resets.front().curve.empty(), !had_latch);
+    EXPECT_EQ(resets.front().curve_frame.empty(), !had_latch);
+    grid(sc);
+    critic->onNewPlan(path);
+    if (mode == "accepted") {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      auto next = receive();
+      ASSERT_FALSE(next.empty());
+      EXPECT_GT(next.front().task_id, event.task_id);
+      EXPECT_GT(next.front().plan_id, event.plan_id);
+      EXPECT_TRUE(next.front().reason.empty());
+      EXPECT_EQ(next.front().goal_region_result, "NOT_EVALUATED");
+      critic->on_deactivate();
+      optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
+      EXPECT_TRUE(receive().empty());
+      critic->on_activate();
+      receive();  // Activation clears the old latch; lifecycle cases are checked below.
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr));
+      ASSERT_TRUE(critic->isLatched());
+      receive();
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.enabled", false)).successful);
+      EXPECT_TRUE(receive().empty());
+      optimizer.evalControl(pose({-0.24, 0.022, 0}), speed, path, goal, nullptr);
+      EXPECT_TRUE(receive().empty());
+    }
+    optimizer.shutdown();
+  }
+}
+
+TEST_F(ControllerScenarios, TerminalDiagnosticsSeparateTransitionsFromFinalState)
+{
+  using Diagnostic = nav2_critics_msgs::msg::TerminalApproachDiagnostics;
+  for (const std::string mode : {"new_goal", "empty_plan", "same_goal", "plan_gear_flip",
+      "in_place_redraw", "parameter", "disabled", "reconfigure",
+      "redraw_failure", "gear_redraw_failure", "fallback_shift", "replan_shift", "lost_goal",
+      "entry_replan", "new_goal_after_replan"})
+  {
+    SCOPED_TRACE(mode);
+    Scenario sc;
+    sc.id = "terminal_diagnostic_transitions";
+    sc.path = {{-0.25, 0, 0}, {-0.15, 0, 0}, {-0.05, 0, 0}, {0, 0, 0}};
+    sc.gears = {1, 1, 1};
+    if (mode == "in_place_redraw") {
+      sc = atlas->at("curved_capture");
+    }
+    grid(sc);
+    auto parent = node(true, 64, 0.325, 7, 0.35);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.enabled", true);
+    const bool redraw = mode == "redraw_failure" || mode == "gear_redraw_failure" ||
+      mode == "in_place_redraw" || mode == "plan_gear_flip";
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.max_redraws", redraw ? 1 : 0);
+    parent->declare_parameter("FollowPath.TerminalApproachCritic.infeasible_policy",
+      mode == "fallback_shift" ? "fallback" :
+      ((mode == "replan_shift" || mode == "entry_replan" || mode == "new_goal_after_replan") ?
+      "replan_signal" : "abort"));
+    mppi::ParametersHandler params(parent);
+    params.start();
+    ScenarioOptimizer optimizer;
+    optimizer.configure(parent, cm, &params, true);
+    auto observer = std::make_shared<rclcpp::Node>("terminal_transition_observer");
+    auto sub = observer->create_subscription<Diagnostic>(
+      "/scenario_controller/terminal_approach_diagnostics", rclcpp::QoS(100).reliable(),
+      [](Diagnostic::ConstSharedPtr) {});
+    auto connect = [&]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (sub->get_publisher_count() == 0u && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return sub->get_publisher_count() > 0u;
+      };
+    ASSERT_TRUE(connect());
+    auto receive = [&]() {
+        std::vector<Diagnostic> messages;
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (std::chrono::steady_clock::now() < end) {
+          Diagnostic message;
+          rclcpp::MessageInfo info;
+          if (sub->take(message, info)) {messages.push_back(message);} else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        }
+        return messages;
+      };
+    auto path = sc.message();
+    auto goal = path.poses.back().pose;
+    auto actual = pose({-0.24, 0.022, 0});
+    auto buffer = std::make_shared<tf2_ros::Buffer>(parent->get_clock());
+    ScenarioPathHandler handler;
+    if (mode == "in_place_redraw") {
+      actual = pose(sc.starts.at("inside"));
+      handler.initialize(parent, "FollowPath", cm, buffer, &params);
+      handler.setPath(path);
+      path = handler.transformPath(actual);
+    }
+    geometry_msgs::msg::Twist speed;
+    speed.linear.x = 0.15;
+    auto * critic = optimizer.terminalCritic();
+    critic->onNewPlan(path);
+    if (mode == "entry_replan" || mode == "new_goal_after_replan") {
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.50, 0.10, 1.2}), speed, path, goal, nullptr));
+      const auto entry_events = receive();
+      ASSERT_EQ(entry_events.size(), 3u);
+      const auto & entry_failure = entry_events.front();
+      EXPECT_EQ(entry_failure.event, "EVALUATED");
+      EXPECT_EQ(entry_failure.reason, "ENTRY_INFEASIBLE");
+      EXPECT_FALSE(entry_failure.latched);
+      EXPECT_FALSE(entry_failure.before_clear);
+      EXPECT_TRUE(entry_failure.latch_consumed);
+      EXPECT_TRUE(entry_failure.replan_allowance_consumed);
+      EXPECT_TRUE(entry_failure.replan_pending);
+      EXPECT_EQ(entry_failure.replan_count, 1);
+      EXPECT_TRUE(entry_failure.curve.empty());
+      EXPECT_TRUE(entry_failure.curve_frame.empty());
+      EXPECT_TRUE(entry_failure.feasibility_evaluated);
+      ASSERT_NO_THROW(optimizer.evalControl(pose({-0.50, 0.10, 1.2}), speed, path, goal, nullptr));
+      const auto pending = receive();
+      ASSERT_EQ(pending.size(), 3u);
+      for (const auto & event : pending) {
+        EXPECT_FALSE(event.feasibility_evaluated);
+        EXPECT_TRUE(event.replan_pending);
+        EXPECT_EQ(event.replan_count, 1);
+      }
+      if (mode == "entry_replan") {
+        EXPECT_THROW(optimizer.evalControl(pose({-0.30, 0.10, 1.2}), speed, path, goal, nullptr),
+          nav2_core::InvalidPath);
+        const auto cutoff = receive();
+        ASSERT_EQ(cutoff.size(), 1u);
+        EXPECT_EQ(cutoff.front().reason, "REPLAN_NOT_READY_BY_CUTOFF");
+        EXPECT_FALSE(cutoff.front().feasibility_evaluated);
+        optimizer.shutdown();
+        continue;
+      }
+      // Accept the same-goal replacement with its one replan allowance already consumed.
+      critic->onNewPlan(path);
+    }
+    ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+    ASSERT_TRUE(critic->isLatched());
+    const auto initial = receive();
+    ASSERT_EQ(initial.size(), 3u);
+
+    if (mode == "empty_plan" || mode == "same_goal" || mode == "plan_gear_flip") {
+      if (mode == "plan_gear_flip") {
+        for (auto & p : path.poses) {
+          p.pose.position.x = -p.pose.position.x;
+        }
+        actual = pose({0.24, 0.022, 0});
+        speed.linear.x = -0.15;
+      }
+      critic->onNewPlan(mode == "empty_plan" ? nav_msgs::msg::Path{} : path);
+      const auto transition = receive();
+      if (mode == "same_goal") {
+        EXPECT_TRUE(transition.empty());
+      } else {
+        ASSERT_EQ(transition.size(), 1u);
+        const auto & outgoing = transition.front();
+        EXPECT_EQ(outgoing.event, mode == "empty_plan" ? "RESET" : "CURVE_CLEARED");
+        EXPECT_EQ(outgoing.reason, mode == "empty_plan" ? "TASK_RESET" : "GEAR_FLIP_ON_SAME_GOAL");
+        EXPECT_EQ(outgoing.plan_id, initial.front().plan_id);
+        EXPECT_EQ(outgoing.goal_id, initial.front().goal_id);
+        EXPECT_EQ(outgoing.task_id, initial.front().task_id);
+        EXPECT_EQ(outgoing.latch_id, initial.front().latch_id);
+        EXPECT_EQ(outgoing.redraw_count, 0);
+        EXPECT_TRUE(outgoing.before_clear);
+        EXPECT_EQ(outgoing.curve, initial.front().curve);
+      }
+      if (mode == "empty_plan") {
+        critic->onNewPlan(path);
+      }
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      EXPECT_EQ(replacement.front().plan_id, initial.front().plan_id +
+        (mode == "empty_plan" ? 2u : 1u));
+      EXPECT_EQ(replacement.front().goal_id, initial.front().goal_id +
+        (mode == "empty_plan" ? 1u : 0u));
+      EXPECT_EQ(replacement.front().task_id, initial.front().task_id +
+        (mode == "empty_plan" ? 1u : 0u));
+      EXPECT_EQ(replacement.front().latch_id, initial.front().latch_id +
+        (mode == "same_goal" ? 0u : 1u));
+      EXPECT_EQ(replacement.front().redraw_count, mode == "plan_gear_flip" ? 1 : 0);
+      EXPECT_TRUE(replacement.front().latched);
+      optimizer.shutdown();
+      continue;
+    }
+    if (mode == "in_place_redraw") {
+      actual.pose.position.y -= 0.055;
+      path = handler.transformPath(actual);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      const auto & event = replacement.front();
+      EXPECT_EQ(event.event, "EVALUATED");
+      EXPECT_FALSE(event.before_clear);
+      EXPECT_TRUE(event.latched);
+      EXPECT_TRUE(event.feasibility_evaluated);
+      EXPECT_EQ(event.plan_id, initial.front().plan_id);
+      EXPECT_EQ(event.goal_id, initial.front().goal_id);
+      EXPECT_EQ(event.latch_id, initial.front().latch_id + 1u);
+      EXPECT_EQ(event.redraw_count, 1);
+      EXPECT_EQ(event.curve_frame, actual.header.frame_id);
+      ASSERT_FALSE(event.curve.empty());
+      EXPECT_NE(event.curve, initial.front().curve);
+      EXPECT_TRUE(std::any_of(event.checks.begin(), event.checks.end(), [](const auto & check) {
+          return check.name == "curve/lateral_le" && !check.passed;
+        }));
+      for (size_t i = 1; i < replacement.size(); ++i) {
+        EXPECT_EQ(replacement[i].event, "EVALUATED");
+        EXPECT_EQ(replacement[i].latch_id, event.latch_id);
+        EXPECT_EQ(replacement[i].sequence, event.sequence + i);
+        EXPECT_FALSE(replacement[i].feasibility_evaluated);
+        EXPECT_TRUE(replacement[i].curve.empty());
+      }
+      optimizer.shutdown();
+      continue;
+    }
+
+    if (mode == "disabled") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.enabled", false)).successful);
+      EXPECT_TRUE(receive().empty());
+      critic->reset();
+      EXPECT_TRUE(receive().empty());
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      EXPECT_TRUE(receive().empty());
+      optimizer.shutdown();
+      continue;
+    }
+    if (mode == "reconfigure") {
+      critic->on_deactivate();
+      critic->on_cleanup();
+      critic->initialize();
+      critic->on_activate();
+      ASSERT_TRUE(connect());
+      EXPECT_TRUE(receive().empty());
+      critic->onNewPlan(path);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto fresh = receive();
+      ASSERT_EQ(fresh.size(), 3u);
+      EXPECT_NE(fresh.front().instance_id, initial.front().instance_id);
+      EXPECT_EQ(fresh.front().sequence, 1u);
+      EXPECT_EQ(fresh.front().evaluation_id, 1u);
+      EXPECT_EQ(fresh.front().task_id, 0u);
+      EXPECT_EQ(fresh.front().plan_id, 1u);
+      EXPECT_EQ(fresh.front().goal_id, 1u);
+      EXPECT_EQ(fresh.front().latch_id, 1u);
+      optimizer.shutdown();
+      continue;
+    }
+
+    const bool new_goal = mode == "new_goal" || mode == "new_goal_after_replan";
+    const bool shifted = new_goal || mode == "redraw_failure" ||
+      mode == "fallback_shift" || mode == "replan_shift";
+    if (shifted) {
+      for (auto & p : path.poses) {
+        p.pose.position.x += 0.30;
+      }
+      goal = path.poses.back().pose;
+      actual = pose(redraw ? Pose{0.16, 0, 0.9} : Pose{-0.20, 0.022, 0});
+    }
+    if (mode == "redraw_failure") {
+      path.header.frame_id = actual.header.frame_id = "odom";
+    }
+    if (mode == "gear_redraw_failure") {
+      for (auto & p : path.poses) {
+        p.pose.position.x = -p.pose.position.x;
+      }
+      actual = pose({0.14, 0, 0.9});
+    }
+    if (new_goal) {
+      critic->onNewPlan(path);
+    } else if (mode == "parameter") {
+      ASSERT_TRUE(parent->set_parameter(rclcpp::Parameter(
+            "FollowPath.TerminalApproachCritic.max_residual_y", 0.03)).successful);
+    } else {
+      if (mode == "lost_goal") {
+        for (auto & p : path.poses) {
+          p.pose.position.x -= 0.15;
+        }
+      }
+      if (redraw || mode == "lost_goal") {
+        EXPECT_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr),
+          nav2_core::InvalidPath);
+      } else {
+        ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      }
+    }
+    const auto events = receive();
+    ASSERT_FALSE(events.empty());
+    const auto & cleared = events.front();
+    EXPECT_EQ(cleared.event, "CURVE_CLEARED");
+    EXPECT_EQ(cleared.reason, new_goal ? "NEW_GOAL" :
+      (mode == "parameter" ? "PARAM_CHANGE_WHILE_LATCHED" :
+      (mode == "gear_redraw_failure" ? "GEAR_FLIP_WHILE_LATCHED" :
+      (mode == "lost_goal" ? "LATCHED_GOAL_LOST_INSIDE_CUTOFF" : "LOCAL_GOAL_SHIFT_EXCEEDED"))));
+    EXPECT_TRUE(cleared.latched);
+    EXPECT_TRUE(cleared.before_clear);
+    EXPECT_FALSE(cleared.evaluation_context_valid);
+    EXPECT_FALSE(cleared.goal_tolerance_valid);
+    EXPECT_EQ(cleared.goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(cleared.curve.empty());
+    EXPECT_EQ(cleared.curve_frame, "map");
+    EXPECT_EQ(cleared.sequence, initial.back().sequence + 1u);
+    EXPECT_EQ(cleared.latch_id, initial.front().latch_id);
+    EXPECT_EQ(cleared.plan_id, initial.front().plan_id);
+    EXPECT_EQ(cleared.goal_id, initial.front().goal_id);
+    EXPECT_EQ(cleared.redraw_count, initial.front().redraw_count);
+    EXPECT_EQ(cleared.replan_count, initial.front().replan_count);
+    EXPECT_EQ(cleared.replan_allowance_consumed, initial.front().replan_allowance_consumed);
+    for (size_t i = 1; i < events.size(); ++i) {
+      EXPECT_EQ(events[i].sequence, cleared.sequence + i);
+    }
+    if (redraw) {
+      ASSERT_EQ(events.size(), 2u);
+      const auto & failure = events.back();
+      EXPECT_EQ(failure.event, "ABORT");
+      EXPECT_EQ(failure.reason, "ENTRY_INFEASIBLE");
+      EXPECT_EQ(failure.redraw_count, 1);
+      EXPECT_DOUBLE_EQ(failure.gear, mode == "gear_redraw_failure" ? -1.0 : 1.0);
+      EXPECT_FALSE(failure.latched);
+      EXPECT_FALSE(failure.before_clear);
+      EXPECT_TRUE(failure.curve.empty());
+      EXPECT_TRUE(failure.curve_frame.empty());
+      EXPECT_EQ(failure.header.frame_id, actual.header.frame_id);
+      EXPECT_TRUE(failure.evaluation_context_valid);
+      EXPECT_TRUE(failure.feasibility_evaluated);
+    } else if (mode == "fallback_shift" || mode == "replan_shift") {
+      ASSERT_EQ(events.size(), 4u);
+      const auto & final = events[1];
+      EXPECT_EQ(final.event, "EVALUATED");
+      EXPECT_EQ(final.reason, "LOCAL_GOAL_SHIFT_EXCEEDED");
+      EXPECT_FALSE(final.latched);
+      EXPECT_FALSE(final.before_clear);
+      EXPECT_EQ(final.replan_count, mode == "replan_shift" ? 1 : 0);
+      EXPECT_EQ(final.replan_pending, mode == "replan_shift");
+      EXPECT_TRUE(final.curve_frame.empty());
+      EXPECT_FALSE(final.feasibility_evaluated);
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto waiting = receive();
+      ASSERT_EQ(waiting.size(), 3u);
+      for (const auto & event : waiting) {
+        EXPECT_FALSE(event.feasibility_evaluated);
+        EXPECT_FALSE(event.latched);
+        EXPECT_TRUE(event.latch_consumed);
+      }
+    } else if (mode == "lost_goal") {
+      ASSERT_EQ(events.size(), 2u);
+      EXPECT_EQ(events.back().event, "ABORT");
+      EXPECT_EQ(events.back().reason, "LATCHED_GOAL_LOST_INSIDE_CUTOFF");
+      EXPECT_FALSE(events.back().feasibility_evaluated);
+      EXPECT_FALSE(events.back().goal_tolerance_valid);
+    } else {
+      ASSERT_EQ(events.size(), 1u);
+    }
+    if (new_goal) {
+      if (mode == "new_goal_after_replan") {
+        EXPECT_EQ(cleared.replan_count, 1);
+        EXPECT_TRUE(cleared.replan_allowance_consumed);
+      }
+      actual = pose({0.06, 0.022, 0});
+      ASSERT_NO_THROW(optimizer.evalControl(actual, speed, path, goal, nullptr));
+      const auto replacement = receive();
+      ASSERT_EQ(replacement.size(), 3u);
+      EXPECT_EQ(replacement.front().plan_id, initial.front().plan_id + 1u);
+      EXPECT_EQ(replacement.front().goal_id, initial.front().goal_id + 1u);
+      EXPECT_EQ(replacement.front().latch_id, initial.front().latch_id + 1u);
+      EXPECT_TRUE(replacement.front().latched);
+      EXPECT_EQ(replacement.front().replan_count, 0);
+      EXPECT_FALSE(replacement.front().replan_allowance_consumed);
+      optimizer.shutdown();
+      continue;
+    }
+    critic->reset();
+    const auto reset = receive();
+    ASSERT_EQ(reset.size(), 1u);
+    EXPECT_EQ(reset.front().event, "RESET");
+    EXPECT_EQ(reset.front().reason, "TASK_RESET");
+    EXPECT_EQ(reset.front().goal_region_result, "NOT_EVALUATED");
+    EXPECT_FALSE(reset.front().before_clear);
+    EXPECT_TRUE(reset.front().curve.empty());
+    EXPECT_TRUE(reset.front().curve_frame.empty());
+    optimizer.shutdown();
   }
 }
 
