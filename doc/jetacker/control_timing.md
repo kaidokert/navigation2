@@ -146,12 +146,13 @@ window. A networked container was rejected before ROS initialization.
 
 ## Core package baseline
 
-The production image has apt Nav2 1.3.13. The instrumented nav2_util,
-nav2_costmap_2d and nav2_controller packages therefore use upstream tag 1.3.13
-as their baseline, retaining the deployed goal-check-before-command ordering,
-TF error handling and costmap fixes. MPPI and Smac remain on the jetacker fork.
+The production image has apt Nav2 1.3.14 (1.3.13 until apt moved, 2026-11). The
+instrumented nav2_util, nav2_costmap_2d and nav2_controller packages therefore use
+upstream tag 1.3.14 as their baseline (1.3.13 to 1.3.14 for these three is the
+version labels, two costmap mutex locks and a range-layer bounds fix), retaining
+the deployed goal-check-before-command ordering, TF error handling and costmap fixes. MPPI and Smac remain on the jetacker fork.
 The robot Docker build rejects a different apt core release. This core-source
-alignment avoids replacing the deployed 1.3.13 libraries with the fork's older
+alignment avoids replacing the deployed apt core libraries with the fork's older
 1.3.11 implementation; it is not a new controller tuning experiment.
 
 Evidence at e9f64a6e predates this alignment. Repeat image, dry-run and overhead
