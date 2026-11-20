@@ -112,6 +112,46 @@ TEST_F(FinalOutputTest, ClearForwardAndReverseAreAccepted)
   }
 }
 
+TEST_F(FinalOutputTest, UnsafeOutputZeroesWarmStartByDefault)
+{
+  obstacle(0.8, 0.0);
+  opt.sequence(0.3f, 0.2f);
+  opt.control_history_.fill({0.3f, 0.0f, 0.2f});
+  ASSERT_FALSE(opt.settings_.keep_warm_start_on_unsafe_output);
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  for (unsigned int i = 0; i < opt.settings_.time_steps; ++i) {
+    EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.0f);
+    EXPECT_FLOAT_EQ(opt.control_sequence_.wz(i), 0.0f);
+  }
+  for (const auto & h : opt.control_history_) {
+    EXPECT_FLOAT_EQ(h.vx, 0.0f);
+    EXPECT_FLOAT_EQ(h.wz, 0.0f);
+  }
+}
+
+TEST_F(FinalOutputTest, UnsafeOutputKeepsWarmStartWhenEnabled)
+{
+  obstacle(0.8, 0.0);
+  opt.settings_.keep_warm_start_on_unsafe_output = true;
+  opt.sequence(0.3f, 0.2f);
+  opt.control_history_.fill({0.3f, 0.0f, 0.2f});
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);  // never sent
+  for (unsigned int i = 0; i < opt.settings_.time_steps; ++i) {
+    EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.3f);
+    EXPECT_FLOAT_EQ(opt.control_sequence_.wz(i), 0.2f);
+  }
+  for (const auto & h : opt.control_history_) {
+    EXPECT_FLOAT_EQ(h.vx, 0.3f);
+    EXPECT_FLOAT_EQ(h.wz, 0.2f);
+  }
+  // A non-finite sequence is rejected too, and is never kept as a warm start.
+  opt.sequence(std::numeric_limits<float>::quiet_NaN());
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  for (unsigned int i = 0; i < opt.settings_.time_steps; ++i) {
+    EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.0f);
+  }
+}
+
 TEST_F(FinalOutputTest, ClearCurvesCanAverageIntoCollidingStraight)
 {
   opt.state_.speed.linear.x = 0.3;

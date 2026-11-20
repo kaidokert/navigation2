@@ -38,6 +38,10 @@ struct OptimizerSettings
   unsigned int iteration_count{0u};
   bool shift_control_sequence{false};
   size_t retry_attempt_limit{0};
+  // GENERIC. When the final control sequence is rejected as not collision-free, keep it and the
+  // control history as the next cycle's warm start instead of zeroing both. The rejected command
+  // is never sent either way (NoValidControl is still thrown). Default false: stock behaviour.
+  bool keep_warm_start_on_unsafe_output{false};
 };
 
 }  // namespace mppi::models

@@ -119,6 +119,7 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  getParam(s.keep_warm_start_on_unsafe_output, "keep_warm_start_on_unsafe_output", false);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -720,7 +721,8 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
   const builtin_interfaces::msg::Time & stamp)
 {
   // Validate raw controls before clamping can turn NaN/Inf into a finite bound.
-  if (controlSequenceFinite()) {
+  const bool finite = controlSequenceFinite();
+  if (finite) {
     // Smoothing follows optimization and can invalidate the Ackermann cone.
     // No velocity or steering adjustment is permitted after this validation.
     applyControlSequenceConstraints();
@@ -731,8 +733,11 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
       return control;
     }
   }
-  control_sequence_.reset(settings_.time_steps);
-  control_history_.fill({0.0f, 0.0f, 0.0f});
+  // Only a finite (but colliding) sequence may stay as the warm start.
+  if (!settings_.keep_warm_start_on_unsafe_output || !finite) {
+    control_sequence_.reset(settings_.time_steps);
+    control_history_.fill({0.0f, 0.0f, 0.0f});
+  }
   throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
 }
 
