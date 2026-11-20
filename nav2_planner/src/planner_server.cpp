@@ -56,6 +56,8 @@ PlannerServer::PlannerServer(const rclcpp::NodeOptions & options)
   declare_parameter("action_server_result_timeout", 10.0);
   declare_parameter("costmap_update_timeout", 1.0);
   declare_parameter("through_poses_start_at_requested_waypoint", false);
+  declare_parameter("through_poses_waypoint_start_max_dist", 0.01);
+  declare_parameter("through_poses_waypoint_start_max_yaw", 0.01);
 
   get_parameter("planner_plugins", planner_ids_);
   if (planner_ids_ == default_ids_) {
@@ -160,6 +162,8 @@ PlannerServer::on_configure(const rclcpp_lifecycle::State & state)
   costmap_update_timeout_ = rclcpp::Duration::from_seconds(costmap_update_timeout_dbl);
   get_parameter(
     "through_poses_start_at_requested_waypoint", through_poses_start_at_requested_waypoint_);
+  get_parameter("through_poses_waypoint_start_max_dist", through_poses_waypoint_start_max_dist_);
+  get_parameter("through_poses_waypoint_start_max_yaw", through_poses_waypoint_start_max_yaw_);
 
   // Create the action servers for path planning to a pose and through poses
   action_server_pose_ = std::make_unique<ActionServerToPose>(
@@ -379,20 +383,34 @@ bool PlannerServer::validatePath(
 geometry_msgs::msg::PoseStamped PlannerServer::selectThroughPosesLegStart(
   unsigned int i,
   const geometry_msgs::msg::PoseStamped & start,
-  const std::vector<geometry_msgs::msg::PoseStamped> & goals,
+  const geometry_msgs::msg::PoseStamped & prev_goal,
   const nav_msgs::msg::Path & concat_path,
-  bool start_at_requested_waypoint)
+  bool start_at_requested_waypoint,
+  double max_dist,
+  double max_yaw)
 {
   if (i == 0) {
     return start;
-  }
-  if (start_at_requested_waypoint) {
-    return goals[i - 1];
   }
   // pick the end of the last planning task as the start for the next one
   // to allow for path tolerance deviations
   geometry_msgs::msg::PoseStamped leg_start = concat_path.poses.back();
   leg_start.header = concat_path.header;
+  if (start_at_requested_waypoint) {
+    const auto & a = leg_start.pose;
+    const auto & b = prev_goal.pose;
+    const double dist = std::hypot(a.position.x - b.position.x, a.position.y - b.position.y);
+    auto yaw = [](const geometry_msgs::msg::Quaternion & q) {
+        return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      };
+    const double d = yaw(a.orientation) - yaw(b.orientation);
+    const double dyaw = std::abs(std::atan2(std::sin(d), std::cos(d)));
+    if (dist <= max_dist && dyaw <= max_yaw) {
+      geometry_msgs::msg::PoseStamped waypoint = prev_goal;
+      waypoint.header = concat_path.header;
+      return waypoint;
+    }
+  }
   return leg_start;
 }
 
@@ -434,9 +452,10 @@ void PlannerServer::computePlanThroughPoses()
 
     // Get consecutive paths through these points
     for (unsigned int i = 0; i != goal->goals.size(); i++) {
-      // Get starting point
+      // Get starting point (prev_goal: the previous leg's goal, already in the global frame)
       curr_start = selectThroughPosesLegStart(
-        i, start, goal->goals, concat_path, through_poses_start_at_requested_waypoint_);
+        i, start, curr_goal, concat_path, through_poses_start_at_requested_waypoint_,
+        through_poses_waypoint_start_max_dist_, through_poses_waypoint_start_max_yaw_);
       curr_goal = goal->goals[i];
 
       // Transform them into the global frame
@@ -755,6 +774,11 @@ PlannerServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> paramete
     }
 
     if (type == ParameterType::PARAMETER_DOUBLE) {
+      if (name == "through_poses_waypoint_start_max_dist") {
+        through_poses_waypoint_start_max_dist_ = parameter.as_double();
+      } else if (name == "through_poses_waypoint_start_max_yaw") {
+        through_poses_waypoint_start_max_yaw_ = parameter.as_double();
+      }
       if (name == "expected_planner_frequency") {
         if (parameter.as_double() > 0) {
           max_planner_duration_ = 1 / parameter.as_double();

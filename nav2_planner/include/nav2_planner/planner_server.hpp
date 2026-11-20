@@ -165,22 +165,28 @@ protected:
   /**
    * @brief Start pose for leg i of a ComputePathThroughPoses request.
    * Leg 0 starts at the request's start. Later legs start at the end of the path planned so far
-   * (stock behaviour, tolerates planners that stop within goal tolerance), or, when
-   * start_at_requested_waypoint is true, at the requested waypoint goals[i - 1] itself, so a leg's
-   * start does not inherit the previous leg's floating-point end (e.g. a heading on a bin edge).
+   * (stock behaviour, tolerates planners that stop within goal tolerance). When
+   * start_at_requested_waypoint is true and that path end lies within max_dist (m) and max_yaw
+   * (rad) of the previous leg's goal, the leg starts at that goal instead, so it does not inherit
+   * the previous leg's floating-point end (e.g. a heading on a Smac heading-bin edge). A path that
+   * stopped further away keeps the stock start.
    * @param i Leg index
    * @param start The request's start pose
-   * @param goals The requested waypoints
-   * @param concat_path The path planned so far (legs 0..i-1)
-   * @param start_at_requested_waypoint GENERIC: see through_poses_start_at_requested_waypoint
-   * @return The start pose for leg i, in the frame of its source
+   * @param prev_goal The previous leg's goal, in the global frame (unused for leg 0)
+   * @param concat_path The path planned so far (legs 0..i-1), in the global frame
+   * @param start_at_requested_waypoint GENERIC: through_poses_start_at_requested_waypoint
+   * @param max_dist GENERIC: through_poses_waypoint_start_max_dist
+   * @param max_yaw GENERIC: through_poses_waypoint_start_max_yaw
+   * @return The start pose for leg i
    */
   static geometry_msgs::msg::PoseStamped selectThroughPosesLegStart(
     unsigned int i,
     const geometry_msgs::msg::PoseStamped & start,
-    const std::vector<geometry_msgs::msg::PoseStamped> & goals,
+    const geometry_msgs::msg::PoseStamped & prev_goal,
     const nav_msgs::msg::Path & concat_path,
-    bool start_at_requested_waypoint);
+    bool start_at_requested_waypoint,
+    double max_dist,
+    double max_yaw);
 
   /**
    * @brief Transform start and goal poses into the costmap
@@ -265,6 +271,8 @@ protected:
   double max_planner_duration_;
   // GENERIC: later ComputePathThroughPoses legs start at the requested waypoint (default false)
   bool through_poses_start_at_requested_waypoint_{false};
+  double through_poses_waypoint_start_max_dist_{0.01};
+  double through_poses_waypoint_start_max_yaw_{0.01};
   rclcpp::Duration costmap_update_timeout_;
   std::string planner_ids_concat_;
 
