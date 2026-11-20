@@ -163,6 +163,26 @@ protected:
     geometry_msgs::msg::PoseStamped & start);
 
   /**
+   * @brief Start pose for leg i of a ComputePathThroughPoses request.
+   * Leg 0 starts at the request's start. Later legs start at the end of the path planned so far
+   * (stock behaviour, tolerates planners that stop within goal tolerance), or, when
+   * start_at_requested_waypoint is true, at the requested waypoint goals[i - 1] itself, so a leg's
+   * start does not inherit the previous leg's floating-point end (e.g. a heading on a bin edge).
+   * @param i Leg index
+   * @param start The request's start pose
+   * @param goals The requested waypoints
+   * @param concat_path The path planned so far (legs 0..i-1)
+   * @param start_at_requested_waypoint GENERIC: see through_poses_start_at_requested_waypoint
+   * @return The start pose for leg i, in the frame of its source
+   */
+  static geometry_msgs::msg::PoseStamped selectThroughPosesLegStart(
+    unsigned int i,
+    const geometry_msgs::msg::PoseStamped & start,
+    const std::vector<geometry_msgs::msg::PoseStamped> & goals,
+    const nav_msgs::msg::Path & concat_path,
+    bool start_at_requested_waypoint);
+
+  /**
    * @brief Transform start and goal poses into the costmap
    * global frame for path planning plugins to utilize
    * @param start The starting pose to transform
@@ -243,6 +263,8 @@ protected:
   std::vector<std::string> planner_ids_;
   std::vector<std::string> planner_types_;
   double max_planner_duration_;
+  // GENERIC: later ComputePathThroughPoses legs start at the requested waypoint (default false)
+  bool through_poses_start_at_requested_waypoint_{false};
   rclcpp::Duration costmap_update_timeout_;
   std::string planner_ids_concat_;
 

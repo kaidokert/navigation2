@@ -55,6 +55,7 @@ PlannerServer::PlannerServer(const rclcpp::NodeOptions & options)
   declare_parameter("expected_planner_frequency", 1.0);
   declare_parameter("action_server_result_timeout", 10.0);
   declare_parameter("costmap_update_timeout", 1.0);
+  declare_parameter("through_poses_start_at_requested_waypoint", false);
 
   get_parameter("planner_plugins", planner_ids_);
   if (planner_ids_ == default_ids_) {
@@ -157,6 +158,8 @@ PlannerServer::on_configure(const rclcpp_lifecycle::State & state)
   double costmap_update_timeout_dbl;
   get_parameter("costmap_update_timeout", costmap_update_timeout_dbl);
   costmap_update_timeout_ = rclcpp::Duration::from_seconds(costmap_update_timeout_dbl);
+  get_parameter(
+    "through_poses_start_at_requested_waypoint", through_poses_start_at_requested_waypoint_);
 
   // Create the action servers for path planning to a pose and through poses
   action_server_pose_ = std::make_unique<ActionServerToPose>(
@@ -373,6 +376,26 @@ bool PlannerServer::validatePath(
   return true;
 }
 
+geometry_msgs::msg::PoseStamped PlannerServer::selectThroughPosesLegStart(
+  unsigned int i,
+  const geometry_msgs::msg::PoseStamped & start,
+  const std::vector<geometry_msgs::msg::PoseStamped> & goals,
+  const nav_msgs::msg::Path & concat_path,
+  bool start_at_requested_waypoint)
+{
+  if (i == 0) {
+    return start;
+  }
+  if (start_at_requested_waypoint) {
+    return goals[i - 1];
+  }
+  // pick the end of the last planning task as the start for the next one
+  // to allow for path tolerance deviations
+  geometry_msgs::msg::PoseStamped leg_start = concat_path.poses.back();
+  leg_start.header = concat_path.header;
+  return leg_start;
+}
+
 void PlannerServer::computePlanThroughPoses()
 {
   std::lock_guard<std::mutex> lock(dynamic_params_lock_);
@@ -412,14 +435,8 @@ void PlannerServer::computePlanThroughPoses()
     // Get consecutive paths through these points
     for (unsigned int i = 0; i != goal->goals.size(); i++) {
       // Get starting point
-      if (i == 0) {
-        curr_start = start;
-      } else {
-        // pick the end of the last planning task as the start for the next one
-        // to allow for path tolerance deviations
-        curr_start = concat_path.poses.back();
-        curr_start.header = concat_path.header;
-      }
+      curr_start = selectThroughPosesLegStart(
+        i, start, goal->goals, concat_path, through_poses_start_at_requested_waypoint_);
       curr_goal = goal->goals[i];
 
       // Transform them into the global frame
@@ -730,6 +747,12 @@ PlannerServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> paramete
   for (auto parameter : parameters) {
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
+
+    if (type == ParameterType::PARAMETER_BOOL &&
+      name == "through_poses_start_at_requested_waypoint")
+    {
+      through_poses_start_at_requested_waypoint_ = parameter.as_bool();
+    }
 
     if (type == ParameterType::PARAMETER_DOUBLE) {
       if (name == "expected_planner_frequency") {
