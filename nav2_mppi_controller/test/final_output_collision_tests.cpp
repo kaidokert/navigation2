@@ -115,7 +115,7 @@ TEST_F(FinalOutputTest, ClearForwardAndReverseAreAccepted)
 TEST_F(FinalOutputTest, UnsafeOutputZeroesWarmStartByDefault)
 {
   obstacle(0.8, 0.0);
-  opt.sequence(0.3f, 0.2f);
+  opt.sequence(0.3f);  // straight into the obstacle (as ClearCurvesCanAverageIntoCollidingStraight)
   opt.control_history_.fill({0.3f, 0.0f, 0.2f});
   ASSERT_FALSE(opt.settings_.keep_warm_start_on_unsafe_output);
   EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
@@ -131,24 +131,40 @@ TEST_F(FinalOutputTest, UnsafeOutputZeroesWarmStartByDefault)
 
 TEST_F(FinalOutputTest, UnsafeOutputKeepsWarmStartWhenEnabled)
 {
-  obstacle(0.8, 0.0);
-  opt.settings_.keep_warm_start_on_unsafe_output = true;
-  opt.sequence(0.3f, 0.2f);
-  opt.control_history_.fill({0.3f, 0.0f, 0.2f});
-  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);  // never sent
-  for (unsigned int i = 0; i < opt.settings_.time_steps; ++i) {
-    EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.3f);
-    EXPECT_FLOAT_EQ(opt.control_sequence_.wz(i), 0.2f);
-  }
-  for (const auto & h : opt.control_history_) {
-    EXPECT_FLOAT_EQ(h.vx, 0.3f);
-    EXPECT_FLOAT_EQ(h.wz, 0.2f);
+  for (const bool shift : {false, true}) {
+    SCOPED_TRACE(shift ? "shift" : "no shift");
+    opt.configure(cm, shift);
+    obstacle(0.8, 0.0);
+    opt.settings_.keep_warm_start_on_unsafe_output = true;
+    const unsigned int n = opt.settings_.time_steps;
+    for (unsigned int i = 0; i < n; ++i) {  // straight into the obstacle; a distinct value per step
+      opt.control_sequence_.vx(i) = 0.30f + 0.001f * static_cast<float>(i);
+      opt.control_sequence_.wz(i) = 0.0f;
+    }
+    opt.control_history_.fill({0.3f, 0.0f, 0.2f});
+    EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);  // never sent
+    // Kept, and one step on when the controller shifts: the next cycle's step 0 is this one's step 1.
+    const unsigned int k = shift ? 1 : 0;
+    for (unsigned int i = 0; i + k < n; ++i) {
+      EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.30f + 0.001f * static_cast<float>(i + k));
+      EXPECT_FLOAT_EQ(opt.control_sequence_.wz(i), 0.0f);
+    }
+    // The history records what was published: a zero twist in its last slot; older slots kept.
+    EXPECT_FLOAT_EQ(opt.control_history_.back().vx, 0.0f);
+    EXPECT_FLOAT_EQ(opt.control_history_.back().wz, 0.0f);
+    EXPECT_FLOAT_EQ(opt.control_history_.front().vx, 0.3f);
+    EXPECT_FLOAT_EQ(opt.control_history_.front().wz, 0.2f);
   }
   // A non-finite sequence is rejected too, and is never kept as a warm start.
   opt.sequence(std::numeric_limits<float>::quiet_NaN());
   EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
   for (unsigned int i = 0; i < opt.settings_.time_steps; ++i) {
     EXPECT_FLOAT_EQ(opt.control_sequence_.vx(i), 0.0f);
+    EXPECT_FLOAT_EQ(opt.control_sequence_.wz(i), 0.0f);
+  }
+  for (const auto & h : opt.control_history_) {
+    EXPECT_FLOAT_EQ(h.vx, 0.0f);
+    EXPECT_FLOAT_EQ(h.wz, 0.0f);
   }
 }
 

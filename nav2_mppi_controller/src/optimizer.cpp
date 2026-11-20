@@ -737,6 +737,13 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
   if (!settings_.keep_warm_start_on_unsafe_output || !finite) {
     control_sequence_.reset(settings_.time_steps);
     control_history_.fill({0.0f, 0.0f, 0.0f});
+  } else {
+    // The server publishes a zero twist for this cycle, not the rejected command that smoothing
+    // wrote into the history; and the next cycle starts one step later, as after a sent command.
+    control_history_.back() = {0.0f, 0.0f, 0.0f};
+    if (settings_.shift_control_sequence) {
+      shiftControlSequence();
+    }
   }
   throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
 }
