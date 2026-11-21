@@ -277,8 +277,9 @@ protected:
     const models::ControlSequence & sequence, bool shift, CollisionReport * report) const;
 
   /**
-   * @brief Trace rollout ranking order by total cost: finite costs ascending, every non-finite
-   * cost after every finite one. A strict weak order even when costs are NaN.
+   * @brief Rollout ranking order by total cost (trace dumps and the final-check fallback):
+   * finite costs ascending, every non-finite cost after every finite one. A strict weak order
+   * even when costs are NaN.
    */
   static bool traceCostRanksBefore(float a, float b)
   {
@@ -327,6 +328,14 @@ protected:
    */
   bool fallback(bool fail);
 
+  /**
+   * @brief Final-check fallback (final_check_fallback_rollouts > 0): try the cheapest sampled
+   * rollouts under the same constraints and final check. On success control_sequence_ holds the
+   * passing sequence and fallback_rank_ its cost rank; on failure control_sequence_ is unchanged.
+   * @return true when a rollout passed
+   */
+  bool tryRolloutFallback();
+
 protected:
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
@@ -350,6 +359,12 @@ protected:
   models::Path path_;
   geometry_msgs::msg::Pose goal_;
   xt::xtensor<float, 1> costs_;
+
+  // GENERIC, default 0 (off): when the final check rejects the emitted mean, try up to this many
+  // of the last iteration's sampled rollouts, cheapest first, under the same constraints and the
+  // same final check, and emit the first that passes instead of stopping.
+  int final_check_fallback_rollouts_{0};
+  int fallback_rank_{-1};  // rank by cost of the rollout emitted by the fallback this cycle, else -1
 
   // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
   bool trace_cycles_{false};

@@ -169,7 +169,7 @@ public:
   }
   static rclcpp_lifecycle::LifecycleNode::SharedPtr node(
     const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0,
-    double collapse_interval = -1.0)
+    double collapse_interval = -1.0, int fallback = 0)
   {
     rclcpp::NodeOptions options;
     std::vector<rclcpp::Parameter> p = {
@@ -192,6 +192,9 @@ public:
     }
     if (collapse_interval >= 0.0) {
       p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", collapse_interval));
+    }
+    if (fallback > 0) {
+      p.push_back(rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", fallback));
     }
     if (!critics_params) {
       // Critic-free fixtures: no control-cost term either, so the update is the plain
@@ -399,6 +402,53 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   TraceOptimizer::CollisionReport rf;
   EXPECT_FALSE(opt.checkWith(fin, true, &rf));
   EXPECT_EQ(rf.first_index, c.first_collision_index);
+}
+
+TEST_F(TraceTest, FallbackCycleIsRecordedWithItsRankAndDumpedAsARejectedMean)
+{
+  // The forced-rejection scene, with the final-check fallback on: some rollouts pass.
+  wall(0.75, -0.5, 0.80, 0.5);
+  auto n = node("trace_on_fallback", true, false, 0.0, -1.0, 64);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink("trace_on_fallback");
+  waitForMatch(n, "trace_on_fallback");
+  opt.stepNoise();
+  opt.warm(0.3f, 0.0f);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.3;
+  const auto path = straightPath(1.5);
+  geometry_msgs::msg::TwistStamped cmd;
+  ASSERT_NO_THROW(
+    cmd = opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr));
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  ASSERT_EQ(sink.dumps.size(), 1u);
+  const auto & c = sink.cycles[0];
+  const auto & d = sink.dumps[0];
+  EXPECT_EQ(c.result, MppiCycle::RESULT_ACCEPTED_FALLBACK);
+  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_REJECTED);
+  EXPECT_EQ(c.cycle, d.cycle);
+  // The record describes the rejected mean ...
+  EXPECT_GE(c.first_collision_index, 1);
+  mppi::models::ControlSequence fin;
+  fin.reset(41);
+  for (size_t j = 0; j < 41; ++j) {
+    fin.vx(j) = c.final_vx[j];
+    fin.wz(j) = c.final_wz[j];
+  }
+  EXPECT_FALSE(opt.production(fin));
+  // ... and the command actually emitted (here the passing rows stall at index 1, so the shifted
+  // command is 0), while the sequence kept for the next cycle is the rollout, not the all-zero
+  // reset a rejection leaves.
+  EXPECT_EQ(c.cmd_vx, cmd.twist.linear.x);
+  EXPECT_EQ(c.cmd_wz, cmd.twist.angular.z);
+  EXPECT_EQ(d.cmd_vx, cmd.twist.linear.x);
+  EXPECT_GT(xt::sum(xt::abs(opt.tape().vx))(), 1.0f);
+  ASSERT_GT(c.rollouts_pass_final_check, 0);
+  EXPECT_GE(c.fallback_rollout_rank, 0);
+  EXPECT_LT(c.fallback_rollout_rank, 64);
 }
 
 TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
@@ -682,6 +732,19 @@ TEST_F(TraceTest, CommandsAndMemoryIdenticalWithTracingOnAndOff)
     collapse_dumps += d.trigger == MppiRejection::TRIGGER_COLLAPSE ? 1 : 0;
   }
   EXPECT_GT(collapse_dumps, 0u) << "the collapse path never ran";
+  // Final-check fallback on in both: the rejected-mean path now emits a rollout; tracing must
+  // still change nothing, and the fallback must actually run.
+  SetUp();
+  wall(0.95, -0.5, 1.00, 0.5);
+  Sink sink_f("ident_on_fb");
+  const auto f = runIdentity(*this, "fallback", false, true, node("ident_off_fb", false, false,
+      0.0, -1.0, 64), node("ident_on_fb", true, false, 0.0, -1.0, 64), cm, path, mk);
+  sink_f.spin(static_cast<size_t>(f.accepted + f.rejected));
+  size_t fallbacks = 0;
+  for (const auto & cy : sink_f.cycles) {
+    fallbacks += cy.result == MppiCycle::RESULT_ACCEPTED_FALLBACK ? 1 : 0;
+  }
+  EXPECT_GT(fallbacks, 0u) << "the fallback path never ran";
 }
 
 // A final-check rejection of a non-finite sequence (RESULT_REJECTED_NONFINITE) is dumped like a

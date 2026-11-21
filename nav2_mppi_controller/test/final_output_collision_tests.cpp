@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <memory>
 #include <string>
@@ -60,8 +61,24 @@ public:
   bool clear() {return controlSequenceCollisionFree();}
   auto emit() {return getValidatedControlFromSequenceAsTwist(builtin_interfaces::msg::Time{});}
   void smooth() {mppi::utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);}
+  // Sampled rollouts of the last iteration: one constant (vx, wz) row each, with its total cost.
+  void rollouts(const std::vector<std::array<float, 3>> & rows)
+  {
+    state_.reset(rows.size(), settings_.time_steps);
+    costs_ = xt::zeros<float>({rows.size()});
+    for (size_t i = 0; i < rows.size(); ++i) {
+      for (size_t j = 0; j < settings_.time_steps; ++j) {
+        state_.cvx(i, j) = rows[i][0];
+        state_.cwz(i, j) = rows[i][1];
+      }
+      costs_(i) = rows[i][2];
+    }
+  }
   using Optimizer::control_sequence_;
   using Optimizer::control_history_;
+  using Optimizer::costs_;
+  using Optimizer::fallback_rank_;
+  using Optimizer::final_check_fallback_rollouts_;
   using Optimizer::motion_model_;
   using Optimizer::settings_;
   using Optimizer::state_;
@@ -294,6 +311,88 @@ TEST_F(RadiusOutputTest, OutsideCircleCornerCellDoesNotBlock)
 {
   obstacle(0.19, 0.19);
   EXPECT_NO_THROW(opt.emit());
+}
+
+// Final-check fallback (final_check_fallback_rollouts). Scene: the straight mean of two clear
+// curves collides with an obstacle ahead (ClearCurvesCanAverageIntoCollidingStraight).
+class FallbackTest : public FinalOutputTest
+{
+protected:
+  void SetUp() override
+  {
+    FinalOutputTest::SetUp();
+    opt.state_.speed.linear.x = 0.3;
+    obstacle(0.8, 0.0);
+    // cost order: straight (collides) 0.0 < right curve 1.0 < left curve 2.0
+    opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.6f, 2.0f}}, {{0.3f, -0.6f, 1.0f}}});
+    opt.sequence(0.3f);  // the mean: straight, collides
+  }
+};
+
+TEST_F(FallbackTest, OffByDefaultKeepsTheRejection)
+{
+  EXPECT_EQ(FinalOutputOptimizer{}.final_check_fallback_rollouts_, 0);
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+  EXPECT_EQ(opt.fallback_rank_, -1);
+}
+
+TEST_F(FallbackTest, EmitsTheCheapestRolloutThatPassesTheFinalCheck)
+{
+  opt.final_check_fallback_rollouts_ = 3;
+  const auto cmd = opt.emit();
+  // the cheapest (straight) collides; the next by cost is the right curve
+  EXPECT_FLOAT_EQ(cmd.twist.linear.x, 0.3f);
+  EXPECT_FLOAT_EQ(cmd.twist.angular.z, -0.6f);
+  EXPECT_EQ(opt.fallback_rank_, 1);
+  EXPECT_FLOAT_EQ(opt.control_history_.back().wz, -0.6f);
+  // the emitted sequence is the one kept for the next cycle, and it passes the check itself
+  EXPECT_FLOAT_EQ(opt.control_sequence_.wz(5), -0.6f);
+  EXPECT_TRUE(opt.clear());
+}
+
+TEST_F(FallbackTest, TriesOnlyTheConfiguredNumberOfRollouts)
+{
+  opt.final_check_fallback_rollouts_ = 1;  // only the colliding straight one
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+  EXPECT_EQ(opt.control_history_.back().vx, 0.0f);
+  EXPECT_EQ(opt.fallback_rank_, -1);
+}
+
+TEST_F(FallbackTest, RejectsWhenNoRolloutPasses)
+{
+  opt.final_check_fallback_rollouts_ = 3;
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.01f, 1.0f}}, {{0.3f, -0.01f, 2.0f}}});
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  EXPECT_EQ(xt::sum(xt::abs(opt.control_sequence_.vx))(), 0.0f);
+}
+
+TEST_F(FallbackTest, NonFiniteCostsAreNeverTried)
+{
+  opt.final_check_fallback_rollouts_ = 3;
+  // the only rollout that would pass has a NaN (or infinite) cost: nothing is emitted
+  for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+    opt.sequence(0.3f);
+    opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.01f, 1.0f}}, {{0.3f, -0.6f, bad}}});
+    EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+    EXPECT_EQ(opt.fallback_rank_, -1);
+  }
+  // with a finite cost the same rollout is emitted
+  opt.sequence(0.3f);
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.01f, 1.0f}}, {{0.3f, -0.6f, 5.0f}}});
+  EXPECT_FLOAT_EQ(opt.emit().twist.angular.z, -0.6f);
+  EXPECT_EQ(opt.fallback_rank_, 2);
+}
+
+TEST_F(FallbackTest, TheSameConstraintPassAppliesToTheRollout)
+{
+  opt.final_check_fallback_rollouts_ = 3;
+  // the right curve is sampled above vx_max: it is clipped like the mean would be
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.9f, -0.6f, 1.0f}}});
+  const auto cmd = opt.emit();
+  EXPECT_FLOAT_EQ(cmd.twist.linear.x, opt.settings_.constraints.vx_max);
+  EXPECT_FLOAT_EQ(cmd.twist.angular.z, -0.6f);
 }
 }  // namespace
 
