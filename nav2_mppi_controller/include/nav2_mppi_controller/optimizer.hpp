@@ -380,6 +380,12 @@ protected:
   double trace_collapse_min_speed_{0.05};
   double trace_collapse_min_interval_s_{0.5};
   std::optional<rclcpp::Time> trace_last_collapse_dump_;
+  double trace_stall_speed_{0.0};
+  double trace_stall_min_interval_s_{1.0};
+  std::optional<rclcpp::Time> trace_last_stall_dump_;
+  // Rollouts of the last batch whose critics failed it (all collide), kept for the
+  // RESULT_ALL_ROLLOUTS_COLLIDE dump: the retry reset() zeroes state_ before the trace runs.
+  xt::xtensor<float, 2> trace_fail_cvx_, trace_fail_cwz_, trace_fail_cvy_;
   uint64_t trace_cycle_{0};
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
     trace_cycle_pub_;
