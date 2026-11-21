@@ -688,6 +688,7 @@ bool Optimizer::sequenceCollisionFree(
 {
   // Adapted from PR #14's final filtered-sequence guard. It is unconditional
   // here: scoring sampled rollouts is not proof that the emitted mean is clear.
+  if (report) {*report = CollisionReport{};}  // first_index -4: rejected before any pose
   if (!costmap_ || !costmap_ros_ || !sequenceFinite(sequence)) {return false;}
   const auto & p = state_.pose.pose.position;
   const auto & q = state_.pose.pose.orientation;
@@ -809,29 +810,52 @@ bool Optimizer::sequenceCollisionFree(
         return;
       }
       const double c = std::cos(yaw), sn = std::sin(yaw);
-      std::vector<std::pair<unsigned int, unsigned int>> v;
-      for (const auto & vertex : footprint) {
+      for (const auto & vertex : footprint) {  // the production pre-check, same arithmetic
         const double wx = x + c * vertex.x - sn * vertex.y;
         const double wy = y + sn * vertex.x + c * vertex.y;
+        if (!in_bounds(wx, wy)) {
+          off_map(wx, wy);
+          return;
+        }
+      }
+      // FootprintCollisionChecker::footprintCostAtPose: same vertex arithmetic, edges
+      // i -> i + 1, then the closing edge vertex 0 -> last; it stops at the first LETHAL
+      // cell and otherwise keeps the maximum (NO_INFORMATION also rejects).
+      const double cos_th = cos(yaw);
+      const double sin_th = sin(yaw);
+      std::vector<std::pair<unsigned int, unsigned int>> v;
+      for (const auto & vertex : footprint) {
+        const double wx = x + (vertex.x * cos_th - vertex.y * sin_th);
+        const double wy = y + (vertex.x * sin_th + vertex.y * cos_th);
         unsigned int vx, vy;
-        if (!in_bounds(wx, wy) || !costmap_->worldToMap(wx, wy, vx, vy)) {
+        if (!costmap_->worldToMap(wx, wy, vx, vy)) {
           off_map(wx, wy);
           return;
         }
         v.emplace_back(vx, vy);
       }
-      for (size_t k = 0; k < v.size(); ++k) {
-        const auto & a = v[k];
-        const auto & b = v[(k + 1) % v.size()];
-        for (nav2_util::LineIterator line(a.first, a.second, b.first, b.second); line.isValid();
-          line.advance())
+      std::vector<std::pair<size_t, size_t>> edges;
+      for (size_t k = 0; k + 1 < v.size(); ++k) {edges.emplace_back(k, k + 1);}
+      edges.emplace_back(0, v.size() - 1);
+      bool unknown = false;
+      unsigned int ux = 0, uy = 0;
+      for (const auto & e : edges) {
+        for (nav2_util::LineIterator line(v[e.first].first, v[e.first].second,
+          v[e.second].first, v[e.second].second); line.isValid(); line.advance())
         {
-          if (costmap_->getCost(line.getX(), line.getY()) >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+          const auto cost = costmap_->getCost(line.getX(), line.getY());
+          if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
             cell(line.getX(), line.getY());
             return;
           }
+          if (cost > nav2_costmap_2d::LETHAL_OBSTACLE && !unknown) {
+            unknown = true;
+            ux = line.getX();
+            uy = line.getY();
+          }
         }
       }
+      if (unknown) {cell(ux, uy);}
     };
   if (report) {
     report->first_index = -2;
@@ -995,6 +1019,18 @@ void copySequence(
 void Optimizer::publishTrace(
   uint8_t result, const geometry_msgs::msg::TwistStamped * command)
 {
+  try {
+    publishTraceUnguarded(result, command);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(logger_, "MPPI trace not published: %s", e.what());
+  } catch (...) {
+    RCLCPP_WARN(logger_, "MPPI trace not published");
+  }
+}
+
+void Optimizer::publishTraceUnguarded(
+  uint8_t result, const geometry_msgs::msg::TwistStamped * command)
+{
   using nav2_critics_msgs::msg::MppiCycle;
   auto node = parent_.lock();
   if (!node) {return;}
@@ -1020,7 +1056,7 @@ void Optimizer::publishTrace(
   const size_t batch = state_.cvx.shape(0);
   const size_t steps = state_.cvx.shape(1);
   std::vector<int32_t> rollout_first;
-  int32_t clear_unshifted = -1, pass_final = -1, best_rank = -1, cheapest_first = -1;
+  int32_t clear_unshifted = -1, pass_final = -1, best_rank = -1, cheapest_first = -3;
   if (rejected && batch > 0 && steps == settings_.time_steps &&
     trace_total_costs_.size() == batch)
   {
@@ -1090,7 +1126,7 @@ void Optimizer::publishTrace(
     m->rollouts_clear_unshifted = clear_unshifted;
     m->rollouts_pass_final_check = pass_final;
     m->best_passing_rollout_rank = best_rank;
-    m->cheapest_rollout_final_collision = rejected ? cheapest_first : -1;
+    m->cheapest_rollout_final_collision = cheapest_first;
     trace_cycle_pub_->publish(std::move(m));
   }
 

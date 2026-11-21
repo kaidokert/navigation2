@@ -257,7 +257,7 @@ protected:
    */
   struct CollisionReport
   {
-    int first_index{-2};
+    int first_index{-4};
     double cell_x{std::numeric_limits<double>::quiet_NaN()};
     double cell_y{std::numeric_limits<double>::quiet_NaN()};
     uint8_t cell_cost{0};
@@ -279,6 +279,7 @@ protected:
    * FollowPath.trace_rejections; both default false). Read-only with respect to control.
    */
   void publishTrace(uint8_t result, const geometry_msgs::msg::TwistStamped * command);
+  void publishTraceUnguarded(uint8_t result, const geometry_msgs::msg::TwistStamped * command);
 
   /**
    * @brief Apply final constraints and veto colliding output before conversion.

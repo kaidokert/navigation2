@@ -31,7 +31,9 @@ uint8 result
 float64 cmd_vx                    # command returned (0 when rejected)
 float64 cmd_wz
 # Final check detail (the production check: shifted when shift_control_sequence, measured speed first)
-int32 first_collision_index       # -2 none, -1 current pose, else forecast index 0..time_steps
+int32 first_collision_index       # -2 passes, -1 current pose, 0..time_steps forecast index,
+                                  # -4 rejected before any pose was tested (non-finite input,
+                                  # degenerate pose, footprint/radius unusable)
 float64 collision_cell_x          # world centre of the first lethal / unknown / off-map cell, NaN if none
 float64 collision_cell_y
 uint8 collision_cell_cost
@@ -43,7 +45,8 @@ int32 smooth_unshifted_first_collision  # smoothed mean, no shift
 int32 smooth_shifted_first_collision    # smoothed mean, production shift, before the final constraint pass
 # Batch summary of the last iteration
 uint32 rollouts
+# The four fields below need trace_rejections (rollout costs); else -1 / -3.
 int32 rollouts_clear_unshifted          # rejected cycles only, else -1: rollouts passing the check without the shift
 int32 rollouts_pass_final_check         # rejected cycles only, else -1: rollouts passing the production (shifted) check
 int32 best_passing_rollout_rank         # rejected cycles only, else -1: rank by total cost of the cheapest passing rollout
-int32 cheapest_rollout_final_collision  # rejected cycles only: production-check first collision of the cheapest rollout
+int32 cheapest_rollout_final_collision  # rejected cycles only, else -3: production-check first collision of the cheapest rollout
