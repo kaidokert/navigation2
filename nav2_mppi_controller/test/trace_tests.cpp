@@ -104,6 +104,7 @@ public:
     control_sequence_.wz.fill(wz);
   }
   const auto & tape() const {return control_sequence_;}
+  int fallbackRollouts() const {return final_check_fallback_rollouts_;}
   const auto & history() const {return control_history_;}
   bool productionShift() const {return settings_.shift_control_sequence;}
   bool checkWith(const mppi::models::ControlSequence & s, bool shift, CollisionReport * r) const
@@ -193,7 +194,7 @@ public:
     if (collapse_interval >= 0.0) {
       p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", collapse_interval));
     }
-    if (fallback > 0) {
+    if (fallback != 0) {
       p.push_back(rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", fallback));
     }
     if (!critics_params) {
@@ -428,7 +429,7 @@ TEST_F(TraceTest, FallbackCycleIsRecordedWithItsRankAndDumpedAsARejectedMean)
   const auto & c = sink.cycles[0];
   const auto & d = sink.dumps[0];
   EXPECT_EQ(c.result, MppiCycle::RESULT_ACCEPTED_FALLBACK);
-  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_REJECTED);
+  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_FALLBACK);
   EXPECT_EQ(c.cycle, d.cycle);
   // The record describes the rejected mean ...
   EXPECT_GE(c.first_collision_index, 1);
@@ -449,6 +450,23 @@ TEST_F(TraceTest, FallbackCycleIsRecordedWithItsRankAndDumpedAsARejectedMean)
   ASSERT_GT(c.rollouts_pass_final_check, 0);
   EXPECT_GE(c.fallback_rollout_rank, 0);
   EXPECT_LT(c.fallback_rollout_rank, 64);
+}
+
+TEST_F(TraceTest, FallbackIsOffByDefaultReadOnlyAndCapped)
+{
+  struct Case {std::string tag; int set; int want;};
+  for (const auto & c : std::vector<Case>{{"fb_default", 0, 0}, {"fb_neg", -5, 0},
+      {"fb_some", 16, 16}, {"fb_big", 1000, 64}})
+  {
+    auto n = node(c.tag, false, false, 0.0, -1.0, c.set);
+    mppi::ParametersHandler params(n);
+    TraceOptimizer opt;
+    opt.configure(n, cm, &params, false);
+    EXPECT_EQ(opt.fallbackRollouts(), c.want) << c.tag;
+    if (c.set == 0) {
+      EXPECT_EQ(n->get_parameter("FollowPath.final_check_fallback_rollouts").as_int(), 0);
+    }
+  }
 }
 
 TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)

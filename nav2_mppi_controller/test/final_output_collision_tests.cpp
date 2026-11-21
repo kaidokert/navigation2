@@ -59,6 +59,10 @@ public:
     control_sequence_.wz.fill(wz);
   }
   bool clear() {return controlSequenceCollisionFree();}
+  bool clearWith(const mppi::models::ControlSequence & s, bool shift)
+  {
+    return sequenceCollisionFree(s, shift, nullptr);
+  }
   auto emit() {return getValidatedControlFromSequenceAsTwist(builtin_interfaces::msg::Time{});}
   void smooth() {mppi::utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);}
   // Sampled rollouts of the last iteration: one constant (vx, wz) row each, with its total cost.
@@ -372,7 +376,9 @@ TEST_F(FallbackTest, NonFiniteCostsAreNeverTried)
 {
   opt.final_check_fallback_rollouts_ = 3;
   // the only rollout that would pass has a NaN (or infinite) cost: nothing is emitted
-  for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  for (float bad : {nan, inf}) {
     opt.sequence(0.3f);
     opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.01f, 1.0f}}, {{0.3f, -0.6f, bad}}});
     EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
@@ -388,11 +394,65 @@ TEST_F(FallbackTest, NonFiniteCostsAreNeverTried)
 TEST_F(FallbackTest, TheSameConstraintPassAppliesToTheRollout)
 {
   opt.final_check_fallback_rollouts_ = 3;
-  // the right curve is sampled above vx_max: it is clipped like the mean would be
+  // The right curve is sampled at vx 0.9 > vx_max 0.5. As sampled (R = 1.5 m, 2.25 m of arc) it
+  // runs into the obstacle at (1.40, -0.96); clipped like the mean (R = 0.83 m, 1.25 m of arc)
+  // it stays clear. So it passes only if the constraint pass runs before the check.
+  obstacle(1.398, -0.956);
   opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.9f, -0.6f, 1.0f}}});
+  mppi::models::ControlSequence raw;
+  raw.reset(opt.settings_.time_steps);
+  raw.vx.fill(0.9f);
+  raw.wz.fill(-0.6f);
+  const auto keep = opt.control_sequence_;
+  opt.control_sequence_ = raw;
+  EXPECT_FALSE(opt.clear()) << "the unclipped rollout must collide for this test to mean anything";
+  opt.control_sequence_ = keep;
   const auto cmd = opt.emit();
   EXPECT_FLOAT_EQ(cmd.twist.linear.x, opt.settings_.constraints.vx_max);
   EXPECT_FLOAT_EQ(cmd.twist.angular.z, -0.6f);
+}
+
+TEST_F(FallbackTest, MoreTriesThanRolloutsStopsAtTheBatch)
+{
+  opt.final_check_fallback_rollouts_ = 64;
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, 0.01f, 1.0f}}});  // neither passes
+  EXPECT_THROW(opt.emit(), nav2_core::NoValidControl);
+  opt.sequence(0.3f);
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, -0.6f, 1.0f}}});
+  EXPECT_FLOAT_EQ(opt.emit().twist.angular.z, -0.6f);
+  EXPECT_EQ(opt.fallback_rank_, 1);
+}
+
+TEST_F(FinalOutputTest, FallbackWithShiftEmitsTheCheckedSlot)
+{
+  // Production shifts the sequence: the command is slot 1 and the check starts there. The
+  // rollout's slot 0 reverses into an obstacle just behind the robot and slots 1.. curve away
+  // forward, so it passes only the shifted check and its emitted command shows the slot.
+  opt.configure(cm, true);
+  opt.state_.speed.linear.x = 0.0;
+  obstacle(0.8, 0.0);
+  // a short row of cells behind the robot: the fixture's padded rear edge (-0.168) starts clear of
+  // it, and the check walks the footprint perimeter, so a reversing edge must land on one of them
+  for (double x = -0.19; x > -0.30; x -= 0.02) {
+    obstacle(x, 0.0);
+  }
+  opt.final_check_fallback_rollouts_ = 2;
+  opt.sequence(0.3f);
+  opt.rollouts({{{0.3f, 0.0f, 0.0f}}, {{0.3f, -0.6f, 1.0f}}});
+  opt.state_.cvx(1, 0) = -0.5f;
+  opt.state_.cwz(1, 0) = 0.0f;
+  mppi::models::ControlSequence row;
+  row.reset(opt.settings_.time_steps);
+  for (size_t j = 0; j < opt.settings_.time_steps; ++j) {
+    row.vx(j) = opt.state_.cvx(1, j);
+    row.wz(j) = opt.state_.cwz(1, j);
+  }
+  ASSERT_TRUE(opt.clearWith(row, true)) << "shifted: slots 1.. curve forward, clear";
+  ASSERT_FALSE(opt.clearWith(row, false)) << "unshifted: slot 0 reverses into the obstacle";
+  const auto cmd = opt.emit();
+  EXPECT_FLOAT_EQ(cmd.twist.linear.x, 0.3f);
+  EXPECT_FLOAT_EQ(cmd.twist.angular.z, -0.6f);
+  EXPECT_EQ(opt.fallback_rank_, 1);
 }
 }  // namespace
 

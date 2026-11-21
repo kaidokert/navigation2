@@ -364,7 +364,9 @@ protected:
   // of the last iteration's sampled rollouts, cheapest first, under the same constraints and the
   // same final check, and emit the first that passes instead of stopping.
   int final_check_fallback_rollouts_{0};
-  int fallback_rank_{-1};  // rank by cost of the rollout emitted by the fallback this cycle, else -1
+  static constexpr int kMaxFallbackRollouts = 64;  // GENERIC bound on final checks per cycle
+  int fallback_rank_{-1};  // cost rank of the rollout the fallback emitted this cycle, else -1
+  rclcpp::Clock fallback_warn_clock_{RCL_STEADY_TIME};  // throttles the fallback warning
 
   // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
   bool trace_cycles_{false};

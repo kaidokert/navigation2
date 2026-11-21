@@ -141,7 +141,19 @@ void Optimizer::getParams()
   // GENERIC, default 0 = off (stock behaviour: a rejected mean stops the robot and resets the
   // sequence). N > 0: on a final-check rejection try the N cheapest sampled rollouts of the last
   // iteration, under the same constraints and final check, and emit the first that passes.
-  getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0);
+  // Read-only (a runtime change would reset the sequence mid-motion); each try is one final
+  // check on the control thread, so N is capped at kMaxFallbackRollouts.
+  getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0,
+    ParameterType::Static);
+  if (final_check_fallback_rollouts_ < 0) {
+    RCLCPP_WARN(logger_, "final_check_fallback_rollouts %d < 0: fallback off",
+      final_check_fallback_rollouts_);
+    final_check_fallback_rollouts_ = 0;
+  } else if (final_check_fallback_rollouts_ > kMaxFallbackRollouts) {
+    RCLCPP_WARN(logger_, "final_check_fallback_rollouts %d capped at %d",
+      final_check_fallback_rollouts_, kMaxFallbackRollouts);
+    final_check_fallback_rollouts_ = kMaxFallbackRollouts;
+  }
   // GENERIC diagnostics, default off: per-cycle record and rejection dump. Read-only.
   getParam(trace_cycles_, "trace_cycles", false, ParameterType::Static);
   getParam(trace_rejections_, "trace_rejections", false, ParameterType::Static);
@@ -955,6 +967,9 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
     }
     // The mean was finite but not collision-free: optionally emit a sampled rollout that passes.
     if (final_check_fallback_rollouts_ > 0 && tryRolloutFallback()) {
+      RCLCPP_WARN_THROTTLE(logger_, fallback_warn_clock_, 1000,
+        "Final MPPI control sequence is not collision-free; "
+        "emitting sampled rollout (cost rank %d)", fallback_rank_);
       const auto control = getControlFromSequenceAsTwist(stamp);
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
@@ -975,16 +990,18 @@ bool Optimizer::tryRolloutFallback()
   const size_t batch = state_.cvx.shape(0);
   const size_t steps = state_.cvx.shape(1);
   if (batch == 0 || steps != settings_.time_steps || costs_.size() != batch) {return false;}
+  const size_t tries = std::min(batch, static_cast<size_t>(final_check_fallback_rollouts_));
   std::vector<size_t> order(batch);
   for (size_t i = 0; i < batch; ++i) {
     order[i] = i;
   }
-  // Non-finite costs sort last and are never tried.
-  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-      return traceCostRanksBefore(costs_(a), costs_(b));
+  // Only the `tries` cheapest are needed; ties keep index order. Non-finite costs sort last and
+  // are never tried.
+  std::partial_sort(order.begin(), order.begin() + tries, order.end(), [&](size_t a, size_t b) {
+      const float ca = costs_(a), cb = costs_(b);
+      return traceCostRanksBefore(ca, cb) || (!traceCostRanksBefore(cb, ca) && a < b);
     });
   const models::ControlSequence rejected = control_sequence_;
-  const size_t tries = std::min(batch, static_cast<size_t>(final_check_fallback_rollouts_));
   for (size_t r = 0; r < tries; ++r) {
     const size_t i = order[r];
     if (!finiteValue(costs_(i))) {break;}
@@ -1123,7 +1140,7 @@ void Optimizer::publishTraceUnguarded(
   auto node = parent_.lock();
   if (!node) {return;}
   const bool shift = settings_.shift_control_sequence;
-  // A fallback cycle's mean was rejected too: it is dumped like a rejection (trigger REJECTED),
+  // A fallback cycle's mean was rejected too: it is dumped like a rejection (trigger FALLBACK),
   // with the emitted fallback command in cmd_vx / cmd_wz.
   const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION ||
     result == MppiCycle::RESULT_REJECTED_NONFINITE ||
@@ -1250,7 +1267,9 @@ void Optimizer::publishTraceUnguarded(
     auto d = std::make_unique<nav2_critics_msgs::msg::MppiRejection>();
     d->stamp = stamp;
     d->cycle = trace_cycle_;
-    d->trigger = rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
+    d->trigger = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ?
+      nav2_critics_msgs::msg::MppiRejection::TRIGGER_FALLBACK :
+      rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
       nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE;
     d->cmd_vx = command ? command->twist.linear.x : 0.0;
     d->cmd_wz = command ? command->twist.angular.z : 0.0;

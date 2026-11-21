@@ -32,7 +32,7 @@ uint8 RESULT_ACCEPTED_FALLBACK = 4    # final check rejected the mean; a sampled
                                       # check and was emitted (final_check_fallback_rollouts > 0).
                                       # final_* and the collision fields describe the rejected mean.
 uint8 result
-float64 cmd_vx                    # command returned (0 when rejected)
+float64 cmd_vx                    # command returned (0 when rejected; the emitted rollout's for RESULT_ACCEPTED_FALLBACK)
 float64 cmd_wz
 # Final check detail (the production check: shifted when shift_control_sequence, measured speed first)
 int32 first_collision_index       # -2 passes, -1 current pose, 0..time_steps forecast index,
