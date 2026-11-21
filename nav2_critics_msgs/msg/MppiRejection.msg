@@ -1,15 +1,17 @@
 # Full state of a dumped MPPI cycle, published when FollowPath.trace_rejections is true (default false):
 # every rejected, fallback or all-collide cycle; (trace_collapse_fraction > 0) collapsed accepted cycles, at most
 # one per trace_collapse_min_interval_s; (trace_stall_speed > 0) stalled accepted cycles, at most one per
-# trace_stall_min_interval_s. For ALL_COLLIDE the softmax weights are those of the failed batch. Bags recorded before `trigger` existed have no trigger: read as REJECTED.
+# trace_stall_min_interval_s. For ALL_COLLIDE every per-rollout field is from the first failed batch; critics
+# after the one that failed the batch did not run, so critic_names lists only those that scored it. Bags recorded before `trigger` existed have no trigger: read as REJECTED.
 builtin_interfaces/Time stamp
 uint64 cycle                      # matches MppiCycle.cycle
 uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle: collision or non-finite sequence (stop + reset)
 uint8 TRIGGER_COLLAPSE = 1        # accepted, but |cmd vx| < trace_collapse_fraction * max(|warm vx[0]|, |measured vx|)
 uint8 TRIGGER_FALLBACK = 2        # final check rejected the mean; a sampled rollout passed and was emitted
                                   # (final_check_fallback_rollouts > 0). Not rate limited, like REJECTED.
-uint8 TRIGGER_ALL_COLLIDE = 3     # every rollout collided (MppiCycle RESULT_ALL_ROLLOUTS_COLLIDE): the failed
-                                  # batch as scored, before the retry reset. Not rate limited.
+uint8 TRIGGER_ALL_COLLIDE = 3     # every rollout collided (MppiCycle RESULT_ALL_ROLLOUTS_COLLIDE): the first batch
+                                  # the critics failed (first failing iteration of the cycle's first attempt),
+                                  # with its critic costs, total costs and weights. Not rate limited.
 uint8 TRIGGER_STALL = 4           # accepted, |cmd vx| < trace_stall_speed while max(|warm vx[0]|, |measured vx|)
                                   # < trace_collapse_min_speed; one per trace_stall_min_interval_s.
 uint8 trigger

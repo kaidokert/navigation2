@@ -690,18 +690,23 @@ static void runStall(
 TEST_F(TraceTest, StallDumpFollowsItsRule)
 {
   // Expectations are written from the inputs and the published command, as for the collapse.
+  // cmd_below: the command is below the stall threshold, so only the reference test (warm start
+  // and measured speed vs the 0.05 floor) decides; a mutant that drops or loosens it dumps.
+  constexpr int kNone = -1;
   struct Case
   {
-    const char * ns; double collapse; double stall; float warm; double speed; bool expect;
+    const char * ns; double collapse; double stall; float warm; double speed; bool cmd_below;
+    int trigger;
   };
   for (const Case & k : {
-      Case{"stall_still", 0.0, 0.02, 0.0f, 0.0, true},
-      Case{"stall_off", 0.0, 0.0, 0.0f, 0.0, false},
-      Case{"stall_creeping_warm", 0.0, 0.02, 0.04f, 0.0, false},   // cmd follows warm 0.04 > 0.02
-      Case{"stall_wide", 0.0, 0.06, 0.04f, 0.0, true},             // same, threshold above it
-      Case{"stall_ref_at_floor", 0.0, 0.06, 0.05f, 0.0, false},    // ref 0.05 is not < 0.05
-      Case{"stall_moving", 0.0, 0.02, 0.0f, 0.25, false},          // measured 0.25: not a stall
-      Case{"stall_with_collapse", 0.5, 0.02, 0.0f, 0.0, true}})    // collapse needs ref >= 0.05
+      Case{"stall_still", 0.0, 0.02, 0.0f, 0.0, true, MppiRejection::TRIGGER_STALL},
+      Case{"stall_off", 0.0, 0.0, 0.0f, 0.0, false, kNone},
+      Case{"stall_creeping_warm", 0.0, 0.02, 0.04f, 0.0, false, kNone},  // cmd ~ warm 0.04
+      Case{"stall_wide", 0.0, 0.06, 0.04f, 0.0, true, MppiRejection::TRIGGER_STALL},
+      Case{"stall_ref_at_floor", 0.0, 0.5, 0.0f, 0.05, true, kNone},     // ref exactly 0.05
+      Case{"stall_moving", 0.0, 0.5, 0.0f, 0.25, true, kNone},           // measured 0.25
+      // A collapsing cycle under a stall threshold it also meets: dumped once, as a collapse.
+      Case{"stall_vs_collapse", 0.5, 0.5, 0.0f, 0.25, true, MppiRejection::TRIGGER_COLLAPSE}})
   {
     std::vector<MppiCycle> cycles;
     std::vector<MppiRejection> dumps;
@@ -709,13 +714,19 @@ TEST_F(TraceTest, StallDumpFollowsItsRule)
     ASSERT_EQ(cycles.size(), 1u) << k.ns;
     const auto & c = cycles[0];
     ASSERT_EQ(c.result, MppiCycle::RESULT_ACCEPTED) << k.ns;
+    ASSERT_EQ(std::abs(c.cmd_vx) < k.stall, k.cmd_below)
+      << k.ns << ": fixture no longer exercises its case, cmd " << c.cmd_vx;
     const double ref = std::max(std::abs(static_cast<double>(k.warm)), std::abs(k.speed));
-    const bool by_inputs = k.stall > 0.0 && ref < 0.05 && std::abs(c.cmd_vx) < k.stall;
-    ASSERT_EQ(by_inputs, k.expect) << k.ns << ": fixture no longer exercises its case, cmd "
-                                   << c.cmd_vx;
-    ASSERT_EQ(dumps.size(), k.expect ? 1u : 0u) << k.ns << " cmd " << c.cmd_vx;
-    if (!k.expect) {continue;}
-    EXPECT_EQ(dumps[0].trigger, MppiRejection::TRIGGER_STALL) << k.ns;
+    const bool stall_by_inputs = k.stall > 0.0 && ref < 0.05 && std::abs(c.cmd_vx) < k.stall;
+    const bool collapse_by_inputs = k.collapse > 0.0 && ref >= 0.05 &&
+      std::abs(c.cmd_vx) < k.collapse * ref;
+    const int by_inputs = stall_by_inputs ? MppiRejection::TRIGGER_STALL :
+      collapse_by_inputs ? MppiRejection::TRIGGER_COLLAPSE : kNone;
+    ASSERT_EQ(by_inputs, k.trigger) << k.ns << ": fixture no longer exercises its case, cmd "
+                                    << c.cmd_vx;
+    ASSERT_EQ(dumps.size(), k.trigger == kNone ? 0u : 1u) << k.ns << " cmd " << c.cmd_vx;
+    if (k.trigger == kNone) {continue;}
+    EXPECT_EQ(dumps[0].trigger, k.trigger) << k.ns;
     EXPECT_EQ(dumps[0].cycle, c.cycle);
     EXPECT_DOUBLE_EQ(dumps[0].cmd_vx, c.cmd_vx);
     EXPECT_EQ(dumps[0].rollout_vx.size(), static_cast<size_t>(dumps[0].batch_size) *
@@ -769,6 +780,16 @@ TEST_F(TraceTest, AllCollideCycleDumpsTheFailedBatch)
     d.rollout_vx.begin(), d.rollout_vx.end(), 0.0,
     [](double acc, float v) {return acc + std::abs(v);});
   EXPECT_GT(moving / d.rollout_vx.size(), 0.1) << "dumped rollouts are the zeroed reset state";
+  // The batch the critics scored: later iterations skip the critics once the batch failed, so a
+  // dump of their batch carries no critic costs. ObstaclesCritic charged every rollout.
+  ASSERT_FALSE(d.critic_names.empty()) << "dumped batch was never scored by the critics";
+  ASSERT_EQ(d.critic_costs.size(), d.critic_names.size() * d.batch_size);
+  const auto obs = std::find(d.critic_names.begin(), d.critic_names.end(), "ObstaclesCritic");
+  ASSERT_NE(obs, d.critic_names.end());
+  const size_t k_obs = static_cast<size_t>(obs - d.critic_names.begin());
+  for (size_t i = 0; i < d.batch_size; ++i) {
+    EXPECT_GT(d.critic_costs[k_obs * d.batch_size + i], 0.0f) << "rollout " << i;
+  }
   for (size_t i = 0; i < d.batch_size; ++i) {
     EXPECT_NE(d.rollout_final_check_first_collision[i], -2) << "rollout " << i << " passes";
   }

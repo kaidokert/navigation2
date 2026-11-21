@@ -383,9 +383,13 @@ protected:
   double trace_stall_speed_{0.0};
   double trace_stall_min_interval_s_{1.0};
   std::optional<rclcpp::Time> trace_last_stall_dump_;
-  // Rollouts of the last batch whose critics failed it (all collide), kept for the
-  // RESULT_ALL_ROLLOUTS_COLLIDE dump: the retry reset() zeroes state_ before the trace runs.
+  // The batch the critics failed (all collide) in the first failing iteration of the cycle's
+  // first attempt, kept for the RESULT_ALL_ROLLOUTS_COLLIDE dump: later iterations skip the
+  // critics once the fail flag is set, and the retry reset() zeroes state_.
   xt::xtensor<float, 2> trace_fail_cvx_, trace_fail_cwz_, trace_fail_cvy_;
+  std::vector<std::string> trace_fail_critic_names_;
+  std::vector<xt::xtensor<float, 1>> trace_fail_critic_costs_;
+  xt::xtensor<float, 1> trace_fail_total_costs_, trace_fail_softmax_;
   uint64_t trace_cycle_{0};
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
     trace_cycle_pub_;
