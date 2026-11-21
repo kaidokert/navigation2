@@ -129,7 +129,9 @@ public:
 
 class TraceTest : public ::testing::Test
 {
-public:  // fixtures shared with the free helpers below
+  // Public: the fixtures are shared with the free helpers below.
+
+public:
   static void SetUpTestSuite()
   {
     cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("trace_map", "", "trace_map", true);
