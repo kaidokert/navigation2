@@ -835,7 +835,9 @@ bool Optimizer::sequenceCollisionFree(
         v.emplace_back(vx, vy);
       }
       std::vector<std::pair<size_t, size_t>> edges;
-      for (size_t k = 0; k + 1 < v.size(); ++k) {edges.emplace_back(k, k + 1);}
+      for (size_t k = 0; k + 1 < v.size(); ++k) {
+        edges.emplace_back(k, k + 1);
+      }
       edges.emplace_back(0, v.size() - 1);
       bool unknown = false;
       unsigned int ux = 0, uy = 0;
@@ -1080,7 +1082,9 @@ void Optimizer::publishTraceUnguarded(
       clear_unshifted += sequenceCollisionFree(one, false, nullptr) ? 1 : 0;
     }
     std::vector<size_t> order(batch);
-    for (size_t i = 0; i < batch; ++i) {order[i] = i;}
+    for (size_t i = 0; i < batch; ++i) {
+      order[i] = i;
+    }
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
         return trace_total_costs_(a) < trace_total_costs_(b);
       });

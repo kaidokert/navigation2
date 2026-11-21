@@ -341,7 +341,9 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   EXPECT_LT(passing, static_cast<int32_t>(d.batch_size));
   // Rank = position, by total cost (stable), of the first passing rollout.
   std::vector<size_t> order(d.batch_size);
-  for (size_t i = 0; i < order.size(); ++i) {order[i] = i;}
+  for (size_t i = 0; i < order.size(); ++i) {
+    order[i] = i;
+                                                          }
   std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
       return d.total_costs[a] < d.total_costs[b];
     });
@@ -446,10 +448,14 @@ IdentityCounts runIdentity(
     std::string w_off, w_on;
     try {
       c_off = off.evalControl(pose(x, y, yaw), speed, path, path.poses.back().pose, nullptr);
-    } catch (const nav2_core::NoValidControl & e) {t_off = true; w_off = e.what();}
+    } catch (const nav2_core::NoValidControl & e) {
+      t_off = true; w_off = e.what();
+    }
     try {
       c_on = on.evalControl(pose(x, y, yaw), speed, path, path.poses.back().pose, nullptr);
-    } catch (const nav2_core::NoValidControl & e) {t_on = true; w_on = e.what();}
+    } catch (const nav2_core::NoValidControl & e) {
+      t_on = true; w_on = e.what();
+    }
     EXPECT_EQ(t_off, t_on) << tag << " tick " << tick;
     EXPECT_EQ(w_off, w_on) << tag << " tick " << tick;
     (t_on ? k.rejected : k.accepted)++;
