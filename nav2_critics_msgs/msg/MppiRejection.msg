@@ -1,6 +1,11 @@
 # Full state of a rejected MPPI cycle, published when FollowPath.trace_rejections is true (default false).
 builtin_interfaces/Time stamp
 uint64 cycle                      # matches MppiCycle.cycle
+uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle
+uint8 TRIGGER_COLLAPSE = 1        # accepted, but |cmd vx| < trace_collapse_fraction * max(|warm vx[0]|, |measured vx|)
+uint8 trigger
+float64 cmd_vx                    # command sent (0 when rejected)
+float64 cmd_wz
 # The controller's costmap at the check (copied under the costmap lock)
 uint32 size_x
 uint32 size_y

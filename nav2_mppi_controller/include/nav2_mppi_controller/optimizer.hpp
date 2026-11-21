@@ -334,6 +334,8 @@ protected:
   // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
   bool trace_cycles_{false};
   bool trace_rejections_{false};
+  double trace_collapse_fraction_{0.0};
+  double trace_collapse_min_speed_{0.05};
   uint64_t trace_cycle_{0};
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
     trace_cycle_pub_;

@@ -163,7 +163,7 @@ protected:
     }
   }
   static rclcpp_lifecycle::LifecycleNode::SharedPtr node(
-    const std::string & name, bool trace, bool critics_params = true)
+    const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0)
   {
     rclcpp::NodeOptions options;
     std::vector<rclcpp::Parameter> p = {
@@ -181,6 +181,9 @@ protected:
       rclcpp::Parameter("FollowPath.AckermannConstraints.min_turning_r", 0.325),
       rclcpp::Parameter("FollowPath.trace_cycles", trace),
       rclcpp::Parameter("FollowPath.trace_rejections", trace)};
+    if (collapse > 0.0) {
+      p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_fraction", collapse));
+    }
     if (!critics_params) {
       // Critic-free fixtures: no control-cost term either, so the update is the plain
       // average of the frozen bank and a forced rejection stays forced.
@@ -296,6 +299,7 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   ASSERT_EQ(sink.dumps.size(), 1u);
   const auto & c = sink.cycles[0];
   const auto & d = sink.dumps[0];
+  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_REJECTED);
   EXPECT_EQ(c.result, MppiCycle::RESULT_REJECTED_COLLISION);
   EXPECT_EQ(c.cycle, d.cycle);
   EXPECT_EQ(c.first_collision_index, d.first_collision_index);
@@ -389,6 +393,68 @@ TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
   EXPECT_DOUBLE_EQ(sink.cycles[0].cmd_vx, cmd.twist.linear.x);
   EXPECT_DOUBLE_EQ(sink.cycles[0].cmd_wz, cmd.twist.angular.z);
   EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, -1);
+}
+
+// Accepted-cycle collapse dump: published exactly when |cmd vx| < fraction * max(|warm vx[0]|,
+// |measured vx|), with trigger COLLAPSE and the command it explains; never with the fraction at 0.
+TEST_F(TraceTest, CollapseDumpFollowsItsRule)
+{
+  const double f = 0.5;
+  auto runCollapse = [](
+    const std::string & ns, double fraction, float warm_vx, double speed_vx,
+    std::vector<MppiCycle> & cycles, std::vector<MppiRejection> & dumps) {
+      auto n = node(ns, true, false, fraction);
+      mppi::ParametersHandler params(n);
+      TraceOptimizer opt;
+      opt.configure(n, cm, &params, false);
+      Sink sink(ns);
+      waitForMatch(n, ns);
+      opt.warm(warm_vx, 0.0f);
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = speed_vx;
+      const auto path = straightPath(1.5);
+      opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+      sink.spin(1);
+      cycles = sink.cycles;
+      dumps = sink.dumps;
+    };
+  struct Case {const char * ns; double fraction; float warm; double speed; bool expect;};
+  // reset-like: zero warm start while rolling -> crawl command -> dump
+  // tracking: warm start at the measured speed -> no dump; fraction 0 -> never
+  for (const Case & k : {Case{"collapse_reset", f, 0.0f, 0.25, true},
+      Case{"collapse_tracking", f, 0.25f, 0.25, false},
+      Case{"collapse_off", 0.0, 0.0f, 0.25, false}})
+  {
+    std::vector<MppiCycle> cycles;
+    std::vector<MppiRejection> dumps;
+    runCollapse(k.ns, k.fraction, k.warm, k.speed, cycles, dumps);
+    ASSERT_EQ(cycles.size(), 1u) << k.ns;
+    const auto & c = cycles[0];
+    ASSERT_EQ(c.result, MppiCycle::RESULT_ACCEPTED) << k.ns;
+    ASSERT_FALSE(c.warm_vx.empty());
+    const double ref = std::max(std::abs(static_cast<double>(c.warm_vx[0])), std::abs(c.speed_vx));
+    const bool rule = k.fraction > 0.0 && ref >= 0.05 && std::abs(c.cmd_vx) < k.fraction * ref;
+    EXPECT_EQ(rule, k.expect) << k.ns << " cmd " << c.cmd_vx << " ref " << ref;
+    ASSERT_EQ(dumps.size(), rule ? 1u : 0u) << k.ns;
+    if (rule) {
+      const auto & d = dumps[0];
+      EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_COLLAPSE);
+      EXPECT_EQ(d.cycle, c.cycle);
+      EXPECT_DOUBLE_EQ(d.cmd_vx, c.cmd_vx);
+      EXPECT_DOUBLE_EQ(d.cmd_wz, c.cmd_wz);
+      EXPECT_EQ(d.costmap_hash, c.costmap_hash);
+      EXPECT_EQ(d.rollout_vx.size(), static_cast<size_t>(d.batch_size) * d.time_steps);
+      EXPECT_EQ(d.softmax_weights.size(), d.batch_size);
+      EXPECT_EQ(d.rollout_final_check_first_collision.size(), d.batch_size);
+      EXPECT_EQ(c.rollouts_pass_final_check, static_cast<int32_t>(d.batch_size));  // open space
+      // The dumped rollouts and weights reproduce the optimised mean's first control.
+      double mean = 0.0;
+      for (size_t i = 0; i < d.batch_size; ++i) {
+        mean += d.softmax_weights[i] * d.rollout_vx[i * d.time_steps];
+      }
+      EXPECT_NEAR(mean, c.opt_vx[0], 1e-4) << "softmax mean of rollouts != optimised vx[0]";
+    }
+  }
 }
 
 TEST_F(TraceTest, OffPublishesNothing)

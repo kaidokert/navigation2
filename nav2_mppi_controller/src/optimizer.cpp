@@ -141,6 +141,11 @@ void Optimizer::getParams()
   // GENERIC diagnostics, default off: per-cycle record and rejection dump. Read-only.
   getParam(trace_cycles_, "trace_cycles", false, ParameterType::Static);
   getParam(trace_rejections_, "trace_rejections", false, ParameterType::Static);
+  // GENERIC diagnostics, default off (0): with trace_rejections, also dump an accepted cycle whose
+  // command |vx| falls below this fraction of max(|warm-start vx[0]|, |measured vx|).
+  getParam(trace_collapse_fraction_, "trace_collapse_fraction", 0.0, ParameterType::Static);
+  // GENERIC: the collapse dump needs max(|warm vx[0]|, |measured vx|) at least this (m/s).
+  getParam(trace_collapse_min_speed_, "trace_collapse_min_speed", 0.05, ParameterType::Static);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -1038,8 +1043,19 @@ void Optimizer::publishTraceUnguarded(
   if (!node) {return;}
   const bool shift = settings_.shift_control_sequence;
   const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION;
+  // Collapse: an accepted command far below both the warm start and the measured speed.
+  bool collapse = false;
+  if (result == MppiCycle::RESULT_ACCEPTED && command && trace_collapse_fraction_ > 0.0 &&
+    trace_warm_.vx.size() > 0)
+  {
+    const double ref = std::max(
+      std::abs(static_cast<double>(trace_warm_.vx(0))), std::abs(state_.speed.linear.x));
+    collapse = ref >= trace_collapse_min_speed_ &&
+      std::abs(command->twist.linear.x) < trace_collapse_fraction_ * ref;
+  }
   const bool want_cycle = trace_cycle_pub_ && trace_cycle_pub_->is_activated();
-  const bool want_dump = rejected && trace_rejection_pub_ && trace_rejection_pub_->is_activated();
+  const bool want_dump = (rejected || collapse) && trace_rejection_pub_ &&
+    trace_rejection_pub_->is_activated();
   if (!want_cycle && !want_dump) {return;}
 
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
@@ -1059,7 +1075,7 @@ void Optimizer::publishTraceUnguarded(
   const size_t steps = state_.cvx.shape(1);
   std::vector<int32_t> rollout_first;
   int32_t clear_unshifted = -1, pass_final = -1, best_rank = -1, cheapest_first = -3;
-  if (rejected && batch > 0 && steps == settings_.time_steps &&
+  if (want_dump && batch > 0 && steps == settings_.time_steps &&
     trace_total_costs_.size() == batch)
   {
     rollout_first.assign(batch, -2);
@@ -1138,6 +1154,10 @@ void Optimizer::publishTraceUnguarded(
     auto d = std::make_unique<nav2_critics_msgs::msg::MppiRejection>();
     d->stamp = stamp;
     d->cycle = trace_cycle_;
+    d->trigger = rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
+      nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE;
+    d->cmd_vx = command ? command->twist.linear.x : 0.0;
+    d->cmd_wz = command ? command->twist.angular.z : 0.0;
     d->size_x = costmap_->getSizeInCellsX();
     d->size_y = costmap_->getSizeInCellsY();
     d->resolution = costmap_->getResolution();

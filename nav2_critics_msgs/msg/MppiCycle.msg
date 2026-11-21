@@ -46,7 +46,7 @@ int32 smooth_shifted_first_collision    # smoothed mean, production shift, befor
 # Batch summary of the last iteration
 uint32 rollouts
 # The four fields below need trace_rejections (rollout costs); else -1 / -3.
-int32 rollouts_clear_unshifted          # rejected cycles only, else -1: rollouts passing the check without the shift
-int32 rollouts_pass_final_check         # rejected cycles only, else -1: rollouts passing the production (shifted) check
-int32 best_passing_rollout_rank         # rejected cycles only, else -1: rank by total cost of the cheapest passing rollout
-int32 cheapest_rollout_final_collision  # rejected cycles only, else -3: production-check first collision of the cheapest rollout
+int32 rollouts_clear_unshifted          # dumped cycles only (rejected or collapse), else -1: rollouts passing the check without the shift
+int32 rollouts_pass_final_check         # dumped cycles only (rejected or collapse), else -1: rollouts passing the production (shifted) check
+int32 best_passing_rollout_rank         # dumped cycles only (rejected or collapse), else -1: rank by total cost of the cheapest passing rollout
+int32 cheapest_rollout_final_collision  # dumped cycles only (rejected or collapse), else -3: production-check first collision of the cheapest rollout
