@@ -1,4 +1,6 @@
-# Full state of a rejected MPPI cycle, published when FollowPath.trace_rejections is true (default false).
+# Full state of a dumped MPPI cycle, published when FollowPath.trace_rejections is true (default false):
+# every rejected cycle, and (trace_collapse_fraction > 0) collapsed accepted cycles, at most one per
+# trace_collapse_min_interval_s. Bags recorded before `trigger` existed have no trigger: read as REJECTED.
 builtin_interfaces/Time stamp
 uint64 cycle                      # matches MppiCycle.cycle
 uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle

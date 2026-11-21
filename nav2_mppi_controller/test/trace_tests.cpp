@@ -129,7 +129,7 @@ public:
 
 class TraceTest : public ::testing::Test
 {
-protected:
+public:  // fixtures shared with the free helpers below
   static void SetUpTestSuite()
   {
     cm = std::make_shared<nav2_costmap_2d::Costmap2DROS>("trace_map", "", "trace_map", true);
@@ -163,7 +163,8 @@ protected:
     }
   }
   static rclcpp_lifecycle::LifecycleNode::SharedPtr node(
-    const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0)
+    const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0,
+    double collapse_interval = -1.0)
   {
     rclcpp::NodeOptions options;
     std::vector<rclcpp::Parameter> p = {
@@ -183,6 +184,9 @@ protected:
       rclcpp::Parameter("FollowPath.trace_rejections", trace)};
     if (collapse > 0.0) {
       p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_fraction", collapse));
+    }
+    if (collapse_interval >= 0.0) {
+      p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", collapse_interval));
     }
     if (!critics_params) {
       // Critic-free fixtures: no control-cost term either, so the update is the plain
@@ -397,64 +401,133 @@ TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
 
 // Accepted-cycle collapse dump: published exactly when |cmd vx| < fraction * max(|warm vx[0]|,
 // |measured vx|), with trigger COLLAPSE and the command it explains; never with the fraction at 0.
+// One accepted cycle from a given warm start and measured speed; ticks > 1 repeat it (re-warmed).
+static void runCollapse(
+  TraceTest & t, const std::string & ns, bool critics, double fraction, double interval,
+  float warm_vx, double speed_vx, int ticks, std::vector<MppiCycle> & cycles,
+  std::vector<MppiRejection> & dumps)
+{
+  auto n = TraceTest::node(ns, true, critics, fraction, interval);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, t.cm, &params, critics);
+  Sink sink(ns);
+  waitForMatch(n, ns);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = speed_vx;
+  const auto path = TraceTest::straightPath(1.5);
+  for (int k = 0; k < ticks; ++k) {
+    opt.freezeNoise();
+    opt.warm(warm_vx, 0.0f);
+    opt.evalControl(TraceTest::pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+  }
+  sink.spin(ticks);
+  cycles = sink.cycles;
+  dumps = sink.dumps;
+}
+
 TEST_F(TraceTest, CollapseDumpFollowsItsRule)
 {
-  const double f = 0.5;
-  auto runCollapse = [](
-    const std::string & ns, double fraction, float warm_vx, double speed_vx,
-    std::vector<MppiCycle> & cycles, std::vector<MppiRejection> & dumps) {
-      auto n = node(ns, true, false, fraction);
-      mppi::ParametersHandler params(n);
-      TraceOptimizer opt;
-      opt.configure(n, cm, &params, false);
-      Sink sink(ns);
-      waitForMatch(n, ns);
-      opt.warm(warm_vx, 0.0f);
-      geometry_msgs::msg::Twist speed;
-      speed.linear.x = speed_vx;
-      const auto path = straightPath(1.5);
-      opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
-      sink.spin(1);
-      cycles = sink.cycles;
-      dumps = sink.dumps;
-    };
-  struct Case {const char * ns; double fraction; float warm; double speed; bool expect;};
-  // reset-like: zero warm start while rolling -> crawl command -> dump
-  // tracking: warm start at the measured speed -> no dump; fraction 0 -> never
-  for (const Case & k : {Case{"collapse_reset", f, 0.0f, 0.25, true},
-      Case{"collapse_tracking", f, 0.25f, 0.25, false},
-      Case{"collapse_off", 0.0, 0.0f, 0.25, false}})
+  // The expectation is written from the inputs (warm start and measured speed given here, the
+  // published command), never from the reference the code computed. Cases that only one
+  // reference can trigger tell warm-start from speed from optimised-vx mistakes apart.
+  struct Case
+  {
+    const char * ns; bool critics; double fraction; float warm; double speed; bool expect;
+  };
+  for (const Case & k : {
+      Case{"collapse_speed_ref", false, 0.5, 0.0f, 0.25, true},   // only the speed is >= min
+      Case{"collapse_warm_ref", false, 1.5, 0.25f, 0.0, true},    // only the warm start is
+      Case{"collapse_tracking", false, 0.5, 0.25f, 0.25, false},
+      Case{"collapse_off", false, 0.0, 0.0f, 0.25, false},
+      Case{"collapse_below_min", false, 1.5, 0.045f, 0.0, false},  // reference 0.045 < 0.05
+      Case{"collapse_above_min", false, 1.5, 0.06f, 0.0, true},
+      Case{"collapse_critics", true, 0.5, 0.0f, 0.25, true}})     // weights differ
   {
     std::vector<MppiCycle> cycles;
     std::vector<MppiRejection> dumps;
-    runCollapse(k.ns, k.fraction, k.warm, k.speed, cycles, dumps);
+    runCollapse(*this, k.ns, k.critics, k.fraction, -1.0, k.warm, k.speed, 1, cycles, dumps);
     ASSERT_EQ(cycles.size(), 1u) << k.ns;
     const auto & c = cycles[0];
     ASSERT_EQ(c.result, MppiCycle::RESULT_ACCEPTED) << k.ns;
-    ASSERT_FALSE(c.warm_vx.empty());
-    const double ref = std::max(std::abs(static_cast<double>(c.warm_vx[0])), std::abs(c.speed_vx));
-    const bool rule = k.fraction > 0.0 && ref >= 0.05 && std::abs(c.cmd_vx) < k.fraction * ref;
-    EXPECT_EQ(rule, k.expect) << k.ns << " cmd " << c.cmd_vx << " ref " << ref;
-    ASSERT_EQ(dumps.size(), rule ? 1u : 0u) << k.ns;
-    if (rule) {
-      const auto & d = dumps[0];
-      EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_COLLAPSE);
-      EXPECT_EQ(d.cycle, c.cycle);
-      EXPECT_DOUBLE_EQ(d.cmd_vx, c.cmd_vx);
-      EXPECT_DOUBLE_EQ(d.cmd_wz, c.cmd_wz);
-      EXPECT_EQ(d.costmap_hash, c.costmap_hash);
-      EXPECT_EQ(d.rollout_vx.size(), static_cast<size_t>(d.batch_size) * d.time_steps);
-      EXPECT_EQ(d.softmax_weights.size(), d.batch_size);
-      EXPECT_EQ(d.rollout_final_check_first_collision.size(), d.batch_size);
-      EXPECT_EQ(c.rollouts_pass_final_check, static_cast<int32_t>(d.batch_size));  // open space
-      // The dumped rollouts and weights reproduce the optimised mean's first control.
-      double mean = 0.0;
+    const double ref = std::max(std::abs(static_cast<double>(k.warm)), std::abs(k.speed));
+    const bool by_inputs = k.fraction > 0.0 && ref >= 0.05 && std::abs(c.cmd_vx) < k.fraction * ref;
+    ASSERT_EQ(by_inputs, k.expect) << k.ns << ": fixture no longer exercises its case, cmd "
+                                   << c.cmd_vx;
+    ASSERT_EQ(dumps.size(), k.expect ? 1u : 0u) << k.ns << " cmd " << c.cmd_vx;
+    if (!k.expect) {continue;}
+    const auto & d = dumps[0];
+    EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_COLLAPSE);
+    EXPECT_EQ(d.cycle, c.cycle);
+    EXPECT_DOUBLE_EQ(d.cmd_vx, c.cmd_vx);
+    EXPECT_DOUBLE_EQ(d.cmd_wz, c.cmd_wz);
+    EXPECT_EQ(d.costmap_hash, c.costmap_hash);
+    EXPECT_EQ(d.rollout_vx.size(), static_cast<size_t>(d.batch_size) * d.time_steps);
+    EXPECT_EQ(d.softmax_weights.size(), d.batch_size);
+    EXPECT_EQ(d.rollout_final_check_first_collision.size(), d.batch_size);
+    EXPECT_EQ(c.rollouts_pass_final_check, static_cast<int32_t>(d.batch_size));  // open space
+    // The dumped rollouts and weights reproduce the optimised mean's first control.
+    double mean = 0.0;
+    for (size_t i = 0; i < d.batch_size; ++i) {
+      mean += d.softmax_weights[i] * d.rollout_vx[i * d.time_steps];
+    }
+    EXPECT_NEAR(mean, c.opt_vx[0], 1e-4) << k.ns << ": softmax mean of rollouts != optimised vx[0]";
+    if (k.critics) {
+      // Unequal weights: a dump of another iteration's rollouts, or of weights in another
+      // order, would not reproduce the mean above.
+      double reversed = 0.0;
       for (size_t i = 0; i < d.batch_size; ++i) {
-        mean += d.softmax_weights[i] * d.rollout_vx[i * d.time_steps];
+        reversed += d.softmax_weights[d.batch_size - 1 - i] * d.rollout_vx[i * d.time_steps];
       }
-      EXPECT_NEAR(mean, c.opt_vx[0], 1e-4) << "softmax mean of rollouts != optimised vx[0]";
+      EXPECT_GT(std::abs(reversed - c.opt_vx[0]), 3e-4)  // 3x the 1e-4 tolerance above
+        << "weights in another order also reproduce the mean; the check proves nothing";
     }
   }
+}
+
+TEST_F(TraceTest, CollapseDumpsAreRateLimited)
+{
+  std::vector<MppiCycle> cycles;
+  std::vector<MppiRejection> dumps;
+  // Three collapsing cycles inside a 60 s window: one dump (60 s so a slow build cannot flake).
+  runCollapse(*this, "collapse_rate", false, 0.5, 60.0, 0.0f, 0.25, 3, cycles, dumps);
+  ASSERT_EQ(cycles.size(), 3u);
+  EXPECT_EQ(dumps.size(), 1u);
+  // Interval 0: every collapsing cycle is dumped.
+  runCollapse(*this, "collapse_every", false, 0.5, 0.0, 0.0f, 0.25, 3, cycles, dumps);
+  ASSERT_EQ(cycles.size(), 3u);
+  EXPECT_EQ(dumps.size(), 3u);
+}
+
+TEST_F(TraceTest, RejectionInsideTheCollapseWindowIsStillDumped)
+{
+  // A collapse dump opens a 60 s window; a rejected cycle right after it is dumped anyway.
+  const std::string ns = "collapse_then_reject";
+  auto n = node(ns, true, false, 0.5, 60.0);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink(ns);
+  waitForMatch(n, ns);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.25;
+  const auto path = straightPath(1.5);
+  opt.freezeNoise();
+  opt.warm(0.0f, 0.0f);   // collapse: zero warm start while rolling at 0.25 m/s
+  opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+  wall(0.75, -0.5, 0.80, 0.5);  // as ForcedRejection...: a lethal wall across the line ahead
+  opt.stepNoise();
+  opt.warm(0.3f, 0.0f);
+  speed.linear.x = 0.3;
+  EXPECT_THROW(
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr),
+    nav2_core::NoValidControl);
+  sink.spin(2);
+  ASSERT_EQ(sink.cycles.size(), 2u);
+  ASSERT_EQ(sink.dumps.size(), 2u);
+  EXPECT_EQ(sink.dumps[0].trigger, MppiRejection::TRIGGER_COLLAPSE);
+  EXPECT_EQ(sink.dumps[1].trigger, MppiRejection::TRIGGER_REJECTED);
+  EXPECT_EQ(sink.dumps[1].cycle, sink.cycles[1].cycle);
 }
 
 TEST_F(TraceTest, OffPublishesNothing)
@@ -556,6 +629,20 @@ TEST_F(TraceTest, CommandsAndMemoryIdenticalWithTracingOnAndOff)
       node("ident_on_f", true, false), cm, path, mk);
   EXPECT_GT(a.accepted + b.accepted, 0);
   EXPECT_GT(b.final_rejected, 0);
+  // Collapse dumps on (fraction 1.5 flags nearly every accepted cycle, no rate limit): the
+  // per-rollout checks run on accepted cycles and must not change a command or memory word.
+  SetUp();
+  wall(1.10, 0.10, 1.15, 0.60);
+  Sink sink("ident_on_c");
+  const auto c = runIdentity(*this, "collapse", true, false, node("ident_off_c", false),
+      node("ident_on_c", true, true, 1.5, 0.0), cm, path, mk);
+  sink.spin(static_cast<size_t>(c.accepted + c.rejected));
+  EXPECT_GT(c.accepted, 0);
+  size_t collapse_dumps = 0;
+  for (const auto & d : sink.dumps) {
+    collapse_dumps += d.trigger == MppiRejection::TRIGGER_COLLAPSE ? 1 : 0;
+  }
+  EXPECT_GT(collapse_dumps, 0u) << "the collapse path never ran";
 }
 
 TEST_F(TraceTest, ProductionCheckIsTheReportingCheck)

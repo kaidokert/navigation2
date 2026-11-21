@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 
 // xtensor creates warnings that needs to be ignored as we are building with -Werror
 #pragma GCC diagnostic push
@@ -336,6 +337,8 @@ protected:
   bool trace_rejections_{false};
   double trace_collapse_fraction_{0.0};
   double trace_collapse_min_speed_{0.05};
+  double trace_collapse_min_interval_s_{0.5};
+  std::optional<rclcpp::Time> trace_last_collapse_dump_;
   uint64_t trace_cycle_{0};
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
     trace_cycle_pub_;

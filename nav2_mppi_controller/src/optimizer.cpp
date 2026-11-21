@@ -146,6 +146,10 @@ void Optimizer::getParams()
   getParam(trace_collapse_fraction_, "trace_collapse_fraction", 0.0, ParameterType::Static);
   // GENERIC: the collapse dump needs max(|warm vx[0]|, |measured vx|) at least this (m/s).
   getParam(trace_collapse_min_speed_, "trace_collapse_min_speed", 0.05, ParameterType::Static);
+  // GENERIC: at most one collapse dump per this interval (node clock, s). A collapse dump runs the
+  // per-rollout checks on the control thread; collapses come in runs (e.g. after a reset).
+  getParam(trace_collapse_min_interval_s_, "trace_collapse_min_interval_s", 0.5,
+    ParameterType::Static);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -1043,7 +1047,8 @@ void Optimizer::publishTraceUnguarded(
   if (!node) {return;}
   const bool shift = settings_.shift_control_sequence;
   const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION;
-  // Collapse: an accepted command far below both the warm start and the measured speed.
+  // Collapse: an accepted command far below the larger of the warm start and the measured speed,
+  // rate limited to one dump per trace_collapse_min_interval_s.
   bool collapse = false;
   if (result == MppiCycle::RESULT_ACCEPTED && command && trace_collapse_fraction_ > 0.0 &&
     trace_warm_.vx.size() > 0)
@@ -1052,6 +1057,17 @@ void Optimizer::publishTraceUnguarded(
       std::abs(static_cast<double>(trace_warm_.vx(0))), std::abs(state_.speed.linear.x));
     collapse = ref >= trace_collapse_min_speed_ &&
       std::abs(command->twist.linear.x) < trace_collapse_fraction_ * ref;
+    if (collapse) {
+      const rclcpp::Time now = node->get_clock()->now();
+      const double since = trace_last_collapse_dump_ ?
+        (now - *trace_last_collapse_dump_).seconds() : std::numeric_limits<double>::infinity();
+      // A clock that went backwards (sim reset) never suppresses the next dump.
+      if (since >= 0.0 && since < trace_collapse_min_interval_s_) {
+        collapse = false;
+      } else if (trace_rejection_pub_ && trace_rejection_pub_->is_activated()) {
+        trace_last_collapse_dump_ = now;
+      }
+    }
   }
   const bool want_cycle = trace_cycle_pub_ && trace_cycle_pub_->is_activated();
   const bool want_dump = (rejected || collapse) && trace_rejection_pub_ &&
