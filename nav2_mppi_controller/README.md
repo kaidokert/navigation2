@@ -56,6 +56,11 @@ This process is then repeated a number of times and returns a converged solution
  | gamma                      | double | Default: 0.015. A trade-off between smoothness (high) and low energy (low). This is a complex parameter that likely won't need to be changed from the default of `0.1` which works well for a broad range of cases. See Section 3D-2 in "Information Theoretic Model Predictive Control: Theory and Applications to Autonomous Driving" for detailed information.       |
  | visualize                  | bool   | Default: false. Publish visualization of trajectories, which can slow down the controller significantly. Use only for debugging.                                                                                                                                       |
  | retry_attempt_limit        | int    | Default 1. Number of attempts to find feasible trajectory on failure for soft-resets before reporting failure.                                                                                                                                                                                                       |
+ | trace_cycles               | bool   | Default false. GENERIC diagnostics: publish one `nav2_critics_msgs/MppiCycle` per control cycle on `~/mppi_cycles` (inputs used, control sequence at each stage, final-check result and first collision, stage checks). Read-only; commands are unchanged. |
+ | trace_rejections           | bool   | Default false. GENERIC diagnostics: on each final-check rejection publish `nav2_critics_msgs/MppiRejection` on `~/mppi_rejections` (the controller costmap, forecast, every rollout with per-critic costs, softmax weights and its own final-check result). About 200 KB per rejection. Read-only. |
+| trace_collapse_fraction    | double | Default 0 (off). GENERIC diagnostics: with `trace_rejections`, also dump an *accepted* cycle whose command `|vx|` is below this fraction of `max(|warm-start vx[0]|, |measured vx|)` (`MppiRejection.trigger = TRIGGER_COLLAPSE`). Read-only. |
+| trace_collapse_min_speed   | double | Default 0.05 m/s. GENERIC: the collapse dump needs `max(|warm vx[0]|, |measured vx|)` at least this. Read-only. |
+| trace_collapse_min_interval_s | double | Default 0.5 s. GENERIC: at most one collapse dump per this interval (node clock); collapses in between are not dumped. A collapse dump runs the per-rollout final checks on the control thread. Read-only. Set doubles with a decimal point (`0.5`, `1.0`): an integer override fails the parameter type. |
  | regenerate_noises          | bool   | Default false. Whether to regenerate noises each iteration or use single noise distribution computed on initialization and reset. Practically, this is found to work fine since the trajectories are being sampled stochastically from a normal distribution and reduces compute jittering at run-time due to thread wake-ups to resample normal distribution. |
 
 #### Trajectory Visualizer
@@ -291,6 +296,8 @@ controller_server:
 |---------------------------|----------------------------------|-----------------------------------------------------------------------|
 | `trajectories`            | `visualization_msgs/MarkerArray` | Randomly generated trajectories, including resulting control sequence |
 | `transformed_global_plan` | `nav_msgs/Path`                  | Part of global plan considered by local planner                       |
+| `mppi_cycles`             | `nav2_critics_msgs/MppiCycle`     | Per-cycle record, when `trace_cycles` is true                         |
+| `mppi_rejections`         | `nav2_critics_msgs/MppiRejection` | Rejected-cycle dump, when `trace_rejections` is true                  |
 
 ## Notes to Users
 

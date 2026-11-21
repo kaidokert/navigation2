@@ -9,6 +9,8 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CriticsStats.msg"
+  "msg/MppiCycle.msg"
+  "msg/MppiRejection.msg"
   "msg/TerminalApproachCheck.msg"
   "msg/TerminalApproachDiagnostics.msg"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs

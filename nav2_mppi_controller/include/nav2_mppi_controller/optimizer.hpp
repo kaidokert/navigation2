@@ -15,8 +15,11 @@
 #ifndef NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 #define NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 
+#include <limits>
 #include <string>
+#include <vector>
 #include <memory>
+#include <optional>
 
 // xtensor creates warnings that needs to be ignored as we are building with -Werror
 #pragma GCC diagnostic push
@@ -36,6 +39,8 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
+#include "nav2_critics_msgs/msg/mppi_cycle.hpp"
+#include "nav2_critics_msgs/msg/mppi_rejection.hpp"
 
 #include "nav2_mppi_controller/models/optimizer_settings.hpp"
 #include "nav2_mppi_controller/motion_models.hpp"
@@ -248,6 +253,36 @@ protected:
   bool controlSequenceCollisionFree() const;
 
   /**
+   * @brief Where a collision check failed (diagnostics only).
+   * first_index: -2 none, -1 the current pose, else forecast index 0..time_steps.
+   */
+  struct CollisionReport
+  {
+    int first_index{-4};
+    double cell_x{std::numeric_limits<double>::quiet_NaN()};
+    double cell_y{std::numeric_limits<double>::quiet_NaN()};
+    uint8_t cell_cost{0};
+    std::vector<double> forecast_x, forecast_y, forecast_yaw;
+  };
+
+  /**
+   * @brief The final collision check applied to any sequence. controlSequenceCollisionFree()
+   * is this check on control_sequence_ with the production shift.
+   * @param report When set, filled with the forecast and the first failing pose and cell.
+   */
+  bool sequenceCollisionFree(
+    const models::ControlSequence & sequence, bool shift, CollisionReport * report) const;
+
+  bool sequenceFinite(const models::ControlSequence & sequence) const;
+
+  /**
+   * @brief Publish the optional per-cycle record and rejection dump (FollowPath.trace_cycles,
+   * FollowPath.trace_rejections; both default false). Read-only with respect to control.
+   */
+  void publishTrace(uint8_t result, const geometry_msgs::msg::TwistStamped * command);
+  void publishTraceUnguarded(uint8_t result, const geometry_msgs::msg::TwistStamped * command);
+
+  /**
    * @brief Apply final constraints and veto colliding output before conversion.
    */
   geometry_msgs::msg::TwistStamped
@@ -296,6 +331,27 @@ protected:
   models::Path path_;
   geometry_msgs::msg::Pose goal_;
   xt::xtensor<float, 1> costs_;
+
+  // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
+  bool trace_cycles_{false};
+  bool trace_rejections_{false};
+  double trace_collapse_fraction_{0.0};
+  double trace_collapse_min_speed_{0.05};
+  double trace_collapse_min_interval_s_{0.5};
+  std::optional<rclcpp::Time> trace_last_collapse_dump_;
+  uint64_t trace_cycle_{0};
+  rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
+    trace_cycle_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiRejection>::SharedPtr
+    trace_rejection_pub_;
+  builtin_interfaces::msg::Time trace_plan_stamp_;
+  size_t trace_plan_size_{0};
+  nav_msgs::msg::Path trace_plan_;
+  models::ControlSequence trace_warm_, trace_opt_, trace_smooth_, trace_final_;
+  CollisionReport trace_report_;
+  bool trace_final_nonfinite_{false};
+  xt::xtensor<float, 1> trace_total_costs_;
+  xt::xtensor<float, 1> trace_softmax_;
 
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,
