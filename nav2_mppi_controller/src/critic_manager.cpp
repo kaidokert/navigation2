@@ -151,17 +151,27 @@ void CriticManager::evalTrajectoriesScores(
     per_critic_deltas.reserve(critic_names_.size());
   }
 
+  if (capture_critic_costs_) {
+    captured_names_.clear();
+    captured_costs_.clear();
+  }
+
   for (size_t i = 0; i < critics_.size(); ++i) {
     if (data.fail_flag) {
       break;
     }
 
     xt::xtensor<float, 1> costs_before;
-    if (publish_critics_stats_) {
+    if (publish_critics_stats_ || capture_critic_costs_) {
       costs_before = data.costs;
     }
 
     critics_[i]->score(data);
+
+    if (capture_critic_costs_) {
+      captured_names_.push_back(critic_names_[i]);
+      captured_costs_.push_back(xt::eval(data.costs - costs_before));
+    }
 
     if (publish_critics_stats_) {
       auto delta = data.costs - costs_before;
