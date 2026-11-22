@@ -15,6 +15,7 @@
 #ifndef NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 #define NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 
+#include <chrono>
 #include <limits>
 #include <cmath>
 #include <cstring>
@@ -380,6 +381,16 @@ protected:
   double trace_collapse_min_speed_{0.05};
   double trace_collapse_min_interval_s_{0.5};
   std::optional<rclcpp::Time> trace_last_collapse_dump_;
+  double trace_stall_speed_{0.0};
+  double trace_stall_min_interval_s_{1.0};
+  std::optional<rclcpp::Time> trace_last_stall_dump_;
+  // The batch the critics failed (all collide) in the first failing iteration of the cycle's
+  // first attempt, kept for the RESULT_ALL_ROLLOUTS_COLLIDE dump: later iterations skip the
+  // critics once the fail flag is set, and the retry reset() zeroes state_.
+  xt::xtensor<float, 2> trace_fail_cvx_, trace_fail_cwz_, trace_fail_cvy_;
+  std::vector<std::string> trace_fail_critic_names_;
+  std::vector<xt::xtensor<float, 1>> trace_fail_critic_costs_;
+  xt::xtensor<float, 1> trace_fail_total_costs_, trace_fail_softmax_;
   uint64_t trace_cycle_{0};
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::MppiCycle>::SharedPtr
     trace_cycle_pub_;
@@ -391,6 +402,10 @@ protected:
   models::ControlSequence trace_warm_, trace_opt_, trace_smooth_, trace_final_;
   CollisionReport trace_report_;
   bool trace_final_nonfinite_{false};
+  // Steady-clock start of the current evalControl, and the optimize/fallback loop duration
+  // (s, -1 = not reached).
+  std::chrono::steady_clock::time_point trace_eval_start_{};
+  double trace_optimize_wall_s_{-1.0};
   xt::xtensor<float, 1> trace_total_costs_;
   xt::xtensor<float, 1> trace_softmax_;
 

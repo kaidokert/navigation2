@@ -179,7 +179,8 @@ public:
   }
   static rclcpp_lifecycle::LifecycleNode::SharedPtr node(
     const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0,
-    double collapse_interval = -1.0, int fallback = 0)
+    double collapse_interval = -1.0, int fallback = 0, double stall = 0.0,
+    double stall_interval = -1.0)
   {
     rclcpp::NodeOptions options;
     std::vector<rclcpp::Parameter> p = {
@@ -202,6 +203,12 @@ public:
     }
     if (collapse_interval >= 0.0) {
       p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", collapse_interval));
+    }
+    if (stall > 0.0) {
+      p.push_back(rclcpp::Parameter("FollowPath.trace_stall_speed", stall));
+    }
+    if (stall_interval >= 0.0) {
+      p.push_back(rclcpp::Parameter("FollowPath.trace_stall_min_interval_s", stall_interval));
     }
     if (fallback != 0) {
       p.push_back(rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", fallback));
@@ -495,6 +502,16 @@ TEST_F(TraceTest, FallbackIsOffByDefaultReadOnlyAndCapped)
     const auto set = n->set_parameter(
       rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", 8));
     EXPECT_FALSE(set.successful) << c.tag;
+    for (const auto & p : {rclcpp::Parameter("FollowPath.trace_cycles", true),
+        rclcpp::Parameter("FollowPath.trace_rejections", true),
+        rclcpp::Parameter("FollowPath.trace_collapse_fraction", 0.5),
+        rclcpp::Parameter("FollowPath.trace_collapse_min_speed", 0.1),
+        rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", 2.0),
+        rclcpp::Parameter("FollowPath.trace_stall_speed", 0.01),
+        rclcpp::Parameter("FollowPath.trace_stall_min_interval_s", 2.0)})
+    {
+      EXPECT_FALSE(n->set_parameter(p).successful) << c.tag << " " << p.get_name();
+    }
     EXPECT_EQ(opt.fallbackRollouts(), c.want) << c.tag;
   }
 }
@@ -520,6 +537,38 @@ TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
   EXPECT_DOUBLE_EQ(sink.cycles[0].cmd_vx, cmd.twist.linear.x);
   EXPECT_DOUBLE_EQ(sink.cycles[0].cmd_wz, cmd.twist.angular.z);
   EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, -1);
+}
+
+// Wall-clock timing: each cycle record carries its own steady-clock durations, measured from the
+// entry of that evalControl call: 0 < optimize_wall_s <= eval_wall_s <= the caller's own timing
+// of the call. A start time not reset per call would exceed the caller's timing on the second
+// call.
+TEST_F(TraceTest, CycleRecordCarriesItsOwnWallClockTiming)
+{
+  auto n = node("trace_timing", true);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, true);
+  Sink sink("trace_timing");
+  waitForMatch(n, "trace_timing");
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  std::vector<double> outer;
+  for (int i = 0; i < 2; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+    outer.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (i == 0) {std::this_thread::sleep_for(std::chrono::milliseconds(200));}
+  }
+  sink.spin(2);
+  ASSERT_EQ(sink.cycles.size(), 2u);
+  for (size_t i = 0; i < 2; ++i) {
+    const auto & c = sink.cycles[i];
+    EXPECT_GT(c.optimize_wall_s, 0.0);
+    EXPECT_LE(c.optimize_wall_s, c.eval_wall_s);
+    EXPECT_LE(c.eval_wall_s, outer[i]);
+  }
 }
 
 // Accepted-cycle collapse dump: published exactly when |cmd vx| < fraction * max(|warm vx[0]|,
@@ -651,6 +700,143 @@ TEST_F(TraceTest, RejectionInsideTheCollapseWindowIsStillDumped)
   EXPECT_EQ(sink.dumps[0].trigger, MppiRejection::TRIGGER_COLLAPSE);
   EXPECT_EQ(sink.dumps[1].trigger, MppiRejection::TRIGGER_REJECTED);
   EXPECT_EQ(sink.dumps[1].cycle, sink.cycles[1].cycle);
+}
+
+// Stall dump: an accepted cycle with |cmd vx| < trace_stall_speed while max(|warm vx[0]|,
+// |measured vx|) < trace_collapse_min_speed (0.05). One cycle per run, re-warmed per tick.
+static void runStall(
+  TraceTest & t, const std::string & ns, double collapse, double stall, double interval,
+  float warm_vx, double speed_vx, int ticks, std::vector<MppiCycle> & cycles,
+  std::vector<MppiRejection> & dumps)
+{
+  auto n = TraceTest::node(ns, true, false, collapse, -1.0, 0, stall, interval);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, t.cm, &params, false);
+  Sink sink(ns);
+  waitForMatch(n, ns);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = speed_vx;
+  const auto path = TraceTest::straightPath(1.5);
+  for (int k = 0; k < ticks; ++k) {
+    opt.freezeNoise();
+    opt.warm(warm_vx, 0.0f);
+    opt.evalControl(TraceTest::pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+  }
+  sink.spin(ticks);
+  cycles = sink.cycles;
+  dumps = sink.dumps;
+}
+
+TEST_F(TraceTest, StallDumpFollowsItsRule)
+{
+  // Expectations are written from the inputs and the published command, as for the collapse.
+  // cmd_below: the command is below the stall threshold, so only the reference test (warm start
+  // and measured speed vs the 0.05 floor) decides; a mutant that drops or loosens it dumps.
+  constexpr int kNone = -1;
+  struct Case
+  {
+    const char * ns; double collapse; double stall; float warm; double speed; bool cmd_below;
+    int trigger;
+  };
+  for (const Case & k : {
+      Case{"stall_still", 0.0, 0.02, 0.0f, 0.0, true, MppiRejection::TRIGGER_STALL},
+      Case{"stall_off", 0.0, 0.0, 0.0f, 0.0, false, kNone},
+      Case{"stall_creeping_warm", 0.0, 0.02, 0.04f, 0.0, false, kNone},  // cmd ~ warm 0.04
+      Case{"stall_wide", 0.0, 0.06, 0.04f, 0.0, true, MppiRejection::TRIGGER_STALL},
+      Case{"stall_ref_at_floor", 0.0, 0.5, 0.0f, 0.05, true, kNone},     // ref exactly 0.05
+      Case{"stall_moving", 0.0, 0.5, 0.0f, 0.25, true, kNone},           // measured 0.25
+      // A collapsing cycle under a stall threshold it also meets: dumped once, as a collapse.
+      Case{"stall_vs_collapse", 0.5, 0.5, 0.0f, 0.25, true, MppiRejection::TRIGGER_COLLAPSE}})
+  {
+    std::vector<MppiCycle> cycles;
+    std::vector<MppiRejection> dumps;
+    runStall(*this, k.ns, k.collapse, k.stall, -1.0, k.warm, k.speed, 1, cycles, dumps);
+    ASSERT_EQ(cycles.size(), 1u) << k.ns;
+    const auto & c = cycles[0];
+    ASSERT_EQ(c.result, MppiCycle::RESULT_ACCEPTED) << k.ns;
+    ASSERT_EQ(std::abs(c.cmd_vx) < k.stall, k.cmd_below)
+      << k.ns << ": fixture no longer exercises its case, cmd " << c.cmd_vx;
+    const double ref = std::max(std::abs(static_cast<double>(k.warm)), std::abs(k.speed));
+    const bool stall_by_inputs = k.stall > 0.0 && ref < 0.05 && std::abs(c.cmd_vx) < k.stall;
+    const bool collapse_by_inputs = k.collapse > 0.0 && ref >= 0.05 &&
+      std::abs(c.cmd_vx) < k.collapse * ref;
+    const int by_inputs = stall_by_inputs ? MppiRejection::TRIGGER_STALL :
+      collapse_by_inputs ? MppiRejection::TRIGGER_COLLAPSE : kNone;
+    ASSERT_EQ(by_inputs, k.trigger) << k.ns << ": fixture no longer exercises its case, cmd "
+                                    << c.cmd_vx;
+    ASSERT_EQ(dumps.size(), k.trigger == kNone ? 0u : 1u) << k.ns << " cmd " << c.cmd_vx;
+    if (k.trigger == kNone) {continue;}
+    EXPECT_EQ(dumps[0].trigger, k.trigger) << k.ns;
+    EXPECT_EQ(dumps[0].cycle, c.cycle);
+    EXPECT_DOUBLE_EQ(dumps[0].cmd_vx, c.cmd_vx);
+    EXPECT_EQ(dumps[0].rollout_vx.size(), static_cast<size_t>(dumps[0].batch_size) *
+      dumps[0].time_steps);
+  }
+}
+
+TEST_F(TraceTest, StallDumpsAreRateLimited)
+{
+  std::vector<MppiCycle> cycles;
+  std::vector<MppiRejection> dumps;
+  runStall(*this, "stall_rate", 0.0, 0.02, 60.0, 0.0f, 0.0, 3, cycles, dumps);
+  ASSERT_EQ(cycles.size(), 3u);
+  EXPECT_EQ(dumps.size(), 1u);
+  runStall(*this, "stall_every", 0.0, 0.02, 0.0, 0.0f, 0.0, 3, cycles, dumps);
+  ASSERT_EQ(cycles.size(), 3u);
+  EXPECT_EQ(dumps.size(), 3u);
+}
+
+TEST_F(TraceTest, AllCollideCycleDumpsTheFailedBatch)
+{
+  // The robot stands inside a lethal block: every rollout collides, the critics fail the batch,
+  // retry_attempt_limit 0 gives up. The dump must carry the batch that was scored, not the
+  // zeroed state the retry reset leaves behind.
+  wall(-0.3, -0.4, 0.5, 0.4);
+  const std::string ns = "all_collide";
+  auto n = node(ns, true, true);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, true);
+  Sink sink(ns);
+  waitForMatch(n, ns);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  opt.freezeNoise();
+  opt.warm(0.2f, 0.0f);
+  EXPECT_THROW(
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr),
+    nav2_core::NoValidControl);
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  EXPECT_EQ(sink.cycles[0].result, MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE);
+  EXPECT_GT(sink.cycles[0].optimize_wall_s, 0.0);
+  EXPECT_LE(sink.cycles[0].optimize_wall_s, sink.cycles[0].eval_wall_s);
+  ASSERT_EQ(sink.dumps.size(), 1u);
+  const auto & d = sink.dumps[0];
+  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_ALL_COLLIDE);
+  EXPECT_EQ(d.cycle, sink.cycles[0].cycle);
+  ASSERT_EQ(d.rollout_vx.size(), static_cast<size_t>(d.batch_size) * d.time_steps);
+  ASSERT_EQ(d.total_costs.size(), d.batch_size);
+  const double moving = std::accumulate(
+    d.rollout_vx.begin(), d.rollout_vx.end(), 0.0,
+    [](double acc, float v) {return acc + std::abs(v);});
+  EXPECT_GT(moving / d.rollout_vx.size(), 0.1) << "dumped rollouts are the zeroed reset state";
+  // The batch the critics scored: later iterations skip the critics once the batch failed, so a
+  // dump of their batch carries no critic costs. ObstaclesCritic charged every rollout.
+  ASSERT_FALSE(d.critic_names.empty()) << "dumped batch was never scored by the critics";
+  ASSERT_EQ(d.critic_costs.size(), d.critic_names.size() * d.batch_size);
+  const auto obs = std::find(d.critic_names.begin(), d.critic_names.end(), "ObstaclesCritic");
+  ASSERT_NE(obs, d.critic_names.end());
+  const size_t k_obs = static_cast<size_t>(obs - d.critic_names.begin());
+  for (size_t i = 0; i < d.batch_size; ++i) {
+    EXPECT_GT(d.critic_costs[k_obs * d.batch_size + i], 0.0f) << "rollout " << i;
+  }
+  for (size_t i = 0; i < d.batch_size; ++i) {
+    EXPECT_NE(d.rollout_final_check_first_collision[i], -2) << "rollout " << i << " passes";
+  }
+  EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, 0);
 }
 
 TEST_F(TraceTest, OffPublishesNothing)

@@ -143,15 +143,25 @@ void Optimizer::getParams()
   // iteration, under the same constraints and final check, and emit the first that passes.
   // Read-only (a runtime change would reset the sequence mid-motion); each try is one final
   // check on the control thread, so N is capped at kMaxFallbackRollouts.
+  // These parameters are declared read-only first: a Static MPPI parameter would otherwise
+  // accept a runtime set, keep the configure-time value and still run the reset callback.
   {
-    // Declared read-only first: a Static MPPI parameter would otherwise accept a runtime set
-    // and silently keep the configure-time value.
     auto node = parent_.lock();
-    const std::string fallback_param = name_ + ".final_check_fallback_rollouts";
-    if (node && !node->has_parameter(fallback_param)) {
-      rcl_interfaces::msg::ParameterDescriptor descriptor;
-      descriptor.read_only = true;
-      node->declare_parameter(fallback_param, rclcpp::ParameterValue(0), descriptor);
+    const std::vector<std::pair<std::string, rclcpp::ParameterValue>> read_only = {
+      {"final_check_fallback_rollouts", rclcpp::ParameterValue(0)},
+      {"trace_cycles", rclcpp::ParameterValue(false)},
+      {"trace_rejections", rclcpp::ParameterValue(false)},
+      {"trace_collapse_fraction", rclcpp::ParameterValue(0.0)},
+      {"trace_collapse_min_speed", rclcpp::ParameterValue(0.05)},
+      {"trace_collapse_min_interval_s", rclcpp::ParameterValue(0.5)},
+      {"trace_stall_speed", rclcpp::ParameterValue(0.0)},
+      {"trace_stall_min_interval_s", rclcpp::ParameterValue(1.0)}};
+    for (const auto & [param, value] : read_only) {
+      if (node && !node->has_parameter(name_ + "." + param)) {
+        rcl_interfaces::msg::ParameterDescriptor descriptor;
+        descriptor.read_only = true;
+        node->declare_parameter(name_ + "." + param, value, descriptor);
+      }
     }
   }
   getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0,
@@ -177,6 +187,19 @@ void Optimizer::getParams()
   // per-rollout checks on the control thread; collapses come in runs (e.g. after a reset).
   getParam(trace_collapse_min_interval_s_, "trace_collapse_min_interval_s", 0.5,
     ParameterType::Static);
+  // GENERIC diagnostics, default 0 (off): with trace_rejections, also dump an accepted cycle that
+  // stands still: |cmd vx| below this (m/s) while max(|warm vx[0]|, |measured vx|) is below
+  // trace_collapse_min_speed (so a stall is never also a collapse). Read-only.
+  getParam(trace_stall_speed_, "trace_stall_speed", 0.0, ParameterType::Static);
+  // GENERIC: at most one stall dump per this interval (node clock, s).
+  getParam(trace_stall_min_interval_s_, "trace_stall_min_interval_s", 1.0, ParameterType::Static);
+  // A negative interval would disable the limit: both intervals are clamped at 0.
+  for (auto * interval : {&trace_collapse_min_interval_s_, &trace_stall_min_interval_s_}) {
+    if (*interval < 0.0) {
+      RCLCPP_WARN(logger_, "MPPI trace dump interval %.3f s < 0: using 0", *interval);
+      *interval = 0.0;
+    }
+  }
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -269,6 +292,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   const geometry_msgs::msg::Pose & goal,
   nav2_core::GoalChecker * goal_checker)
 {
+  trace_eval_start_ = std::chrono::steady_clock::now();
+  trace_optimize_wall_s_ = -1.0;
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
   fallback_rank_ = -1;
 
@@ -304,11 +329,17 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
     } while (fallback(critics_data_.fail_flag));
   } catch (const nav2_core::NoValidControl &) {
     if (tracing) {
+      trace_optimize_wall_s_ = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - trace_eval_start_).count();
       publishTrace(nav2_critics_msgs::msg::MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE, nullptr);
     }
     throw;
   }
-  if (tracing) {trace_opt_ = control_sequence_;}
+  if (tracing) {
+    trace_optimize_wall_s_ = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - trace_eval_start_).count();
+    trace_opt_ = control_sequence_;
+  }
 
   // [E] POST-OPTIMIZE (after softmax + accel constraints)
   if (diag && ts >= 5) {
@@ -369,6 +400,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
  */
 void Optimizer::optimize(bool diag)
 {
+  bool fail_kept = false;
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
     // Recentring changes each row's controls and rollout. Costs from an earlier
     // bank (including collision penalties) do not score this new trajectory.
@@ -408,6 +440,17 @@ void Optimizer::optimize(bool diag)
     }
 
     updateControlSequence(diag);
+    if (trace_rejections_ && critics_data_.fail_flag && !fail_kept && retry_attempt_counter_ == 0) {
+      // The first batch the critics failed, with its own costs and weights (diagnostics only).
+      trace_fail_cvx_ = state_.cvx;
+      trace_fail_cwz_ = state_.cwz;
+      trace_fail_cvy_ = state_.cvy;
+      trace_fail_critic_names_ = critic_manager_.capturedCriticNames();
+      trace_fail_critic_costs_ = critic_manager_.capturedCriticCosts();
+      trace_fail_total_costs_ = trace_total_costs_;
+      trace_fail_softmax_ = trace_softmax_;
+      fail_kept = true;
+    }
   }
 }
 
@@ -1158,9 +1201,18 @@ void Optimizer::publishTraceUnguarded(
   const bool shift = settings_.shift_control_sequence;
   // A fallback cycle's mean was rejected too: it is dumped like a rejection (trigger FALLBACK),
   // with the emitted fallback command in cmd_vx / cmd_wz.
+  // An all-collide cycle is dumped like a rejection too (trigger ALL_COLLIDE), with the failed
+  // batch kept by fallback() before its reset.
+  const bool all_collide = result == MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE;
   const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION ||
     result == MppiCycle::RESULT_REJECTED_NONFINITE ||
-    result == MppiCycle::RESULT_ACCEPTED_FALLBACK;
+    result == MppiCycle::RESULT_ACCEPTED_FALLBACK || all_collide;
+  // Kept only with trace_rejections; with trace_cycles alone the record keeps the old fields.
+  const bool use_fail = all_collide && trace_fail_cvx_.shape(0) > 0;
+  const auto & r_cvx = use_fail ? trace_fail_cvx_ : state_.cvx;
+  const auto & r_cwz = use_fail ? trace_fail_cwz_ : state_.cwz;
+  const auto & r_cvy = use_fail ? trace_fail_cvy_ : state_.cvy;
+  const auto & r_total = use_fail ? trace_fail_total_costs_ : trace_total_costs_;
   // Collapse: an accepted command far below the larger of the warm start and the measured speed,
   // rate limited to one dump per trace_collapse_min_interval_s.
   bool collapse = false;
@@ -1181,8 +1233,27 @@ void Optimizer::publishTraceUnguarded(
       }
     }
   }
+  // Stall: an accepted command below trace_stall_speed while neither the warm start nor the
+  // measured speed reaches the collapse floor, rate limited to one per trace_stall_min_interval_s.
+  bool stall = false;
+  if (result == MppiCycle::RESULT_ACCEPTED && command && trace_stall_speed_ > 0.0 &&
+    trace_warm_.vx.size() > 0)
+  {
+    const double ref = std::max(
+      std::abs(static_cast<double>(trace_warm_.vx(0))), std::abs(state_.speed.linear.x));
+    stall = ref < trace_collapse_min_speed_ &&
+      std::abs(command->twist.linear.x) < trace_stall_speed_;
+    if (stall) {
+      const rclcpp::Time now = node->get_clock()->now();
+      const double since = trace_last_stall_dump_ ?
+        (now - *trace_last_stall_dump_).seconds() : std::numeric_limits<double>::infinity();
+      if (since >= 0.0 && since < trace_stall_min_interval_s_) {
+        stall = false;
+      }
+    }
+  }
   const bool want_cycle = trace_cycle_pub_ && trace_cycle_pub_->is_activated();
-  const bool want_dump = (rejected || collapse) && trace_rejection_pub_ &&
+  const bool want_dump = (rejected || collapse || stall) && trace_rejection_pub_ &&
     trace_rejection_pub_->is_activated();
   if (!want_cycle && !want_dump) {return;}
 
@@ -1199,12 +1270,12 @@ void Optimizer::publishTraceUnguarded(
     };
 
   // Rejected cycles: run the production check on every rollout of the last iteration.
-  const size_t batch = state_.cvx.shape(0);
-  const size_t steps = state_.cvx.shape(1);
+  const size_t batch = r_cvx.shape(0);
+  const size_t steps = r_cvx.shape(1);
   std::vector<int32_t> rollout_first;
   int32_t clear_unshifted = -1, pass_final = -1, best_rank = -1, cheapest_first = -3;
   if (want_dump && batch > 0 && steps == settings_.time_steps &&
-    trace_total_costs_.size() == batch)
+    r_total.size() == batch)
   {
     rollout_first.assign(batch, -2);
     clear_unshifted = 0;
@@ -1213,9 +1284,9 @@ void Optimizer::publishTraceUnguarded(
     one.reset(steps);
     for (size_t i = 0; i < batch; ++i) {
       for (size_t j = 0; j < steps; ++j) {
-        one.vx(j) = state_.cvx(i, j);
-        one.wz(j) = state_.cwz(i, j);
-        one.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
+        one.vx(j) = r_cvx(i, j);
+        one.wz(j) = r_cwz(i, j);
+        one.vy(j) = isHolonomic() ? r_cvy(i, j) : 0.0f;
       }
       if (!sequenceFinite(one)) {  // the fallback never emits a non-finite raw row
         rollout_first[i] = -4;
@@ -1235,7 +1306,7 @@ void Optimizer::publishTraceUnguarded(
       order[i] = i;
     }
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        return traceCostRanksBefore(trace_total_costs_(a), trace_total_costs_(b));
+        return traceCostRanksBefore(r_total(a), r_total(b));
       });
     cheapest_first = rollout_first[order[0]];
     for (size_t r = 0; r < batch; ++r) {
@@ -1281,6 +1352,9 @@ void Optimizer::publishTraceUnguarded(
     m->best_passing_rollout_rank = best_rank;
     m->cheapest_rollout_final_collision = cheapest_first;
     m->fallback_rollout_rank = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ? fallback_rank_ : -1;
+    m->optimize_wall_s = trace_optimize_wall_s_;
+    m->eval_wall_s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - trace_eval_start_).count();
     trace_cycle_pub_->publish(std::move(m));
   }
 
@@ -1290,8 +1364,10 @@ void Optimizer::publishTraceUnguarded(
     d->cycle = trace_cycle_;
     d->trigger = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ?
       nav2_critics_msgs::msg::MppiRejection::TRIGGER_FALLBACK :
+      all_collide ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_ALL_COLLIDE :
       rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
-      nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE;
+      collapse ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE :
+      nav2_critics_msgs::msg::MppiRejection::TRIGGER_STALL;
     d->cmd_vx = command ? command->twist.linear.x : 0.0;
     d->cmd_wz = command ? command->twist.angular.z : 0.0;
     d->size_x = costmap_->getSizeInCellsX();
@@ -1325,20 +1401,25 @@ void Optimizer::publishTraceUnguarded(
     d->first_collision_index = trace_report_.first_index;
     d->batch_size = static_cast<uint32_t>(batch);
     d->time_steps = static_cast<uint32_t>(steps);
-    d->rollout_vx.assign(state_.cvx.begin(), state_.cvx.end());
-    d->rollout_wz.assign(state_.cwz.begin(), state_.cwz.end());
-    d->critic_names = critic_manager_.capturedCriticNames();
-    for (const auto & c : critic_manager_.capturedCriticCosts()) {
+    d->rollout_vx.assign(r_cvx.begin(), r_cvx.end());
+    d->rollout_wz.assign(r_cwz.begin(), r_cwz.end());
+    d->critic_names = use_fail ? trace_fail_critic_names_ : critic_manager_.capturedCriticNames();
+    for (const auto & c : use_fail ? trace_fail_critic_costs_ :
+      critic_manager_.capturedCriticCosts())
+    {
       d->critic_costs.insert(d->critic_costs.end(), c.begin(), c.end());
     }
-    d->total_costs.assign(trace_total_costs_.begin(), trace_total_costs_.end());
-    d->softmax_weights.assign(trace_softmax_.begin(), trace_softmax_.end());
+    d->total_costs.assign(r_total.begin(), r_total.end());
+    const auto & r_soft = use_fail ? trace_fail_softmax_ : trace_softmax_;
+    d->softmax_weights.assign(r_soft.begin(), r_soft.end());
     d->rollout_final_check_first_collision = rollout_first;
     trace_rejection_pub_->publish(std::move(d));
-    if (!rejected) {
-      // Only a published collapse dump starts the interval; a failure before this point
-      // (caught by publishTrace) leaves the next collapse free to dump.
+    // Only a published collapse or stall dump starts its own interval; a failure before this
+    // point (caught by publishTrace) leaves the next one free to dump.
+    if (!rejected && collapse) {
       trace_last_collapse_dump_ = node->get_clock()->now();
+    } else if (!rejected && stall) {
+      trace_last_stall_dump_ = node->get_clock()->now();
     }
   }
 }
