@@ -19,7 +19,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <numeric>
 #include <vector>
 
 #include "gtest/gtest.h"
