@@ -138,6 +138,33 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  // GENERIC, default 0 = off (stock behaviour: a rejected mean stops the robot and resets the
+  // sequence). N > 0: on a final-check rejection try the N cheapest sampled rollouts of the last
+  // iteration, under the same constraints and final check, and emit the first that passes.
+  // Read-only (a runtime change would reset the sequence mid-motion); each try is one final
+  // check on the control thread, so N is capped at kMaxFallbackRollouts.
+  {
+    // Declared read-only first: a Static MPPI parameter would otherwise accept a runtime set
+    // and silently keep the configure-time value.
+    auto node = parent_.lock();
+    const std::string fallback_param = name_ + ".final_check_fallback_rollouts";
+    if (node && !node->has_parameter(fallback_param)) {
+      rcl_interfaces::msg::ParameterDescriptor descriptor;
+      descriptor.read_only = true;
+      node->declare_parameter(fallback_param, rclcpp::ParameterValue(0), descriptor);
+    }
+  }
+  getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0,
+    ParameterType::Static);
+  if (final_check_fallback_rollouts_ < 0) {
+    RCLCPP_WARN(logger_, "final_check_fallback_rollouts %d < 0: fallback off",
+      final_check_fallback_rollouts_);
+    final_check_fallback_rollouts_ = 0;
+  } else if (final_check_fallback_rollouts_ > kMaxFallbackRollouts) {
+    RCLCPP_WARN(logger_, "final_check_fallback_rollouts %d capped at %d",
+      final_check_fallback_rollouts_, kMaxFallbackRollouts);
+    final_check_fallback_rollouts_ = kMaxFallbackRollouts;
+  }
   // GENERIC diagnostics, default off: per-cycle record and rejection dump. Read-only.
   getParam(trace_cycles_, "trace_cycles", false, ParameterType::Static);
   getParam(trace_rejections_, "trace_rejections", false, ParameterType::Static);
@@ -243,6 +270,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   nav2_core::GoalChecker * goal_checker)
 {
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
+  fallback_rank_ = -1;
 
   const bool tracing = trace_cycles_ || trace_rejections_;
   if (tracing) {
@@ -316,7 +344,9 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
     throw;
   }
   if (tracing) {
-    publishTrace(nav2_critics_msgs::msg::MppiCycle::RESULT_ACCEPTED, &control);
+    publishTrace(
+      fallback_rank_ >= 0 ? nav2_critics_msgs::msg::MppiCycle::RESULT_ACCEPTED_FALLBACK :
+      nav2_critics_msgs::msg::MppiCycle::RESULT_ACCEPTED, &control);
   }
 
   // [G] FINAL CMD_VEL
@@ -453,25 +483,30 @@ void Optimizer::generateNoisedTrajectories()
 
 void Optimizer::applyControlSequenceConstraints()
 {
+  constrainSequence(control_sequence_);
+}
+
+void Optimizer::constrainSequence(models::ControlSequence & sequence) const
+{
   auto & s = settings_;
 
   if (isHolonomic()) {
-    control_sequence_.vy = xt::clip(control_sequence_.vy, -s.constraints.vy, s.constraints.vy);
+    sequence.vy = xt::clip(sequence.vy, -s.constraints.vy, s.constraints.vy);
   }
 
-  control_sequence_.vx = xt::clip(control_sequence_.vx, s.constraints.vx_min, s.constraints.vx_max);
-  control_sequence_.wz = xt::clip(control_sequence_.wz, -s.constraints.wz, s.constraints.wz);
+  sequence.vx = xt::clip(sequence.vx, s.constraints.vx_min, s.constraints.vx_max);
+  sequence.wz = xt::clip(sequence.wz, -s.constraints.wz, s.constraints.wz);
 
   float max_delta_vx = s.model_dt * s.constraints.ax_max;
   float min_delta_vx = s.model_dt * s.constraints.ax_min;
   float max_delta_vy = s.model_dt * s.constraints.ay_max;
   float min_delta_vy = s.model_dt * s.constraints.ay_min;
   float max_delta_wz = s.model_dt * s.constraints.az_max;
-  float vx_last = control_sequence_.vx(0);
-  float vy_last = control_sequence_.vy(0);
-  float wz_last = control_sequence_.wz(0);
-  for (unsigned int i = 1; i != control_sequence_.vx.shape(0); i++) {
-    float & vx_curr = control_sequence_.vx(i);
+  float vx_last = sequence.vx(0);
+  float vy_last = sequence.vy(0);
+  float wz_last = sequence.wz(0);
+  for (unsigned int i = 1; i != sequence.vx.shape(0); i++) {
+    float & vx_curr = sequence.vx(i);
     if (vx_last > 0) {
       vx_curr = std::clamp(vx_curr, vx_last + min_delta_vx, vx_last + max_delta_vx);
     } else {
@@ -479,12 +514,12 @@ void Optimizer::applyControlSequenceConstraints()
     }
     vx_last = vx_curr;
 
-    float & wz_curr = control_sequence_.wz(i);
+    float & wz_curr = sequence.wz(i);
     wz_curr = std::clamp(wz_curr, wz_last - max_delta_wz, wz_last + max_delta_wz);
     wz_last = wz_curr;
 
     if (isHolonomic()) {
-      float & vy_curr = control_sequence_.vy(i);
+      float & vy_curr = sequence.vy(i);
       if (vy_last > 0) {
         vy_curr = std::clamp(vy_curr, vy_last + min_delta_vy, vy_last + max_delta_vy);
       } else {
@@ -494,7 +529,7 @@ void Optimizer::applyControlSequenceConstraints()
     }
   }
 
-  motion_model_->applyConstraints(control_sequence_);
+  motion_model_->applyConstraints(sequence);
 }
 
 void Optimizer::updateStateVelocities(
@@ -946,6 +981,16 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
     }
+    // The mean was finite but not collision-free: optionally emit a sampled rollout that passes.
+    if (final_check_fallback_rollouts_ > 0 && tryRolloutFallback()) {
+      RCLCPP_WARN_THROTTLE(logger_, fallback_warn_clock_, 1000,
+        "Final MPPI control sequence is not collision-free; "
+        "emitting sampled rollout (cost rank %d)", fallback_rank_);
+      const auto control = getControlFromSequenceAsTwist(stamp);
+      control_history_.back() = {static_cast<float>(control.twist.linear.x),
+        static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
+      return control;
+    }
   }
   if (tracing && !controlSequenceFinite()) {
     trace_final_ = control_sequence_;
@@ -954,6 +999,43 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
   control_sequence_.reset(settings_.time_steps);
   control_history_.fill({0.0f, 0.0f, 0.0f});
   throw nav2_core::NoValidControl("Final MPPI control sequence is not collision-free");
+}
+
+bool Optimizer::tryRolloutFallback()
+{
+  const size_t batch = state_.cvx.shape(0);
+  const size_t steps = state_.cvx.shape(1);
+  if (batch == 0 || steps != settings_.time_steps || costs_.size() != batch) {return false;}
+  const size_t tries = std::min(batch, static_cast<size_t>(final_check_fallback_rollouts_));
+  std::vector<size_t> order(batch);
+  for (size_t i = 0; i < batch; ++i) {
+    order[i] = i;
+  }
+  // Only the `tries` cheapest are needed; ties keep index order. Non-finite costs sort last and
+  // are never tried.
+  std::partial_sort(order.begin(), order.begin() + tries, order.end(), [&](size_t a, size_t b) {
+      const float ca = costs_(a), cb = costs_(b);
+      return traceCostRanksBefore(ca, cb) || (!traceCostRanksBefore(cb, ca) && a < b);
+    });
+  const models::ControlSequence rejected = control_sequence_;
+  for (size_t r = 0; r < tries; ++r) {
+    const size_t i = order[r];
+    if (!finiteValue(costs_(i))) {break;}
+    for (size_t j = 0; j < steps; ++j) {
+      control_sequence_.vx(j) = state_.cvx(i, j);
+      control_sequence_.wz(j) = state_.cwz(i, j);
+      control_sequence_.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
+    }
+    if (!controlSequenceFinite()) {continue;}
+    // Same constraint pass and the same final check as the mean.
+    applyControlSequenceConstraints();
+    if (sequenceCollisionFree(control_sequence_, settings_.shift_control_sequence, nullptr)) {
+      fallback_rank_ = static_cast<int>(r);
+      return true;
+    }
+  }
+  control_sequence_ = rejected;
+  return false;
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
@@ -1074,8 +1156,11 @@ void Optimizer::publishTraceUnguarded(
   auto node = parent_.lock();
   if (!node) {return;}
   const bool shift = settings_.shift_control_sequence;
+  // A fallback cycle's mean was rejected too: it is dumped like a rejection (trigger FALLBACK),
+  // with the emitted fallback command in cmd_vx / cmd_wz.
   const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION ||
-    result == MppiCycle::RESULT_REJECTED_NONFINITE;
+    result == MppiCycle::RESULT_REJECTED_NONFINITE ||
+    result == MppiCycle::RESULT_ACCEPTED_FALLBACK;
   // Collapse: an accepted command far below the larger of the warm start and the measured speed,
   // rate limited to one dump per trace_collapse_min_interval_s.
   bool collapse = false;
@@ -1132,6 +1217,11 @@ void Optimizer::publishTraceUnguarded(
         one.wz(j) = state_.cwz(i, j);
         one.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
       }
+      if (!sequenceFinite(one)) {  // the fallback never emits a non-finite raw row
+        rollout_first[i] = -4;
+        continue;
+      }
+      constrainSequence(one);  // as tryRolloutFallback emits a rollout
       CollisionReport r;
       if (sequenceCollisionFree(one, shift, &r)) {
         ++pass_final;
@@ -1190,6 +1280,7 @@ void Optimizer::publishTraceUnguarded(
     m->rollouts_pass_final_check = pass_final;
     m->best_passing_rollout_rank = best_rank;
     m->cheapest_rollout_final_collision = cheapest_first;
+    m->fallback_rollout_rank = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ? fallback_rank_ : -1;
     trace_cycle_pub_->publish(std::move(m));
   }
 
@@ -1197,7 +1288,9 @@ void Optimizer::publishTraceUnguarded(
     auto d = std::make_unique<nav2_critics_msgs::msg::MppiRejection>();
     d->stamp = stamp;
     d->cycle = trace_cycle_;
-    d->trigger = rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
+    d->trigger = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ?
+      nav2_critics_msgs::msg::MppiRejection::TRIGGER_FALLBACK :
+      rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
       nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE;
     d->cmd_vx = command ? command->twist.linear.x : 0.0;
     d->cmd_wz = command ? command->twist.angular.z : 0.0;

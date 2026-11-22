@@ -98,14 +98,24 @@ public:
       }
     }
   }
+  // Row `row` of the noise bank becomes +Inf: that sampled rollout is not finite.
+  void poisonRow(size_t row)
+  {
+    auto & vx = noise_generator_.*NoiseAccess::vx();
+    for (size_t j = 0; j < vx.shape(1); ++j) {
+      vx(row, j) = std::numeric_limits<float>::infinity();
+    }
+  }
   void warm(float vx, float wz)
   {
     control_sequence_.vx.fill(vx);
     control_sequence_.wz.fill(wz);
   }
   const auto & tape() const {return control_sequence_;}
+  int fallbackRollouts() const {return final_check_fallback_rollouts_;}
   const auto & history() const {return control_history_;}
   bool productionShift() const {return settings_.shift_control_sequence;}
+  void constrain(mppi::models::ControlSequence & s) const {constrainSequence(s);}
   bool checkWith(const mppi::models::ControlSequence & s, bool shift, CollisionReport * r) const
   {
     return sequenceCollisionFree(s, shift, r);
@@ -169,7 +179,7 @@ public:
   }
   static rclcpp_lifecycle::LifecycleNode::SharedPtr node(
     const std::string & name, bool trace, bool critics_params = true, double collapse = 0.0,
-    double collapse_interval = -1.0)
+    double collapse_interval = -1.0, int fallback = 0)
   {
     rclcpp::NodeOptions options;
     std::vector<rclcpp::Parameter> p = {
@@ -192,6 +202,9 @@ public:
     }
     if (collapse_interval >= 0.0) {
       p.push_back(rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", collapse_interval));
+    }
+    if (fallback != 0) {
+      p.push_back(rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", fallback));
     }
     if (!critics_params) {
       // Critic-free fixtures: no control-cost term either, so the update is the plain
@@ -350,7 +363,8 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   EXPECT_EQ(d.softmax_weights.size(), d.batch_size);
   EXPECT_EQ(d.rollout_final_check_first_collision.size(), d.batch_size);
   EXPECT_EQ(c.final_vx.size(), 41u);
-  // Every rollout's recorded result is the production check on that row's controls.
+  // Every rollout's recorded result is the production check on that row's controls after the
+  // sequence constraints (as the fallback would emit the row).
   ASSERT_TRUE(opt.productionShift());
   int32_t passing = 0, clear_unshifted = 0;
   mppi::models::ControlSequence row;
@@ -360,6 +374,7 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
       row.vx(j) = d.rollout_vx[i * d.time_steps + j];
       row.wz(j) = d.rollout_wz[i * d.time_steps + j];
     }
+    opt.constrain(row);
     TraceOptimizer::CollisionReport r;
     const bool ok = opt.checkWith(row, true, &r);
     EXPECT_EQ(ok, opt.production(row)) << "rollout " << i;
@@ -399,6 +414,89 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   TraceOptimizer::CollisionReport rf;
   EXPECT_FALSE(opt.checkWith(fin, true, &rf));
   EXPECT_EQ(rf.first_index, c.first_collision_index);
+}
+
+TEST_F(TraceTest, FallbackCycleIsRecordedWithItsRankAndDumpedAsARejectedMean)
+{
+  // The forced-rejection scene, with the final-check fallback on: some rollouts pass.
+  wall(0.75, -0.5, 0.80, 0.5);
+  auto n = node("trace_on_fallback", true, false, 0.0, -1.0, 64);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink("trace_on_fallback");
+  waitForMatch(n, "trace_on_fallback");
+  opt.stepNoise();
+  opt.warm(0.3f, 0.0f);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.3;
+  const auto path = straightPath(1.5);
+  geometry_msgs::msg::TwistStamped cmd;
+  ASSERT_NO_THROW(
+    cmd = opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr));
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  ASSERT_EQ(sink.dumps.size(), 1u);
+  const auto & c = sink.cycles[0];
+  const auto & d = sink.dumps[0];
+  EXPECT_EQ(c.result, MppiCycle::RESULT_ACCEPTED_FALLBACK);
+  EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_FALLBACK);
+  EXPECT_EQ(c.cycle, d.cycle);
+  // The record describes the rejected mean ...
+  EXPECT_GE(c.first_collision_index, 1);
+  mppi::models::ControlSequence fin;
+  fin.reset(41);
+  for (size_t j = 0; j < 41; ++j) {
+    fin.vx(j) = c.final_vx[j];
+    fin.wz(j) = c.final_wz[j];
+  }
+  EXPECT_FALSE(opt.production(fin));
+  // ... and the command actually emitted (here the passing rows stall at index 1, so the shifted
+  // command is 0), while the sequence kept for the next cycle is the rollout, not the all-zero
+  // reset a rejection leaves.
+  EXPECT_EQ(c.cmd_vx, cmd.twist.linear.x);
+  EXPECT_EQ(c.cmd_wz, cmd.twist.angular.z);
+  EXPECT_EQ(d.cmd_vx, cmd.twist.linear.x);
+  EXPECT_GT(xt::sum(xt::abs(opt.tape().vx))(), 1.0f);
+  ASSERT_GT(c.rollouts_pass_final_check, 0);
+  // The emitted rollout's rank is the cost rank of the cheapest rollout that passes the check,
+  // recomputed here from the dump's costs and per-rollout results.
+  std::vector<size_t> order(d.batch_size);
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return TraceOptimizer::traceCostRanksBefore(d.total_costs[a], d.total_costs[b]);
+    });
+  int expected_rank = -1;
+  for (size_t r = 0; r < order.size(); ++r) {
+    if (d.rollout_final_check_first_collision[order[r]] == -2) {
+      expected_rank = static_cast<int>(r);
+      break;
+    }
+  }
+  EXPECT_EQ(c.fallback_rollout_rank, expected_rank);
+  EXPECT_EQ(c.best_passing_rollout_rank, expected_rank);
+}
+
+TEST_F(TraceTest, FallbackIsOffByDefaultReadOnlyAndCapped)
+{
+  struct Case {std::string tag; int set; int want;};
+  for (const auto & c : std::vector<Case>{{"fb_default", 0, 0}, {"fb_neg", -5, 0},
+      {"fb_some", 16, 16}, {"fb_big", 1000, 64}})
+  {
+    auto n = node(c.tag, false, false, 0.0, -1.0, c.set);
+    mppi::ParametersHandler params(n);
+    TraceOptimizer opt;
+    opt.configure(n, cm, &params, false);
+    EXPECT_EQ(opt.fallbackRollouts(), c.want) << c.tag;
+    if (c.set == 0) {
+      EXPECT_EQ(n->get_parameter("FollowPath.final_check_fallback_rollouts").as_int(), 0);
+    }
+    // Read-only: a runtime set is refused, so the reported value never lies about the active one.
+    const auto set = n->set_parameter(
+      rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", 8));
+    EXPECT_FALSE(set.successful) << c.tag;
+    EXPECT_EQ(opt.fallbackRollouts(), c.want) << c.tag;
+  }
 }
 
 TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
@@ -580,6 +678,7 @@ TEST_F(TraceTest, OffPublishesNothing)
 struct IdentityCounts
 {
   int rejected{0}, final_rejected{0}, accepted{0};
+  std::vector<double> cmd_vx, cmd_wz;  // tracing-on command per tick (0 when it threw)
 };
 
 // Bit-exact comparison: +0.0 and -0.0 (and differently signed NaNs) compare unequal.
@@ -635,6 +734,8 @@ IdentityCounts runIdentity(
     EXPECT_EQ(t_off, t_on) << tag << " tick " << tick;
     EXPECT_EQ(w_off, w_on) << tag << " tick " << tick;
     (t_on ? k.rejected : k.accepted)++;
+    k.cmd_vx.push_back(t_on ? 0.0 : c_on.twist.linear.x);
+    k.cmd_wz.push_back(t_on ? 0.0 : c_on.twist.angular.z);
     k.final_rejected += w_on.find("not collision-free") != std::string::npos ? 1 : 0;
     EXPECT_TRUE(sameBits(c_off.twist.linear.x, c_on.twist.linear.x)) << tag << " tick " << tick;
     EXPECT_TRUE(sameBits(c_off.twist.angular.z, c_on.twist.angular.z)) << tag << " tick " << tick;
@@ -682,6 +783,29 @@ TEST_F(TraceTest, CommandsAndMemoryIdenticalWithTracingOnAndOff)
     collapse_dumps += d.trigger == MppiRejection::TRIGGER_COLLAPSE ? 1 : 0;
   }
   EXPECT_GT(collapse_dumps, 0u) << "the collapse path never ran";
+  // Final-check fallback on in both: the rejected-mean path now emits a rollout; tracing must
+  // still change nothing, and the fallback must actually run.
+  SetUp();
+  wall(0.95, -0.5, 1.00, 0.5);
+  Sink sink_f("ident_on_fb");
+  const auto f = runIdentity(*this, "fallback", false, true, node("ident_off_fb", false, false,
+      0.0, -1.0, 64), node("ident_on_fb", true, false, 0.0, -1.0, 64), cm, path, mk, "ident_on_fb");
+  sink_f.spin(static_cast<size_t>(f.accepted + f.rejected));
+  size_t fallbacks = 0, moving_fallbacks = 0;
+  // One cycle record per tick, in order: each reports exactly the command that tick returned,
+  // including fallback ticks whose emitted command moves (a record stuck at 0 fails here).
+  ASSERT_EQ(sink_f.cycles.size(), f.cmd_vx.size());
+  for (size_t i = 0; i < sink_f.cycles.size(); ++i) {
+    const auto & cy = sink_f.cycles[i];
+    EXPECT_EQ(cy.cmd_vx, f.cmd_vx[i]) << "tick " << i;
+    EXPECT_EQ(cy.cmd_wz, f.cmd_wz[i]) << "tick " << i;
+    if (cy.result == MppiCycle::RESULT_ACCEPTED_FALLBACK) {
+      ++fallbacks;
+      moving_fallbacks += std::abs(cy.cmd_vx) > 0.01 ? 1 : 0;
+    }
+  }
+  EXPECT_GT(fallbacks, 0u) << "the fallback path never ran";
+  EXPECT_GT(moving_fallbacks, 0u) << "no fallback tick emitted a moving command";
 }
 
 // A final-check rejection of a non-finite sequence (RESULT_REJECTED_NONFINITE) is dumped like a
@@ -732,6 +856,39 @@ TEST(TraceRanking, NonFiniteCostsRankAfterFiniteOnes)
         TraceOptimizer::traceCostRanksBefore(a, b) && TraceOptimizer::traceCostRanksBefore(b, a));
     }
   }
+}
+
+// A non-finite sampled row is recorded as not evaluable (-4) and never counted as passing: the
+// constraint pass would clip +Inf to vx_max, but the fallback rejects the raw row first.
+TEST_F(TraceTest, NonFiniteRolloutIsNotEvaluableInTheDump)
+{
+  auto n = node("trace_inf_row", true, false);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink("trace_inf_row");
+  waitForMatch(n, "trace_inf_row");
+  opt.freezeNoise();
+  opt.poisonRow(1);
+  opt.warm(0.2f, 0.0f);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  try {
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+  } catch (const nav2_core::NoValidControl &) {
+  }
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  ASSERT_EQ(sink.dumps.size(), 1u) << "result " << static_cast<int>(sink.cycles[0].result);
+  const auto & d = sink.dumps[0];
+  ASSERT_GT(d.batch_size, 1u);
+  EXPECT_EQ(d.rollout_final_check_first_collision[1], -4);
+  int32_t passing = 0;
+  for (const auto r : d.rollout_final_check_first_collision) {
+    passing += r == -2 ? 1 : 0;
+  }
+  EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, passing);
 }
 
 // Circular body (robot_radius): a pose whose centre cell is free but whose body covers a lethal

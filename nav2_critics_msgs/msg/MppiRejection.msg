@@ -1,12 +1,14 @@
 # Full state of a dumped MPPI cycle, published when FollowPath.trace_rejections is true (default false):
-# every rejected cycle, and (trace_collapse_fraction > 0) collapsed accepted cycles, at most one per
+# every rejected or fallback cycle, and (trace_collapse_fraction > 0) collapsed accepted cycles, at most one per
 # trace_collapse_min_interval_s. Bags recorded before `trigger` existed have no trigger: read as REJECTED.
 builtin_interfaces/Time stamp
 uint64 cycle                      # matches MppiCycle.cycle
-uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle (collision or non-finite sequence)
+uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle: collision or non-finite sequence (stop + reset)
 uint8 TRIGGER_COLLAPSE = 1        # accepted, but |cmd vx| < trace_collapse_fraction * max(|warm vx[0]|, |measured vx|)
+uint8 TRIGGER_FALLBACK = 2        # final check rejected the mean; a sampled rollout passed and was emitted
+                                  # (final_check_fallback_rollouts > 0). Not rate limited, like REJECTED.
 uint8 trigger
-float64 cmd_vx                    # command sent (0 when rejected)
+float64 cmd_vx                    # command sent (0 when rejected; the emitted rollout's for TRIGGER_FALLBACK)
 float64 cmd_wz
 # The controller's costmap at the check (copied under the costmap lock)
 uint32 size_x
@@ -47,4 +49,5 @@ string[] critic_names
 float32[] critic_costs            # len(critic_names) * batch_size, row-major: each critic's cost per rollout
 float32[] total_costs             # batch_size: critic + control costs used by the softmax
 float32[] softmax_weights         # batch_size
-int32[] rollout_final_check_first_collision   # batch_size: the production check on each rollout's controls (MppiCycle index convention: -2 passes, -4 not evaluable)
+int32[] rollout_final_check_first_collision   # batch_size: the production check on each rollout's controls after the sequence
+                                              # constraints, as the fallback emits them (MppiCycle index convention: -2 passes, -4 not evaluable)

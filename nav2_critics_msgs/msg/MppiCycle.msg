@@ -28,8 +28,11 @@ uint8 RESULT_ACCEPTED = 0
 uint8 RESULT_REJECTED_COLLISION = 1   # final check failed ("Final MPPI control sequence is not collision-free")
 uint8 RESULT_REJECTED_NONFINITE = 2
 uint8 RESULT_ALL_ROLLOUTS_COLLIDE = 3 # fallback exhausted ("Optimizer fail to compute path")
+uint8 RESULT_ACCEPTED_FALLBACK = 4    # final check rejected the mean; a sampled rollout passed the same
+                                      # check and was emitted (final_check_fallback_rollouts > 0).
+                                      # final_* and the collision fields describe the rejected mean.
 uint8 result
-float64 cmd_vx                    # command returned (0 when rejected)
+float64 cmd_vx                    # command returned (0 when rejected; the emitted rollout's for RESULT_ACCEPTED_FALLBACK)
 float64 cmd_wz
 # Final check detail (the production check: shifted when shift_control_sequence, measured speed first)
 int32 first_collision_index       # -2 passes, -1 current pose, 0..time_steps forecast index,
@@ -47,7 +50,9 @@ int32 smooth_shifted_first_collision    # smoothed mean, production shift, befor
 # Batch summary of the last iteration
 uint32 rollouts
 # The four fields below need trace_rejections (rollout costs); else -1 / -3.
-int32 rollouts_clear_unshifted          # dumped cycles only (rejected or collapse), else -1: rollouts passing the check without the shift
-int32 rollouts_pass_final_check         # dumped cycles only (rejected or collapse), else -1: rollouts passing the production (shifted) check
-int32 best_passing_rollout_rank         # dumped cycles only (rejected or collapse), else -1: rank by total cost of the cheapest passing rollout
-int32 cheapest_rollout_final_collision  # dumped cycles only (rejected or collapse), else -3: production-check first collision of the cheapest rollout
+int32 rollouts_clear_unshifted          # dumped cycles only (rejected, fallback or collapse), else -1: rollouts passing the check without the shift
+int32 rollouts_pass_final_check         # dumped cycles only (rejected, fallback or collapse), else -1: rollouts passing the production (shifted) check
+int32 best_passing_rollout_rank         # dumped cycles only (rejected, fallback or collapse), else -1: rank by total cost of the cheapest passing rollout
+int32 cheapest_rollout_final_collision  # dumped cycles only (rejected, fallback or collapse), else -3: production-check first collision of the cheapest rollout
+# Final-check fallback (final_check_fallback_rollouts > 0)
+int32 fallback_rollout_rank             # RESULT_ACCEPTED_FALLBACK: cost rank of the emitted rollout (0 = cheapest), else -1
