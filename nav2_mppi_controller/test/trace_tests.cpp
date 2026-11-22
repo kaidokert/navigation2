@@ -595,13 +595,18 @@ IdentityCounts runIdentity(
   TraceTest & t, const std::string & tag, bool critics, bool stepped,
   rclcpp_lifecycle::LifecycleNode::SharedPtr n_off, rclcpp_lifecycle::LifecycleNode::SharedPtr n_on,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> cm, const nav_msgs::msg::Path & path,
-  const std::function<geometry_msgs::msg::PoseStamped(double, double, double)> & pose)
+  const std::function<geometry_msgs::msg::PoseStamped(double, double, double)> & pose,
+  const std::string & wait_sink_ns = "")
 {
   (void)t;
   mppi::ParametersHandler p_off(n_off), p_on(n_on);
   TraceOptimizer off, on;
   off.configure(n_off, cm, &p_off, critics);
   on.configure(n_on, cm, &p_on, critics);
+  if (!wait_sink_ns.empty()) {
+    // A Sink listens: wait for it to match before the first publish (volatile QoS).
+    waitForMatch(n_on, wait_sink_ns);
+  }
   IdentityCounts k;
   for (int tick = 0; tick < 40; ++tick) {
     const double x = 0.015 * tick, y = 0.02 * std::sin(0.3 * tick);
@@ -669,7 +674,7 @@ TEST_F(TraceTest, CommandsAndMemoryIdenticalWithTracingOnAndOff)
   wall(1.10, 0.10, 1.15, 0.60);
   Sink sink("ident_on_c");
   const auto c = runIdentity(*this, "collapse", true, false, node("ident_off_c", false),
-      node("ident_on_c", true, true, 1.5, 0.0), cm, path, mk);
+      node("ident_on_c", true, true, 1.5, 0.0), cm, path, mk, "ident_on_c");
   sink.spin(static_cast<size_t>(c.accepted + c.rejected));
   EXPECT_GT(c.accepted, 0);
   size_t collapse_dumps = 0;

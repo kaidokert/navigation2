@@ -1093,8 +1093,6 @@ void Optimizer::publishTraceUnguarded(
       // A clock that went backwards (sim reset) never suppresses the next dump.
       if (since >= 0.0 && since < trace_collapse_min_interval_s_) {
         collapse = false;
-      } else if (trace_rejection_pub_ && trace_rejection_pub_->is_activated()) {
-        trace_last_collapse_dump_ = now;
       }
     }
   }
@@ -1244,6 +1242,11 @@ void Optimizer::publishTraceUnguarded(
     d->softmax_weights.assign(trace_softmax_.begin(), trace_softmax_.end());
     d->rollout_final_check_first_collision = rollout_first;
     trace_rejection_pub_->publish(std::move(d));
+    if (!rejected) {
+      // Only a published collapse dump starts the interval; a failure before this point
+      // (caught by publishTrace) leaves the next collapse free to dump.
+      trace_last_collapse_dump_ = node->get_clock()->now();
+    }
   }
 }
 
