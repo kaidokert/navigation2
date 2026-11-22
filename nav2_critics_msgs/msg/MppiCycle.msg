@@ -56,3 +56,8 @@ int32 best_passing_rollout_rank         # dumped cycles only (rejected, fallback
 int32 cheapest_rollout_final_collision  # dumped cycles only (rejected, fallback or collapse), else -3: production-check first collision of the cheapest rollout
 # Final-check fallback (final_check_fallback_rollouts > 0)
 int32 fallback_rollout_rank             # RESULT_ACCEPTED_FALLBACK: cost rank of the emitted rollout (0 = cheapest), else -1
+# Wall-clock timing (steady clock; diagnostic, measures the controller host, not sim time)
+float64 optimize_wall_s                 # evalControl entry (prepare included) to the end of the optimize/fallback loop, s;
+                                        # for RESULT_ALL_ROLLOUTS_COLLIDE, to the throw that ended the loop
+float64 eval_wall_s                     # evalControl entry to the fill of this message (smoothing, final check and the
+                                        # trace's own work included), s

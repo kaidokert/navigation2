@@ -15,6 +15,7 @@
 #ifndef NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 #define NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 
+#include <chrono>
 #include <limits>
 #include <cmath>
 #include <cstring>
@@ -401,6 +402,10 @@ protected:
   models::ControlSequence trace_warm_, trace_opt_, trace_smooth_, trace_final_;
   CollisionReport trace_report_;
   bool trace_final_nonfinite_{false};
+  // Steady-clock start of the current evalControl, and the optimize/fallback loop duration
+  // (s, -1 = not reached).
+  std::chrono::steady_clock::time_point trace_eval_start_{};
+  double trace_optimize_wall_s_{-1.0};
   xt::xtensor<float, 1> trace_total_costs_;
   xt::xtensor<float, 1> trace_softmax_;
 

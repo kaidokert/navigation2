@@ -275,6 +275,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   const geometry_msgs::msg::Pose & goal,
   nav2_core::GoalChecker * goal_checker)
 {
+  trace_eval_start_ = std::chrono::steady_clock::now();
+  trace_optimize_wall_s_ = -1.0;
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
   fallback_rank_ = -1;
 
@@ -310,11 +312,17 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
     } while (fallback(critics_data_.fail_flag));
   } catch (const nav2_core::NoValidControl &) {
     if (tracing) {
+      trace_optimize_wall_s_ = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - trace_eval_start_).count();
       publishTrace(nav2_critics_msgs::msg::MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE, nullptr);
     }
     throw;
   }
-  if (tracing) {trace_opt_ = control_sequence_;}
+  if (tracing) {
+    trace_optimize_wall_s_ = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - trace_eval_start_).count();
+    trace_opt_ = control_sequence_;
+  }
 
   // [E] POST-OPTIMIZE (after softmax + accel constraints)
   if (diag && ts >= 5) {
@@ -1327,6 +1335,9 @@ void Optimizer::publishTraceUnguarded(
     m->best_passing_rollout_rank = best_rank;
     m->cheapest_rollout_final_collision = cheapest_first;
     m->fallback_rollout_rank = result == MppiCycle::RESULT_ACCEPTED_FALLBACK ? fallback_rank_ : -1;
+    m->optimize_wall_s = trace_optimize_wall_s_;
+    m->eval_wall_s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - trace_eval_start_).count();
     trace_cycle_pub_->publish(std::move(m));
   }
 

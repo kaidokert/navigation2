@@ -530,6 +530,38 @@ TEST_F(TraceTest, AcceptedCyclePublishesARecordAndNoDump)
   EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, -1);
 }
 
+// Wall-clock timing: each cycle record carries its own steady-clock durations, measured from the
+// entry of that evalControl call: 0 < optimize_wall_s <= eval_wall_s <= the caller's own timing
+// of the call. A start time not reset per call would exceed the caller's timing on the second
+// call.
+TEST_F(TraceTest, CycleRecordCarriesItsOwnWallClockTiming)
+{
+  auto n = node("trace_timing", true);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, true);
+  Sink sink("trace_timing");
+  waitForMatch(n, "trace_timing");
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  std::vector<double> outer;
+  for (int i = 0; i < 2; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+    outer.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (i == 0) {std::this_thread::sleep_for(std::chrono::milliseconds(200));}
+  }
+  sink.spin(2);
+  ASSERT_EQ(sink.cycles.size(), 2u);
+  for (size_t i = 0; i < 2; ++i) {
+    const auto & c = sink.cycles[i];
+    EXPECT_GT(c.optimize_wall_s, 0.0);
+    EXPECT_LE(c.optimize_wall_s, c.eval_wall_s);
+    EXPECT_LE(c.eval_wall_s, outer[i]);
+  }
+}
+
 // Accepted-cycle collapse dump: published exactly when |cmd vx| < fraction * max(|warm vx[0]|,
 // |measured vx|), with trigger COLLAPSE and the command it explains; never with the fraction at 0.
 // One accepted cycle from a given warm start and measured speed; ticks > 1 repeat it (re-warmed).
@@ -770,6 +802,8 @@ TEST_F(TraceTest, AllCollideCycleDumpsTheFailedBatch)
   sink.spin(1);
   ASSERT_EQ(sink.cycles.size(), 1u);
   EXPECT_EQ(sink.cycles[0].result, MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE);
+  EXPECT_GT(sink.cycles[0].optimize_wall_s, 0.0);
+  EXPECT_LE(sink.cycles[0].optimize_wall_s, sink.cycles[0].eval_wall_s);
   ASSERT_EQ(sink.dumps.size(), 1u);
   const auto & d = sink.dumps[0];
   EXPECT_EQ(d.trigger, MppiRejection::TRIGGER_ALL_COLLIDE);
