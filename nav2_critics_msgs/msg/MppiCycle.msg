@@ -1,5 +1,6 @@
 # One MPPI control cycle, published by the optimizer when FollowPath.trace_cycles is true (default false).
 # Diagnostic only: it reads the cycle's state, it never changes it.
+# Lateral (vy) sequences and speed are not recorded: complete for non-holonomic models only.
 builtin_interfaces/Time stamp     # node clock at the end of the cycle
 uint64 cycle                      # optimizer cycle counter (matches MppiRejection.cycle)
 # Inputs actually used by this cycle

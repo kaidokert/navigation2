@@ -3,7 +3,7 @@
 # trace_collapse_min_interval_s. Bags recorded before `trigger` existed have no trigger: read as REJECTED.
 builtin_interfaces/Time stamp
 uint64 cycle                      # matches MppiCycle.cycle
-uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle
+uint8 TRIGGER_REJECTED = 0        # final check rejected the cycle (collision or non-finite sequence)
 uint8 TRIGGER_COLLAPSE = 1        # accepted, but |cmd vx| < trace_collapse_fraction * max(|warm vx[0]|, |measured vx|)
 uint8 trigger
 float64 cmd_vx                    # command sent (0 when rejected)
@@ -31,6 +31,7 @@ float64 goal_x
 float64 goal_y
 float64 goal_yaw
 # The final check's forecast (index 0 = first predicted pose; the current pose is checked separately)
+# A non-finite rejection (MppiCycle RESULT_REJECTED_NONFINITE) has no forecast: empty arrays, index -4.
 float64[] forecast_x
 float64[] forecast_y
 float64[] forecast_yaw
@@ -40,6 +41,8 @@ uint32 batch_size
 uint32 time_steps
 float32[] rollout_vx              # batch_size * time_steps, row-major, the sampled (constrained) controls
 float32[] rollout_wz
+# Lateral controls (vy) and measured lateral speed are not recorded: these records replay only
+# non-holonomic models (DiffDrive, Ackermann). An Omni dump cannot reproduce lateral motion.
 string[] critic_names
 float32[] critic_costs            # len(critic_names) * batch_size, row-major: each critic's cost per rollout
 float32[] total_costs             # batch_size: critic + control costs used by the softmax

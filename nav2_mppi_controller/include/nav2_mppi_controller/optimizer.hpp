@@ -16,6 +16,9 @@
 #define NAV2_MPPI_CONTROLLER__OPTIMIZER_HPP_
 
 #include <limits>
+#include <cmath>
+#include <cstring>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>
@@ -272,6 +275,22 @@ protected:
    */
   bool sequenceCollisionFree(
     const models::ControlSequence & sequence, bool shift, CollisionReport * report) const;
+
+  /**
+   * @brief Trace rollout ranking order by total cost: finite costs ascending, every non-finite
+   * cost after every finite one. A strict weak order even when costs are NaN.
+   */
+  static bool traceCostRanksBefore(float a, float b)
+  {
+    // Exponent bits, not std::isfinite: this package builds with -ffast-math.
+    const auto finite = [](float v) {
+        uint32_t u;
+        std::memcpy(&u, &v, sizeof(u));
+        return (u & 0x7f800000u) != 0x7f800000u;
+      };
+    const bool fa = finite(a), fb = finite(b);
+    return fa && fb ? a < b : fa && !fb;
+  }
 
   bool sequenceFinite(const models::ControlSequence & sequence) const;
 

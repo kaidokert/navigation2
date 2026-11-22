@@ -814,8 +814,36 @@ bool Optimizer::sequenceCollisionFree(
         cell(mx, my);
         return;
       }
-      if (circle) {
-        off_map(x, y);  // a circular body is not located beyond its centre here
+      if (circle) {  // the production circular-body scan, same arithmetic and order
+        for (const double sgn : {-1.0, 1.0}) {  // the two box corners the check tests
+          if (!in_bounds(x + sgn * radius, y + sgn * radius)) {
+            off_map(x + sgn * radius, y + sgn * radius);
+            return;
+          }
+        }
+        unsigned int x0, y0, x1, y1;
+        if (!costmap_->worldToMap(x - radius, y - radius, x0, y0) ||
+          !costmap_->worldToMap(x + radius, y + radius, x1, y1))
+        {
+          off_map(x, y);
+          return;
+        }
+        const double resolution = costmap_->getResolution();
+        for (unsigned int cy = y0; cy <= y1; ++cy) {
+          const double bottom = costmap_->getOriginY() + cy * resolution;
+          const double dy = std::max({bottom - y, 0.0, y - bottom - resolution});
+          for (unsigned int cx = x0; cx <= x1; ++cx) {
+            const double left = costmap_->getOriginX() + cx * resolution;
+            const double dx = std::max({left - x, 0.0, x - left - resolution});
+            if (dx * dx + dy * dy <= radius * radius &&
+              costmap_->getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE)
+            {
+              cell(cx, cy);
+              return;
+            }
+          }
+        }
+        off_map(x, y);  // not reached when the pose failed the circular check
         return;
       }
       const double c = std::cos(yaw), sn = std::sin(yaw);
@@ -1008,7 +1036,7 @@ uint64_t fnv1a(uint64_t h, const void * data, size_t n)
 
 uint64_t costmapHash(const nav2_costmap_2d::Costmap2D & cm)
 {
-  uint64_t h = 1469598103934665603ULL;
+  uint64_t h = 14695981039346656037ULL;
   const unsigned int sx = cm.getSizeInCellsX(), sy = cm.getSizeInCellsY();
   const double res = cm.getResolution(), ox = cm.getOriginX(), oy = cm.getOriginY();
   h = fnv1a(h, &sx, sizeof(sx));
@@ -1046,7 +1074,8 @@ void Optimizer::publishTraceUnguarded(
   auto node = parent_.lock();
   if (!node) {return;}
   const bool shift = settings_.shift_control_sequence;
-  const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION;
+  const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION ||
+    result == MppiCycle::RESULT_REJECTED_NONFINITE;
   // Collapse: an accepted command far below the larger of the warm start and the measured speed,
   // rate limited to one dump per trace_collapse_min_interval_s.
   bool collapse = false;
@@ -1118,7 +1147,7 @@ void Optimizer::publishTraceUnguarded(
       order[i] = i;
     }
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        return trace_total_costs_(a) < trace_total_costs_(b);
+        return traceCostRanksBefore(trace_total_costs_(a), trace_total_costs_(b));
       });
     cheapest_first = rollout_first[order[0]];
     for (size_t r = 0; r < batch; ++r) {

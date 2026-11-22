@@ -12,8 +12,10 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <memory>
 #include <string>
 #include <thread>
@@ -125,6 +127,7 @@ public:
     state_.speed.linear.x = vx;
   }
   using Optimizer::CollisionReport;
+  using Optimizer::traceCostRanksBefore;
 };
 
 class TraceTest : public ::testing::Test
@@ -323,6 +326,26 @@ TEST_F(TraceTest, ForcedRejectionPublishesOneDumpWithTheCheckedCollisionIndex)
   // The dump carries the controller's grid and the batch.
   EXPECT_EQ(d.costs.size(), static_cast<size_t>(d.size_x) * d.size_y);
   EXPECT_EQ(d.costmap_hash, c.costmap_hash);
+  // Standard FNV-1a 64 (offset basis 14695981039346656037) over size, resolution, origin and
+  // cells, computed here from the dump: a consumer can reproduce the recorded hash.
+  {
+    uint64_t h = 14695981039346656037ULL;
+    const auto mix = [&h](const void * data, size_t len) {
+        const auto * b = static_cast<const unsigned char *>(data);
+        for (size_t i = 0; i < len; ++i) {
+          h ^= b[i];
+          h *= 1099511628211ULL;
+        }
+      };
+    const unsigned int sx = d.size_x, sy = d.size_y;
+    mix(&sx, sizeof(sx));
+    mix(&sy, sizeof(sy));
+    mix(&d.resolution, sizeof(d.resolution));
+    mix(&d.origin_x, sizeof(d.origin_x));
+    mix(&d.origin_y, sizeof(d.origin_y));
+    mix(d.costs.data(), d.costs.size());
+    EXPECT_EQ(d.costmap_hash, h);
+  }
   EXPECT_EQ(d.rollout_vx.size(), static_cast<size_t>(d.batch_size) * d.time_steps);
   EXPECT_EQ(d.softmax_weights.size(), d.batch_size);
   EXPECT_EQ(d.rollout_final_check_first_collision.size(), d.batch_size);
@@ -559,6 +582,13 @@ struct IdentityCounts
   int rejected{0}, final_rejected{0}, accepted{0};
 };
 
+// Bit-exact comparison: +0.0 and -0.0 (and differently signed NaNs) compare unequal.
+template<typename T>
+bool sameBits(T a, T b)
+{
+  return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
 // Run the same ticks on a tracing-off and a tracing-on optimizer; every command, exception
 // and memory word must match bit for bit.
 IdentityCounts runIdentity(
@@ -601,15 +631,17 @@ IdentityCounts runIdentity(
     EXPECT_EQ(w_off, w_on) << tag << " tick " << tick;
     (t_on ? k.rejected : k.accepted)++;
     k.final_rejected += w_on.find("not collision-free") != std::string::npos ? 1 : 0;
-    EXPECT_EQ(c_off.twist.linear.x, c_on.twist.linear.x) << tag << " tick " << tick;
-    EXPECT_EQ(c_off.twist.angular.z, c_on.twist.angular.z) << tag << " tick " << tick;
+    EXPECT_TRUE(sameBits(c_off.twist.linear.x, c_on.twist.linear.x)) << tag << " tick " << tick;
+    EXPECT_TRUE(sameBits(c_off.twist.angular.z, c_on.twist.angular.z)) << tag << " tick " << tick;
     for (size_t j = 0; j < off.tape().vx.size(); ++j) {
-      EXPECT_EQ(off.tape().vx(j), on.tape().vx(j)) << tag << " tick " << tick << " step " << j;
-      EXPECT_EQ(off.tape().wz(j), on.tape().wz(j)) << tag << " tick " << tick << " step " << j;
+      EXPECT_TRUE(sameBits(off.tape().vx(j), on.tape().vx(j)))
+        << tag << " tick " << tick << " step " << j;
+      EXPECT_TRUE(sameBits(off.tape().wz(j), on.tape().wz(j)))
+        << tag << " tick " << tick << " step " << j;
     }
     for (size_t j = 0; j < off.history().size(); ++j) {
-      EXPECT_EQ(off.history()[j].vx, on.history()[j].vx) << tag << " tick " << tick;
-      EXPECT_EQ(off.history()[j].wz, on.history()[j].wz) << tag << " tick " << tick;
+      EXPECT_TRUE(sameBits(off.history()[j].vx, on.history()[j].vx)) << tag << " tick " << tick;
+      EXPECT_TRUE(sameBits(off.history()[j].wz, on.history()[j].wz)) << tag << " tick " << tick;
     }
   }
   return k;
@@ -645,6 +677,103 @@ TEST_F(TraceTest, CommandsAndMemoryIdenticalWithTracingOnAndOff)
     collapse_dumps += d.trigger == MppiRejection::TRIGGER_COLLAPSE ? 1 : 0;
   }
   EXPECT_GT(collapse_dumps, 0u) << "the collapse path never ran";
+}
+
+// A final-check rejection of a non-finite sequence (RESULT_REJECTED_NONFINITE) is dumped like a
+// collision rejection when trace_rejections is on.
+TEST_F(TraceTest, NonFiniteRejectionIsDumped)
+{
+  auto n = node("trace_nonfinite", true, false);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink("trace_nonfinite");
+  waitForMatch(n, "trace_nonfinite");
+  opt.warm(std::numeric_limits<float>::quiet_NaN(), 0.0f);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  EXPECT_THROW(
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr),
+    nav2_core::NoValidControl);
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  ASSERT_EQ(sink.cycles[0].result, MppiCycle::RESULT_REJECTED_NONFINITE);
+  ASSERT_EQ(sink.dumps.size(), 1u);
+  EXPECT_EQ(sink.dumps[0].trigger, MppiRejection::TRIGGER_REJECTED);
+  EXPECT_EQ(sink.dumps[0].cycle, sink.cycles[0].cycle);
+  EXPECT_EQ(sink.dumps[0].total_costs.size(), sink.dumps[0].batch_size);
+}
+
+// Rollout ranking with mixed finite and non-finite costs (the dump's best_passing_rollout_rank
+// and cheapest_rollout_final_collision): non-finite costs rank after every finite one.
+TEST(TraceRanking, NonFiniteCostsRankAfterFiniteOnes)
+{
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  const std::vector<float> costs = {nan, 3.0f, inf, 1.0f, nan, -inf, 2.0f, nan, 0.5f};
+  std::vector<size_t> order(costs.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return TraceOptimizer::traceCostRanksBefore(costs[a], costs[b]);
+    });
+  // Finite ascending first, then the non-finite ones in their original order (stable).
+  EXPECT_EQ(order, (std::vector<size_t>{8, 3, 6, 1, 0, 2, 4, 5, 7}));
+  // Strict weak order: irreflexive, and no two elements both rank before each other.
+  for (float a : costs) {
+    EXPECT_FALSE(TraceOptimizer::traceCostRanksBefore(a, a));
+    for (float b : costs) {
+      EXPECT_FALSE(
+        TraceOptimizer::traceCostRanksBefore(a, b) && TraceOptimizer::traceCostRanksBefore(b, a));
+    }
+  }
+}
+
+// Circular body (robot_radius): a pose whose centre cell is free but whose body covers a lethal
+// cell is located at that lethal cell, not reported as the centre with NO_INFORMATION; a body
+// that leaves the map is located at the box corner the check tested.
+TEST_F(TraceTest, CircularBodyRejectionLocatesTheLethalCell)
+{
+  auto round = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "trace_round", "", "trace_round", true);
+  round->set_parameter(rclcpp::Parameter("plugins", std::vector<std::string>{}));
+  round->set_parameter(rclcpp::Parameter("global_frame", "map"));
+  round->set_parameter(rclcpp::Parameter("robot_radius", 0.15));
+  ASSERT_EQ(round->on_configure(rclcpp_lifecycle::State{}), nav2_util::CallbackReturn::SUCCESS);
+  round->pause();
+  round->getLayeredCostmap()->resizeMap(200, 200, 0.02, -2.0, -2.0);
+  auto * g = round->getCostmap();
+  std::fill(g->getCharMap(), g->getCharMap() + 40000, 0);
+  ASSERT_TRUE(round->getUseRadius());
+  const double radius = round->getLayeredCostmap()->getCircumscribedRadius();
+  ASSERT_GT(radius, 0.10);
+  unsigned int lx, ly;
+  ASSERT_TRUE(g->worldToMap(0.08, 0.0, lx, ly));   // inside the body, off the centre
+  g->setCost(lx, ly, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  auto n = node("trace_round_check", false, false);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, round, &params, false);
+  mppi::models::ControlSequence s;
+  s.reset(41);   // standing still: every pose is the start pose
+  opt.setState(pose(0.0, 0.0, 0.0), 0.0);
+  TraceOptimizer::CollisionReport r;
+  EXPECT_FALSE(opt.checkWith(s, true, &r));
+  double wx, wy;
+  g->mapToWorld(lx, ly, wx, wy);
+  EXPECT_EQ(r.cell_cost, nav2_costmap_2d::LETHAL_OBSTACLE);
+  EXPECT_DOUBLE_EQ(r.cell_x, wx);
+  EXPECT_DOUBLE_EQ(r.cell_y, wy);
+
+  g->setCost(lx, ly, nav2_costmap_2d::FREE_SPACE);
+  opt.setState(pose(-1.9, 0.0, 0.0), 0.0);   // centre on the map, body past its edge
+  TraceOptimizer::CollisionReport e;
+  EXPECT_FALSE(opt.checkWith(s, true, &e));
+  EXPECT_EQ(e.cell_cost, nav2_costmap_2d::NO_INFORMATION);
+  EXPECT_DOUBLE_EQ(e.cell_x, -1.9 - radius);
+  EXPECT_DOUBLE_EQ(e.cell_y, -radius);
+  round->on_cleanup(rclcpp_lifecycle::State{});
 }
 
 TEST_F(TraceTest, ProductionCheckIsTheReportingCheck)
