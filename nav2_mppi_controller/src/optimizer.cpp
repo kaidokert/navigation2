@@ -183,6 +183,13 @@ void Optimizer::getParams()
   getParam(trace_stall_speed_, "trace_stall_speed", 0.0, ParameterType::Static);
   // GENERIC: at most one stall dump per this interval (node clock, s).
   getParam(trace_stall_min_interval_s_, "trace_stall_min_interval_s", 1.0, ParameterType::Static);
+  // A negative interval would disable the limit: both intervals are clamped at 0.
+  for (auto * interval : {&trace_collapse_min_interval_s_, &trace_stall_min_interval_s_}) {
+    if (*interval < 0.0) {
+      RCLCPP_WARN(logger_, "MPPI trace dump interval %.3f s < 0: using 0", *interval);
+      *interval = 0.0;
+    }
+  }
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {

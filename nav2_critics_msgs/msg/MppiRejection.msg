@@ -45,7 +45,8 @@ float64[] forecast_x
 float64[] forecast_y
 float64[] forecast_yaw
 int32 first_collision_index
-# Last optimisation iteration: every rollout
+# Every rollout of the last optimisation iteration; for TRIGGER_ALL_COLLIDE, of the first batch the
+# critics failed in that cycle (before the retry reset), with that batch's own costs and weights.
 uint32 batch_size
 uint32 time_steps
 float32[] rollout_vx              # batch_size * time_steps, row-major, the sampled (constrained) controls

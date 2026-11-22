@@ -300,7 +300,7 @@ controller_server:
 | `trajectories`            | `visualization_msgs/MarkerArray` | Randomly generated trajectories, including resulting control sequence |
 | `transformed_global_plan` | `nav_msgs/Path`                  | Part of global plan considered by local planner                       |
 | `mppi_cycles`             | `nav2_critics_msgs/MppiCycle`     | Per-cycle record, when `trace_cycles` is true                         |
-| `mppi_rejections`         | `nav2_critics_msgs/MppiRejection` | Rejected-cycle dump, when `trace_rejections` is true                  |
+| `mppi_rejections`         | `nav2_critics_msgs/MppiRejection` | Cycle dump, when `trace_rejections` is true: final-check rejections, fallback and all-collide cycles, and (when enabled) accepted collapse and stall cycles; `trigger` says which |
 
 ## Notes to Users
 
