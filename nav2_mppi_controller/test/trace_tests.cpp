@@ -502,6 +502,16 @@ TEST_F(TraceTest, FallbackIsOffByDefaultReadOnlyAndCapped)
     const auto set = n->set_parameter(
       rclcpp::Parameter("FollowPath.final_check_fallback_rollouts", 8));
     EXPECT_FALSE(set.successful) << c.tag;
+    for (const auto & p : {rclcpp::Parameter("FollowPath.trace_cycles", true),
+        rclcpp::Parameter("FollowPath.trace_rejections", true),
+        rclcpp::Parameter("FollowPath.trace_collapse_fraction", 0.5),
+        rclcpp::Parameter("FollowPath.trace_collapse_min_speed", 0.1),
+        rclcpp::Parameter("FollowPath.trace_collapse_min_interval_s", 2.0),
+        rclcpp::Parameter("FollowPath.trace_stall_speed", 0.01),
+        rclcpp::Parameter("FollowPath.trace_stall_min_interval_s", 2.0)})
+    {
+      EXPECT_FALSE(n->set_parameter(p).successful) << c.tag << " " << p.get_name();
+    }
     EXPECT_EQ(opt.fallbackRollouts(), c.want) << c.tag;
   }
 }

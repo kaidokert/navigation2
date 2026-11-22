@@ -143,15 +143,25 @@ void Optimizer::getParams()
   // iteration, under the same constraints and final check, and emit the first that passes.
   // Read-only (a runtime change would reset the sequence mid-motion); each try is one final
   // check on the control thread, so N is capped at kMaxFallbackRollouts.
+  // These parameters are declared read-only first: a Static MPPI parameter would otherwise
+  // accept a runtime set, keep the configure-time value and still run the reset callback.
   {
-    // Declared read-only first: a Static MPPI parameter would otherwise accept a runtime set
-    // and silently keep the configure-time value.
     auto node = parent_.lock();
-    const std::string fallback_param = name_ + ".final_check_fallback_rollouts";
-    if (node && !node->has_parameter(fallback_param)) {
-      rcl_interfaces::msg::ParameterDescriptor descriptor;
-      descriptor.read_only = true;
-      node->declare_parameter(fallback_param, rclcpp::ParameterValue(0), descriptor);
+    const std::vector<std::pair<std::string, rclcpp::ParameterValue>> read_only = {
+      {"final_check_fallback_rollouts", rclcpp::ParameterValue(0)},
+      {"trace_cycles", rclcpp::ParameterValue(false)},
+      {"trace_rejections", rclcpp::ParameterValue(false)},
+      {"trace_collapse_fraction", rclcpp::ParameterValue(0.0)},
+      {"trace_collapse_min_speed", rclcpp::ParameterValue(0.05)},
+      {"trace_collapse_min_interval_s", rclcpp::ParameterValue(0.5)},
+      {"trace_stall_speed", rclcpp::ParameterValue(0.0)},
+      {"trace_stall_min_interval_s", rclcpp::ParameterValue(1.0)}};
+    for (const auto & [param, value] : read_only) {
+      if (node && !node->has_parameter(name_ + "." + param)) {
+        rcl_interfaces::msg::ParameterDescriptor descriptor;
+        descriptor.read_only = true;
+        node->declare_parameter(name_ + "." + param, value, descriptor);
+      }
     }
   }
   getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0,
