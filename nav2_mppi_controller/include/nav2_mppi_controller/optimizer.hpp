@@ -200,6 +200,11 @@ protected:
   void applyControlSequenceConstraints();
 
   /**
+   * @brief The hard vehicle constraints of applyControlSequenceConstraints() on any sequence
+   */
+  void constrainSequence(models::ControlSequence & sequence) const;
+
+  /**
    * @brief  Update velocities in state
    * @param state fill state with velocities on each step
    */

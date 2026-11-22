@@ -143,6 +143,17 @@ void Optimizer::getParams()
   // iteration, under the same constraints and final check, and emit the first that passes.
   // Read-only (a runtime change would reset the sequence mid-motion); each try is one final
   // check on the control thread, so N is capped at kMaxFallbackRollouts.
+  {
+    // Declared read-only first: a Static MPPI parameter would otherwise accept a runtime set
+    // and silently keep the configure-time value.
+    auto node = parent_.lock();
+    const std::string fallback_param = name_ + ".final_check_fallback_rollouts";
+    if (node && !node->has_parameter(fallback_param)) {
+      rcl_interfaces::msg::ParameterDescriptor descriptor;
+      descriptor.read_only = true;
+      node->declare_parameter(fallback_param, rclcpp::ParameterValue(0), descriptor);
+    }
+  }
   getParam(final_check_fallback_rollouts_, "final_check_fallback_rollouts", 0,
     ParameterType::Static);
   if (final_check_fallback_rollouts_ < 0) {
@@ -472,25 +483,30 @@ void Optimizer::generateNoisedTrajectories()
 
 void Optimizer::applyControlSequenceConstraints()
 {
+  constrainSequence(control_sequence_);
+}
+
+void Optimizer::constrainSequence(models::ControlSequence & sequence) const
+{
   auto & s = settings_;
 
   if (isHolonomic()) {
-    control_sequence_.vy = xt::clip(control_sequence_.vy, -s.constraints.vy, s.constraints.vy);
+    sequence.vy = xt::clip(sequence.vy, -s.constraints.vy, s.constraints.vy);
   }
 
-  control_sequence_.vx = xt::clip(control_sequence_.vx, s.constraints.vx_min, s.constraints.vx_max);
-  control_sequence_.wz = xt::clip(control_sequence_.wz, -s.constraints.wz, s.constraints.wz);
+  sequence.vx = xt::clip(sequence.vx, s.constraints.vx_min, s.constraints.vx_max);
+  sequence.wz = xt::clip(sequence.wz, -s.constraints.wz, s.constraints.wz);
 
   float max_delta_vx = s.model_dt * s.constraints.ax_max;
   float min_delta_vx = s.model_dt * s.constraints.ax_min;
   float max_delta_vy = s.model_dt * s.constraints.ay_max;
   float min_delta_vy = s.model_dt * s.constraints.ay_min;
   float max_delta_wz = s.model_dt * s.constraints.az_max;
-  float vx_last = control_sequence_.vx(0);
-  float vy_last = control_sequence_.vy(0);
-  float wz_last = control_sequence_.wz(0);
-  for (unsigned int i = 1; i != control_sequence_.vx.shape(0); i++) {
-    float & vx_curr = control_sequence_.vx(i);
+  float vx_last = sequence.vx(0);
+  float vy_last = sequence.vy(0);
+  float wz_last = sequence.wz(0);
+  for (unsigned int i = 1; i != sequence.vx.shape(0); i++) {
+    float & vx_curr = sequence.vx(i);
     if (vx_last > 0) {
       vx_curr = std::clamp(vx_curr, vx_last + min_delta_vx, vx_last + max_delta_vx);
     } else {
@@ -498,12 +514,12 @@ void Optimizer::applyControlSequenceConstraints()
     }
     vx_last = vx_curr;
 
-    float & wz_curr = control_sequence_.wz(i);
+    float & wz_curr = sequence.wz(i);
     wz_curr = std::clamp(wz_curr, wz_last - max_delta_wz, wz_last + max_delta_wz);
     wz_last = wz_curr;
 
     if (isHolonomic()) {
-      float & vy_curr = control_sequence_.vy(i);
+      float & vy_curr = sequence.vy(i);
       if (vy_last > 0) {
         vy_curr = std::clamp(vy_curr, vy_last + min_delta_vy, vy_last + max_delta_vy);
       } else {
@@ -513,7 +529,7 @@ void Optimizer::applyControlSequenceConstraints()
     }
   }
 
-  motion_model_->applyConstraints(control_sequence_);
+  motion_model_->applyConstraints(sequence);
 }
 
 void Optimizer::updateStateVelocities(
@@ -1201,6 +1217,7 @@ void Optimizer::publishTraceUnguarded(
         one.wz(j) = state_.cwz(i, j);
         one.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
       }
+      constrainSequence(one);  // as tryRolloutFallback emits a rollout
       CollisionReport r;
       if (sequenceCollisionFree(one, shift, &r)) {
         ++pass_final;

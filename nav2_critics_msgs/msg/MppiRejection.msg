@@ -49,4 +49,5 @@ string[] critic_names
 float32[] critic_costs            # len(critic_names) * batch_size, row-major: each critic's cost per rollout
 float32[] total_costs             # batch_size: critic + control costs used by the softmax
 float32[] softmax_weights         # batch_size
-int32[] rollout_final_check_first_collision   # batch_size: the production check on each rollout's controls (MppiCycle index convention: -2 passes, -4 not evaluable)
+int32[] rollout_final_check_first_collision   # batch_size: the production check on each rollout's controls after the sequence
+                                              # constraints, as the fallback emits them (MppiCycle index convention: -2 passes, -4 not evaluable)
