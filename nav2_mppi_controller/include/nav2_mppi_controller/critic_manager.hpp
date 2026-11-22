@@ -111,6 +111,19 @@ public:
     */
   void evalTrajectoriesScores(CriticData & data) const;
 
+  /**
+    * @brief Keep each critic's per-trajectory cost of the latest scoring pass (diagnostics only).
+    * Capturing reads cost deltas; it never changes the scores.
+    */
+  void setCaptureCriticCosts(bool capture) {capture_critic_costs_ = capture;}
+
+  /**
+    * @brief Critic names and per-trajectory costs captured by the latest scoring pass.
+    * Critics skipped after a fail_flag are absent.
+    */
+  const std::vector<std::string> & capturedCriticNames() const {return captured_names_;}
+  const std::vector<xt::xtensor<float, 1>> & capturedCriticCosts() const {return captured_costs_;}
+
 protected:
   /**
     * @brief Get parameters (critics to load)
@@ -142,6 +155,9 @@ protected:
   rclcpp_lifecycle::LifecyclePublisher<nav2_critics_msgs::msg::CriticsStats>::SharedPtr
     critics_effect_pub_;
   bool publish_critics_stats_{false};
+  bool capture_critic_costs_{false};
+  mutable std::vector<std::string> captured_names_;
+  mutable std::vector<xt::xtensor<float, 1>> captured_costs_;
 };
 
 }  // namespace mppi

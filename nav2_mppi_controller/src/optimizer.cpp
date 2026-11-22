@@ -14,7 +14,9 @@
 
 #include "nav2_mppi_controller/optimizer.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <cstring>
 #include <type_traits>
 #include <limits>
@@ -30,6 +32,7 @@
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
+#include "nav2_util/line_iterator.hpp"
 
 namespace mppi
 {
@@ -72,7 +75,19 @@ void Optimizer::initialize(
   getParams();
 
   critic_manager_.on_configure(parent_, name_, costmap_ros_, parameters_handler_);
+  critic_manager_.setCaptureCriticCosts(trace_rejections_);
   noise_generator_.initialize(settings_, isHolonomic(), name_, parameters_handler_);
+
+  if (trace_cycles_) {
+    trace_cycle_pub_ = node->create_publisher<nav2_critics_msgs::msg::MppiCycle>(
+      "~/mppi_cycles", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
+    RCLCPP_INFO(logger_, "Publishing per-cycle MPPI records to ~/mppi_cycles");
+  }
+  if (trace_rejections_) {
+    trace_rejection_pub_ = node->create_publisher<nav2_critics_msgs::msg::MppiRejection>(
+      "~/mppi_rejections", rclcpp::QoS(rclcpp::KeepLast(20)).reliable());
+    RCLCPP_INFO(logger_, "Publishing MPPI rejection dumps to ~/mppi_rejections");
+  }
 
   reset();
 }
@@ -86,11 +101,15 @@ void Optimizer::shutdown()
 void Optimizer::on_activate()
 {
   critic_manager_.on_activate();
+  if (trace_cycle_pub_) {trace_cycle_pub_->on_activate();}
+  if (trace_rejection_pub_) {trace_rejection_pub_->on_activate();}
 }
 
 void Optimizer::on_deactivate()
 {
   critic_manager_.on_deactivate();
+  if (trace_cycle_pub_) {trace_cycle_pub_->on_deactivate();}
+  if (trace_rejection_pub_) {trace_rejection_pub_->on_deactivate();}
 }
 
 void Optimizer::getParams()
@@ -119,6 +138,18 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  // GENERIC diagnostics, default off: per-cycle record and rejection dump. Read-only.
+  getParam(trace_cycles_, "trace_cycles", false, ParameterType::Static);
+  getParam(trace_rejections_, "trace_rejections", false, ParameterType::Static);
+  // GENERIC diagnostics, default off (0): with trace_rejections, also dump an accepted cycle whose
+  // command |vx| falls below this fraction of max(|warm-start vx[0]|, |measured vx|).
+  getParam(trace_collapse_fraction_, "trace_collapse_fraction", 0.0, ParameterType::Static);
+  // GENERIC: the collapse dump needs max(|warm vx[0]|, |measured vx|) at least this (m/s).
+  getParam(trace_collapse_min_speed_, "trace_collapse_min_speed", 0.05, ParameterType::Static);
+  // GENERIC: at most one collapse dump per this interval (node clock, s). A collapse dump runs the
+  // per-rollout checks on the control thread; collapses come in runs (e.g. after a reset).
+  getParam(trace_collapse_min_interval_s_, "trace_collapse_min_interval_s", 0.5,
+    ParameterType::Static);
 
   s.base_constraints.ax_max = std::abs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -213,6 +244,20 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
 {
   prepare(robot_pose, robot_speed, plan, goal, goal_checker);
 
+  const bool tracing = trace_cycles_ || trace_rejections_;
+  if (tracing) {
+    ++trace_cycle_;
+    trace_plan_stamp_ = plan.header.stamp;
+    trace_plan_size_ = plan.poses.size();
+    if (trace_rejections_) {trace_plan_ = plan;}
+    trace_warm_ = control_sequence_;
+    trace_opt_ = models::ControlSequence{};
+    trace_smooth_ = models::ControlSequence{};
+    trace_final_ = models::ControlSequence{};
+    trace_report_ = CollisionReport{};
+    trace_final_nonfinite_ = false;
+  }
+
   bool diag = (diag_tick_++ % 4 == 0);
   const auto ts = settings_.time_steps;
 
@@ -225,9 +270,17 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
-  do {
-    optimize(diag);
-  } while (fallback(critics_data_.fail_flag));
+  try {
+    do {
+      optimize(diag);
+    } while (fallback(critics_data_.fail_flag));
+  } catch (const nav2_core::NoValidControl &) {
+    if (tracing) {
+      publishTrace(nav2_critics_msgs::msg::MppiCycle::RESULT_ALL_ROLLOUTS_COLLIDE, nullptr);
+    }
+    throw;
+  }
+  if (tracing) {trace_opt_ = control_sequence_;}
 
   // [E] POST-OPTIMIZE (after softmax + accel constraints)
   if (diag && ts >= 5) {
@@ -239,6 +292,7 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   }
 
   utils::savitskyGolayFilter(control_sequence_, control_history_, settings_);
+  if (tracing) {trace_smooth_ = control_sequence_;}
 
   // [F] POST-SG FILTER
   if (diag && ts >= 5) {
@@ -249,7 +303,21 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
       control_sequence_.wz(0), control_sequence_.wz(1), control_sequence_.wz(2));
   }
 
-  auto control = getValidatedControlFromSequenceAsTwist(plan.header.stamp);
+  geometry_msgs::msg::TwistStamped control;
+  try {
+    control = getValidatedControlFromSequenceAsTwist(plan.header.stamp);
+  } catch (const nav2_core::NoValidControl &) {
+    if (tracing) {
+      publishTrace(
+        trace_final_nonfinite_ ?
+        nav2_critics_msgs::msg::MppiCycle::RESULT_REJECTED_NONFINITE :
+        nav2_critics_msgs::msg::MppiCycle::RESULT_REJECTED_COLLISION, nullptr);
+    }
+    throw;
+  }
+  if (tracing) {
+    publishTrace(nav2_critics_msgs::msg::MppiCycle::RESULT_ACCEPTED, &control);
+  }
 
   // [G] FINAL CMD_VEL
   if (diag) {
@@ -557,6 +625,10 @@ void Optimizer::updateControlSequence(bool diag)
   auto && exponents = xt::eval(xt::exp(-1 / settings_.temperature * costs_normalized));
   auto && softmaxes = xt::eval(exponents / xt::sum(exponents, immediate));
   auto && softmaxes_extened = xt::eval(xt::view(softmaxes, xt::all(), xt::newaxis()));
+  if (trace_rejections_) {
+    trace_total_costs_ = costs_;
+    trace_softmax_ = softmaxes;
+  }
 
   // [D] SOFTMAX: how concentrated are the weights?
   if (diag) {
@@ -593,16 +665,21 @@ void Optimizer::updateControlSequence(bool diag)
 
 bool Optimizer::controlSequenceFinite() const
 {
+  return sequenceFinite(control_sequence_);
+}
+
+bool Optimizer::sequenceFinite(const models::ControlSequence & sequence) const
+{
   const size_t n = settings_.time_steps;
   if (!motion_model_ || n < 2 || !finiteValue(settings_.model_dt) || settings_.model_dt <= 0 ||
-    control_sequence_.vx.size() != n || control_sequence_.wz.size() != n ||
-    control_sequence_.vy.size() != n)
+    sequence.vx.size() != n || sequence.wz.size() != n ||
+    sequence.vy.size() != n)
   {
     return false;
   }
   for (size_t j = 0; j < n; ++j) {
-    if (!finiteValue(control_sequence_.vx(j)) || !finiteValue(control_sequence_.wz(j)) ||
-      (isHolonomic() && !finiteValue(control_sequence_.vy(j))))
+    if (!finiteValue(sequence.vx(j)) || !finiteValue(sequence.wz(j)) ||
+      (isHolonomic() && !finiteValue(sequence.vy(j))))
     {
       return false;
     }
@@ -612,9 +689,16 @@ bool Optimizer::controlSequenceFinite() const
 
 bool Optimizer::controlSequenceCollisionFree() const
 {
+  return sequenceCollisionFree(control_sequence_, settings_.shift_control_sequence, nullptr);
+}
+
+bool Optimizer::sequenceCollisionFree(
+  const models::ControlSequence & sequence, bool shift, CollisionReport * report) const
+{
   // Adapted from PR #14's final filtered-sequence guard. It is unconditional
   // here: scoring sampled rollouts is not proof that the emitted mean is clear.
-  if (!costmap_ || !costmap_ros_ || !controlSequenceFinite()) {return false;}
+  if (report) {*report = CollisionReport{};}  // first_index -4: rejected before any pose
+  if (!costmap_ || !costmap_ros_ || !sequenceFinite(sequence)) {return false;}
   const auto & p = state_.pose.pose.position;
   const auto & q = state_.pose.pose.orientation;
   if (!finiteValue(p.x) || !finiteValue(p.y) || !finiteValue(q.x) || !finiteValue(q.y) ||
@@ -627,7 +711,7 @@ bool Optimizer::controlSequenceCollisionFree() const
   }
 
   const size_t n = settings_.time_steps;
-  const size_t offset = settings_.shift_control_sequence ? 1 : 0;
+  const size_t offset = shift ? 1 : 0;
   models::State predicted;
   // The first state column is measured velocity. Include one additional column
   // so every command in the emitted horizon contributes to the forecast.
@@ -636,9 +720,9 @@ bool Optimizer::controlSequenceCollisionFree() const
   predicted.speed = state_.speed;
   for (size_t j = 0; j <= n; ++j) {
     const size_t k = std::min(j + offset, n - 1);
-    predicted.cvx(0, j) = control_sequence_.vx(k);
-    predicted.cwz(0, j) = control_sequence_.wz(k);
-    if (isHolonomic()) {predicted.cvy(0, j) = control_sequence_.vy(k);}
+    predicted.cvx(0, j) = sequence.vx(k);
+    predicted.cwz(0, j) = sequence.wz(k);
+    if (isHolonomic()) {predicted.cvy(0, j) = sequence.vy(k);}
   }
   updateStateVelocities(predicted);
   models::Trajectories trajectory;
@@ -706,10 +790,137 @@ bool Optimizer::controlSequenceCollisionFree() const
       const double cost = checker.footprintCostAtPose(x, y, yaw, footprint);
       return cost >= 0 && cost < nav2_costmap_2d::LETHAL_OBSTACLE;
     };
+  // Diagnostics only: the first lethal, unknown or off-map cell under a failing pose,
+  // found the way the check rasterises the body (centre cell, then perimeter edges).
+  const auto locate = [&](double x, double y, double yaw) {
+      const auto off_map = [&](double wx, double wy) {
+          report->cell_x = wx;
+          report->cell_y = wy;
+          report->cell_cost = nav2_costmap_2d::NO_INFORMATION;
+        };
+      const auto cell = [&](unsigned int mx, unsigned int my) {
+          costmap_->mapToWorld(mx, my, report->cell_x, report->cell_y);
+          report->cell_cost = costmap_->getCost(mx, my);
+        };
+      unsigned int mx, my;
+      if (!in_bounds(x, y) || !finiteValue(yaw) || !costmap_->worldToMap(x, y, mx, my)) {
+        off_map(x, y);
+        return;
+      }
+      const auto center_cost = costmap_->getCost(mx, my);
+      if (center_cost >= (circle ? nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE :
+        nav2_costmap_2d::LETHAL_OBSTACLE))
+      {
+        cell(mx, my);
+        return;
+      }
+      if (circle) {  // the production circular-body scan, same arithmetic and order
+        for (const double sgn : {-1.0, 1.0}) {  // the two box corners the check tests
+          if (!in_bounds(x + sgn * radius, y + sgn * radius)) {
+            off_map(x + sgn * radius, y + sgn * radius);
+            return;
+          }
+        }
+        unsigned int x0, y0, x1, y1;
+        if (!costmap_->worldToMap(x - radius, y - radius, x0, y0) ||
+          !costmap_->worldToMap(x + radius, y + radius, x1, y1))
+        {
+          off_map(x, y);
+          return;
+        }
+        const double resolution = costmap_->getResolution();
+        for (unsigned int cy = y0; cy <= y1; ++cy) {
+          const double bottom = costmap_->getOriginY() + cy * resolution;
+          const double dy = std::max({bottom - y, 0.0, y - bottom - resolution});
+          for (unsigned int cx = x0; cx <= x1; ++cx) {
+            const double left = costmap_->getOriginX() + cx * resolution;
+            const double dx = std::max({left - x, 0.0, x - left - resolution});
+            if (dx * dx + dy * dy <= radius * radius &&
+              costmap_->getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE)
+            {
+              cell(cx, cy);
+              return;
+            }
+          }
+        }
+        off_map(x, y);  // not reached when the pose failed the circular check
+        return;
+      }
+      const double c = std::cos(yaw), sn = std::sin(yaw);
+      for (const auto & vertex : footprint) {  // the production pre-check, same arithmetic
+        const double wx = x + c * vertex.x - sn * vertex.y;
+        const double wy = y + sn * vertex.x + c * vertex.y;
+        if (!in_bounds(wx, wy)) {
+          off_map(wx, wy);
+          return;
+        }
+      }
+      // FootprintCollisionChecker::footprintCostAtPose: same vertex arithmetic, edges
+      // i -> i + 1, then the closing edge vertex 0 -> last; it stops at the first LETHAL
+      // cell and otherwise keeps the maximum (NO_INFORMATION also rejects).
+      const double cos_th = cos(yaw);
+      const double sin_th = sin(yaw);
+      std::vector<std::pair<unsigned int, unsigned int>> v;
+      for (const auto & vertex : footprint) {
+        const double wx = x + (vertex.x * cos_th - vertex.y * sin_th);
+        const double wy = y + (vertex.x * sin_th + vertex.y * cos_th);
+        unsigned int vx, vy;
+        if (!costmap_->worldToMap(wx, wy, vx, vy)) {
+          off_map(wx, wy);
+          return;
+        }
+        v.emplace_back(vx, vy);
+      }
+      std::vector<std::pair<size_t, size_t>> edges;
+      for (size_t k = 0; k + 1 < v.size(); ++k) {
+        edges.emplace_back(k, k + 1);
+      }
+      edges.emplace_back(0, v.size() - 1);
+      bool unknown = false;
+      unsigned int ux = 0, uy = 0;
+      for (const auto & e : edges) {
+        for (nav2_util::LineIterator line(v[e.first].first, v[e.first].second,
+          v[e.second].first, v[e.second].second); line.isValid(); line.advance())
+        {
+          const auto cost = costmap_->getCost(line.getX(), line.getY());
+          if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
+            cell(line.getX(), line.getY());
+            return;
+          }
+          if (cost > nav2_costmap_2d::LETHAL_OBSTACLE && !unknown) {
+            unknown = true;
+            ux = line.getX();
+            uy = line.getY();
+          }
+        }
+      }
+      if (unknown) {cell(ux, uy);}
+    };
+  if (report) {
+    report->first_index = -2;
+    report->forecast_x.resize(n + 1);
+    report->forecast_y.resize(n + 1);
+    report->forecast_yaw.resize(n + 1);
+    for (size_t j = 0; j <= n; ++j) {
+      report->forecast_x[j] = trajectory.x(0, j);
+      report->forecast_y[j] = trajectory.y(0, j);
+      report->forecast_yaw[j] = trajectory.yaws(0, j);
+    }
+  }
   // Never rely on forward prediction to notice an already-occupied footprint.
-  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {return false;}
+  if (!clear_pose(p.x, p.y, tf2::getYaw(q))) {
+    if (report) {
+      report->first_index = -1;
+      locate(p.x, p.y, tf2::getYaw(q));
+    }
+    return false;
+  }
   for (size_t j = 0; j <= n; ++j) {
     if (!clear_pose(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j))) {
+      if (report) {
+        report->first_index = static_cast<int>(j);
+        locate(trajectory.x(0, j), trajectory.y(0, j), trajectory.yaws(0, j));
+      }
       return false;
     }
   }
@@ -719,17 +930,26 @@ bool Optimizer::controlSequenceCollisionFree() const
 geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwist(
   const builtin_interfaces::msg::Time & stamp)
 {
+  const bool tracing = trace_cycles_ || trace_rejections_;
   // Validate raw controls before clamping can turn NaN/Inf into a finite bound.
   if (controlSequenceFinite()) {
     // Smoothing follows optimization and can invalidate the Ackermann cone.
     // No velocity or steering adjustment is permitted after this validation.
     applyControlSequenceConstraints();
-    if (controlSequenceCollisionFree()) {
+    if (tracing) {trace_final_ = control_sequence_;}
+    if (sequenceCollisionFree(
+        control_sequence_, settings_.shift_control_sequence,
+        tracing ? &trace_report_ : nullptr))
+    {
       const auto control = getControlFromSequenceAsTwist(stamp);
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
     }
+  }
+  if (tracing && !controlSequenceFinite()) {
+    trace_final_ = control_sequence_;
+    trace_final_nonfinite_ = true;
   }
   control_sequence_.reset(settings_.time_steps);
   control_history_.fill({0.0f, 0.0f, 0.0f});
@@ -800,6 +1020,234 @@ void Optimizer::setSpeedLimit(double speed_limit, bool percentage)
 models::Trajectories & Optimizer::getGeneratedTrajectories()
 {
   return generated_trajectories_;
+}
+
+namespace
+{
+uint64_t fnv1a(uint64_t h, const void * data, size_t n)
+{
+  const auto * p = static_cast<const unsigned char *>(data);
+  for (size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+uint64_t costmapHash(const nav2_costmap_2d::Costmap2D & cm)
+{
+  uint64_t h = 14695981039346656037ULL;
+  const unsigned int sx = cm.getSizeInCellsX(), sy = cm.getSizeInCellsY();
+  const double res = cm.getResolution(), ox = cm.getOriginX(), oy = cm.getOriginY();
+  h = fnv1a(h, &sx, sizeof(sx));
+  h = fnv1a(h, &sy, sizeof(sy));
+  h = fnv1a(h, &res, sizeof(res));
+  h = fnv1a(h, &ox, sizeof(ox));
+  h = fnv1a(h, &oy, sizeof(oy));
+  return fnv1a(h, cm.getCharMap(), static_cast<size_t>(sx) * sy);
+}
+
+void copySequence(
+  const mppi::models::ControlSequence & s, std::vector<float> & vx, std::vector<float> & wz)
+{
+  vx.assign(s.vx.begin(), s.vx.end());
+  wz.assign(s.wz.begin(), s.wz.end());
+}
+}  // namespace
+
+void Optimizer::publishTrace(
+  uint8_t result, const geometry_msgs::msg::TwistStamped * command)
+{
+  try {
+    publishTraceUnguarded(result, command);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(logger_, "MPPI trace not published: %s", e.what());
+  } catch (...) {
+    RCLCPP_WARN(logger_, "MPPI trace not published");
+  }
+}
+
+void Optimizer::publishTraceUnguarded(
+  uint8_t result, const geometry_msgs::msg::TwistStamped * command)
+{
+  using nav2_critics_msgs::msg::MppiCycle;
+  auto node = parent_.lock();
+  if (!node) {return;}
+  const bool shift = settings_.shift_control_sequence;
+  const bool rejected = result == MppiCycle::RESULT_REJECTED_COLLISION ||
+    result == MppiCycle::RESULT_REJECTED_NONFINITE;
+  // Collapse: an accepted command far below the larger of the warm start and the measured speed,
+  // rate limited to one dump per trace_collapse_min_interval_s.
+  bool collapse = false;
+  if (result == MppiCycle::RESULT_ACCEPTED && command && trace_collapse_fraction_ > 0.0 &&
+    trace_warm_.vx.size() > 0)
+  {
+    const double ref = std::max(
+      std::abs(static_cast<double>(trace_warm_.vx(0))), std::abs(state_.speed.linear.x));
+    collapse = ref >= trace_collapse_min_speed_ &&
+      std::abs(command->twist.linear.x) < trace_collapse_fraction_ * ref;
+    if (collapse) {
+      const rclcpp::Time now = node->get_clock()->now();
+      const double since = trace_last_collapse_dump_ ?
+        (now - *trace_last_collapse_dump_).seconds() : std::numeric_limits<double>::infinity();
+      // A clock that went backwards (sim reset) never suppresses the next dump.
+      if (since >= 0.0 && since < trace_collapse_min_interval_s_) {
+        collapse = false;
+      }
+    }
+  }
+  const bool want_cycle = trace_cycle_pub_ && trace_cycle_pub_->is_activated();
+  const bool want_dump = (rejected || collapse) && trace_rejection_pub_ &&
+    trace_rejection_pub_->is_activated();
+  if (!want_cycle && !want_dump) {return;}
+
+  std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
+  const uint64_t hash = costmapHash(*costmap_);
+  const auto stamp = node->get_clock()->now();
+  const double yaw = tf2::getYaw(state_.pose.pose.orientation);
+
+  // Stage checks: the production check on earlier sequences (no side effects).
+  const auto stage = [&](const models::ControlSequence & seq, bool shifted) {
+      if (seq.vx.size() != settings_.time_steps) {return -3;}
+      CollisionReport r;
+      return sequenceCollisionFree(seq, shifted, &r) ? -2 : r.first_index;
+    };
+
+  // Rejected cycles: run the production check on every rollout of the last iteration.
+  const size_t batch = state_.cvx.shape(0);
+  const size_t steps = state_.cvx.shape(1);
+  std::vector<int32_t> rollout_first;
+  int32_t clear_unshifted = -1, pass_final = -1, best_rank = -1, cheapest_first = -3;
+  if (want_dump && batch > 0 && steps == settings_.time_steps &&
+    trace_total_costs_.size() == batch)
+  {
+    rollout_first.assign(batch, -2);
+    clear_unshifted = 0;
+    pass_final = 0;
+    models::ControlSequence one;
+    one.reset(steps);
+    for (size_t i = 0; i < batch; ++i) {
+      for (size_t j = 0; j < steps; ++j) {
+        one.vx(j) = state_.cvx(i, j);
+        one.wz(j) = state_.cwz(i, j);
+        one.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
+      }
+      CollisionReport r;
+      if (sequenceCollisionFree(one, shift, &r)) {
+        ++pass_final;
+      } else {
+        rollout_first[i] = r.first_index;
+      }
+      clear_unshifted += sequenceCollisionFree(one, false, nullptr) ? 1 : 0;
+    }
+    std::vector<size_t> order(batch);
+    for (size_t i = 0; i < batch; ++i) {
+      order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return traceCostRanksBefore(trace_total_costs_(a), trace_total_costs_(b));
+      });
+    cheapest_first = rollout_first[order[0]];
+    for (size_t r = 0; r < batch; ++r) {
+      if (rollout_first[order[r]] == -2) {
+        best_rank = static_cast<int32_t>(r);
+        break;
+      }
+    }
+  }
+
+  if (want_cycle) {
+    auto m = std::make_unique<MppiCycle>();
+    m->stamp = stamp;
+    m->cycle = trace_cycle_;
+    m->pose_x = state_.pose.pose.position.x;
+    m->pose_y = state_.pose.pose.position.y;
+    m->pose_yaw = yaw;
+    m->speed_vx = state_.speed.linear.x;
+    m->speed_wz = state_.speed.angular.z;
+    m->plan_stamp = trace_plan_stamp_;
+    m->plan_size = static_cast<uint32_t>(trace_plan_size_);
+    m->costmap_hash = hash;
+    m->costmap_origin_x = costmap_->getOriginX();
+    m->costmap_origin_y = costmap_->getOriginY();
+    copySequence(trace_warm_, m->warm_vx, m->warm_wz);
+    copySequence(trace_opt_, m->opt_vx, m->opt_wz);
+    copySequence(trace_smooth_, m->smooth_vx, m->smooth_wz);
+    copySequence(trace_final_, m->final_vx, m->final_wz);
+    m->result = result;
+    m->cmd_vx = command ? command->twist.linear.x : 0.0;
+    m->cmd_wz = command ? command->twist.angular.z : 0.0;
+    m->first_collision_index = trace_report_.first_index;
+    m->collision_cell_x = trace_report_.cell_x;
+    m->collision_cell_y = trace_report_.cell_y;
+    m->collision_cell_cost = trace_report_.cell_cost;
+    m->opt_unshifted_first_collision = stage(trace_opt_, false);
+    m->opt_shifted_first_collision = stage(trace_opt_, shift);
+    m->smooth_unshifted_first_collision = stage(trace_smooth_, false);
+    m->smooth_shifted_first_collision = stage(trace_smooth_, shift);
+    m->rollouts = static_cast<uint32_t>(batch);
+    m->rollouts_clear_unshifted = clear_unshifted;
+    m->rollouts_pass_final_check = pass_final;
+    m->best_passing_rollout_rank = best_rank;
+    m->cheapest_rollout_final_collision = cheapest_first;
+    trace_cycle_pub_->publish(std::move(m));
+  }
+
+  if (want_dump) {
+    auto d = std::make_unique<nav2_critics_msgs::msg::MppiRejection>();
+    d->stamp = stamp;
+    d->cycle = trace_cycle_;
+    d->trigger = rejected ? nav2_critics_msgs::msg::MppiRejection::TRIGGER_REJECTED :
+      nav2_critics_msgs::msg::MppiRejection::TRIGGER_COLLAPSE;
+    d->cmd_vx = command ? command->twist.linear.x : 0.0;
+    d->cmd_wz = command ? command->twist.angular.z : 0.0;
+    d->size_x = costmap_->getSizeInCellsX();
+    d->size_y = costmap_->getSizeInCellsY();
+    d->resolution = costmap_->getResolution();
+    d->origin_x = costmap_->getOriginX();
+    d->origin_y = costmap_->getOriginY();
+    const auto * cells = costmap_->getCharMap();
+    d->costs.assign(cells, cells + static_cast<size_t>(d->size_x) * d->size_y);
+    d->costmap_hash = hash;
+    for (const auto & v : costmap_ros_->getRobotFootprint()) {
+      d->footprint_x.push_back(v.x);
+      d->footprint_y.push_back(v.y);
+    }
+    d->pose_x = state_.pose.pose.position.x;
+    d->pose_y = state_.pose.pose.position.y;
+    d->pose_yaw = yaw;
+    d->speed_vx = state_.speed.linear.x;
+    d->speed_wz = state_.speed.angular.z;
+    for (const auto & p : trace_plan_.poses) {
+      d->plan_x.push_back(p.pose.position.x);
+      d->plan_y.push_back(p.pose.position.y);
+      d->plan_yaw.push_back(tf2::getYaw(p.pose.orientation));
+    }
+    d->goal_x = goal_.position.x;
+    d->goal_y = goal_.position.y;
+    d->goal_yaw = tf2::getYaw(goal_.orientation);
+    d->forecast_x = trace_report_.forecast_x;
+    d->forecast_y = trace_report_.forecast_y;
+    d->forecast_yaw = trace_report_.forecast_yaw;
+    d->first_collision_index = trace_report_.first_index;
+    d->batch_size = static_cast<uint32_t>(batch);
+    d->time_steps = static_cast<uint32_t>(steps);
+    d->rollout_vx.assign(state_.cvx.begin(), state_.cvx.end());
+    d->rollout_wz.assign(state_.cwz.begin(), state_.cwz.end());
+    d->critic_names = critic_manager_.capturedCriticNames();
+    for (const auto & c : critic_manager_.capturedCriticCosts()) {
+      d->critic_costs.insert(d->critic_costs.end(), c.begin(), c.end());
+    }
+    d->total_costs.assign(trace_total_costs_.begin(), trace_total_costs_.end());
+    d->softmax_weights.assign(trace_softmax_.begin(), trace_softmax_.end());
+    d->rollout_final_check_first_collision = rollout_first;
+    trace_rejection_pub_->publish(std::move(d));
+    if (!rejected) {
+      // Only a published collapse dump starts the interval; a failure before this point
+      // (caught by publishTrace) leaves the next collapse free to dump.
+      trace_last_collapse_dump_ = node->get_clock()->now();
+    }
+  }
 }
 
 }  // namespace mppi
