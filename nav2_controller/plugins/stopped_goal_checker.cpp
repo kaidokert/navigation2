@@ -117,7 +117,12 @@ bool StoppedGoalChecker::getTolerances(
 rcl_interfaces::msg::SetParametersResult
 StoppedGoalChecker::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
 {
-  rcl_interfaces::msg::SetParametersResult result;
+  rcl_interfaces::msg::SetParametersResult result =
+    SimpleGoalChecker::dynamicParametersCallback(parameters);
+  if (!result.successful) {
+    return result;
+  }
+
   for (auto parameter : parameters) {
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
