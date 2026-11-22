@@ -1217,6 +1217,10 @@ void Optimizer::publishTraceUnguarded(
         one.wz(j) = state_.cwz(i, j);
         one.vy(j) = isHolonomic() ? state_.cvy(i, j) : 0.0f;
       }
+      if (!sequenceFinite(one)) {  // the fallback never emits a non-finite raw row
+        rollout_first[i] = -4;
+        continue;
+      }
       constrainSequence(one);  // as tryRolloutFallback emits a rollout
       CollisionReport r;
       if (sequenceCollisionFree(one, shift, &r)) {

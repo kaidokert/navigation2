@@ -98,6 +98,14 @@ public:
       }
     }
   }
+  // Row `row` of the noise bank becomes +Inf: that sampled rollout is not finite.
+  void poisonRow(size_t row)
+  {
+    auto & vx = noise_generator_.*NoiseAccess::vx();
+    for (size_t j = 0; j < vx.shape(1); ++j) {
+      vx(row, j) = std::numeric_limits<float>::infinity();
+    }
+  }
   void warm(float vx, float wz)
   {
     control_sequence_.vx.fill(vx);
@@ -848,6 +856,39 @@ TEST(TraceRanking, NonFiniteCostsRankAfterFiniteOnes)
         TraceOptimizer::traceCostRanksBefore(a, b) && TraceOptimizer::traceCostRanksBefore(b, a));
     }
   }
+}
+
+// A non-finite sampled row is recorded as not evaluable (-4) and never counted as passing: the
+// constraint pass would clip +Inf to vx_max, but the fallback rejects the raw row first.
+TEST_F(TraceTest, NonFiniteRolloutIsNotEvaluableInTheDump)
+{
+  auto n = node("trace_inf_row", true, false);
+  mppi::ParametersHandler params(n);
+  TraceOptimizer opt;
+  opt.configure(n, cm, &params, false);
+  Sink sink("trace_inf_row");
+  waitForMatch(n, "trace_inf_row");
+  opt.freezeNoise();
+  opt.poisonRow(1);
+  opt.warm(0.2f, 0.0f);
+  geometry_msgs::msg::Twist speed;
+  speed.linear.x = 0.2;
+  const auto path = straightPath(1.5);
+  try {
+    opt.evalControl(pose(0.0, 0.0, 0.0), speed, path, path.poses.back().pose, nullptr);
+  } catch (const nav2_core::NoValidControl &) {
+  }
+  sink.spin(1);
+  ASSERT_EQ(sink.cycles.size(), 1u);
+  ASSERT_EQ(sink.dumps.size(), 1u) << "result " << static_cast<int>(sink.cycles[0].result);
+  const auto & d = sink.dumps[0];
+  ASSERT_GT(d.batch_size, 1u);
+  EXPECT_EQ(d.rollout_final_check_first_collision[1], -4);
+  int32_t passing = 0;
+  for (const auto r : d.rollout_final_check_first_collision) {
+    passing += r == -2 ? 1 : 0;
+  }
+  EXPECT_EQ(sink.cycles[0].rollouts_pass_final_check, passing);
 }
 
 // Circular body (robot_radius): a pose whose centre cell is free but whose body covers a lethal
