@@ -201,6 +201,19 @@ protected:
   void applyControlSequenceConstraints();
 
   /**
+   * @brief Gear-change settle (default off): cap |vx| of the sequence's next
+   * gear_change_settle_time seconds at gear_change_settle_speed after the command changes gear,
+   * scaling wz by the same factor (curvature kept). Call after the constraint pass, before the final
+   * collision check; the window is committed only when a command is emitted.
+   */
+  void applyGearChangeSettle();
+
+  /**
+   * @brief Commit the gear-change settle state for the command that is emitted this cycle
+   */
+  void commitGearChangeSettle(float emitted_vx);
+
+  /**
    * @brief The hard vehicle constraints of applyControlSequenceConstraints() on any sequence
    */
   void constrainSequence(models::ControlSequence & sequence) const;
@@ -373,6 +386,18 @@ protected:
   static constexpr int kMaxFallbackRollouts = 64;  // GENERIC bound on final checks per cycle
   int fallback_rank_{-1};  // cost rank of the rollout the fallback emitted this cycle, else -1
   rclcpp::Clock fallback_warn_clock_{RCL_STEADY_TIME};  // throttles the fallback warning
+
+  // Gear-change settle (default 0 = off). After a gear change the steering of a car-like robot
+  // swings to the other lock while the robot already drives; capping the speed for the swing keeps
+  // the distance driven at the wrong curvature short. ROBOT: gear_change_settle_time = the steering
+  // actuator's lock-to-lock swing time (s); gear_change_settle_speed = the speed cap during the
+  // swing (m/s), above the drive's breakaway speed so the robot still moves. Both must be > 0.
+  double gear_change_settle_time_{0.0};
+  double gear_change_settle_speed_{0.0};
+  int settle_gear_{0};                 // sign of the last emitted nonzero command vx, 0 = none yet
+  double settle_until_s_{-1.0};        // node clock (s): the cap applies before this time
+  double settle_pending_until_s_{-1.0};  // window for the candidate this cycle, committed on emit
+  double settle_last_now_s_{-1.0};     // detects a clock that went backwards (sim reset)
 
   // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
   bool trace_cycles_{false};

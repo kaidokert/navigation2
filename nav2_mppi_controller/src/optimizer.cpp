@@ -138,6 +138,9 @@ void Optimizer::getParams()
   getParam(s.sampling_std.vy, "vy_std", 0.2f);
   getParam(s.sampling_std.wz, "wz_std", 0.4f);
   getParam(s.retry_attempt_limit, "retry_attempt_limit", 1);
+  // ROBOT, default 0 = off: gear-change settle (see optimizer.hpp). Dynamic.
+  getParam(gear_change_settle_time_, "gear_change_settle_time", 0.0);
+  getParam(gear_change_settle_speed_, "gear_change_settle_speed", 0.0);
   // GENERIC, default 0 = off (stock behaviour: a rejected mean stops the robot and resets the
   // sequence). N > 0: on a final-check rejection try the N cheapest sampled rollouts of the last
   // iteration, under the same constraints and final check, and emit the first that passes.
@@ -256,6 +259,9 @@ void Optimizer::reset(bool reset_dynamic_speed_limits)
   control_history_[1] = {0.0f, 0.0f, 0.0f};
   control_history_[2] = {0.0f, 0.0f, 0.0f};
   control_history_[3] = {0.0f, 0.0f, 0.0f};
+  settle_gear_ = 0;
+  settle_until_s_ = -1.0;
+  settle_pending_until_s_ = -1.0;
 
   if (reset_dynamic_speed_limits) {
     settings_.constraints = settings_.base_constraints;
@@ -1014,12 +1020,14 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
     // Smoothing follows optimization and can invalidate the Ackermann cone.
     // No velocity or steering adjustment is permitted after this validation.
     applyControlSequenceConstraints();
+    applyGearChangeSettle();
     if (tracing) {trace_final_ = control_sequence_;}
     if (sequenceCollisionFree(
         control_sequence_, settings_.shift_control_sequence,
         tracing ? &trace_report_ : nullptr))
     {
       const auto control = getControlFromSequenceAsTwist(stamp);
+      commitGearChangeSettle(static_cast<float>(control.twist.linear.x));
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
@@ -1030,6 +1038,7 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
         "Final MPPI control sequence is not collision-free; "
         "emitting sampled rollout (cost rank %d)", fallback_rank_);
       const auto control = getControlFromSequenceAsTwist(stamp);
+      commitGearChangeSettle(static_cast<float>(control.twist.linear.x));
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
@@ -1072,6 +1081,7 @@ bool Optimizer::tryRolloutFallback()
     if (!controlSequenceFinite()) {continue;}
     // Same constraint pass and the same final check as the mean.
     applyControlSequenceConstraints();
+    applyGearChangeSettle();
     if (sequenceCollisionFree(control_sequence_, settings_.shift_control_sequence, nullptr)) {
       fallback_rank_ = static_cast<int>(r);
       return true;
@@ -1079,6 +1089,52 @@ bool Optimizer::tryRolloutFallback()
   }
   control_sequence_ = rejected;
   return false;
+}
+
+void Optimizer::applyGearChangeSettle()
+{
+  settle_pending_until_s_ = settle_until_s_;
+  if (gear_change_settle_time_ <= 0.0 || gear_change_settle_speed_ <= 0.0) {return;}
+  auto node = parent_.lock();
+  if (!node) {return;}
+  const double now = node->get_clock()->now().seconds();
+  if (now < settle_last_now_s_) {  // the clock went backwards (sim reset): no gear history
+    settle_gear_ = 0;
+    settle_until_s_ = -1.0;
+  }
+  settle_last_now_s_ = now;
+  const unsigned int offset = settings_.shift_control_sequence ? 1 : 0;
+  const float v = control_sequence_.vx(offset);
+  const int gear = v > 0.0f ? 1 : (v < 0.0f ? -1 : 0);
+  double until = settle_until_s_;
+  if (gear != 0 && settle_gear_ != 0 && gear != settle_gear_) {
+    until = now + gear_change_settle_time_;
+  }
+  settle_pending_until_s_ = until;
+  if (now >= until) {return;}
+  const float cap = static_cast<float>(gear_change_settle_speed_);
+  const double dt = settings_.model_dt;
+  for (unsigned int j = offset; j < settings_.time_steps; ++j) {
+    if (now + static_cast<double>(j - offset) * dt >= until) {break;}
+    const float a = std::abs(control_sequence_.vx(j));
+    if (a > cap) {
+      const float k = cap / a;
+      control_sequence_.vx(j) *= k;
+      control_sequence_.wz(j) *= k;
+      if (isHolonomic()) {control_sequence_.vy(j) *= k;}
+    }
+  }
+}
+
+void Optimizer::commitGearChangeSettle(float emitted_vx)
+{
+  if (gear_change_settle_time_ <= 0.0 || gear_change_settle_speed_ <= 0.0) {return;}
+  settle_until_s_ = settle_pending_until_s_;
+  if (emitted_vx > 0.0f) {
+    settle_gear_ = 1;
+  } else if (emitted_vx < 0.0f) {
+    settle_gear_ = -1;
+  }
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(
