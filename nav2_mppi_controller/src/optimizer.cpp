@@ -262,6 +262,10 @@ void Optimizer::reset(bool reset_dynamic_speed_limits)
   settle_gear_ = 0;
   settle_until_s_ = -1.0;
   settle_pending_until_s_ = -1.0;
+  steer_obs_last_s_ = -1.0;
+  if (auto ack = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_)) {
+    ack->resetSteering();
+  }
 
   if (reset_dynamic_speed_limits) {
     settings_.constraints = settings_.base_constraints;
@@ -1028,6 +1032,8 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
     {
       const auto control = getControlFromSequenceAsTwist(stamp);
       commitGearChangeSettle(static_cast<float>(control.twist.linear.x));
+      observeSteering(static_cast<float>(control.twist.linear.x),
+        static_cast<float>(control.twist.angular.z));
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
@@ -1039,6 +1045,8 @@ geometry_msgs::msg::TwistStamped Optimizer::getValidatedControlFromSequenceAsTwi
         "emitting sampled rollout (cost rank %d)", fallback_rank_);
       const auto control = getControlFromSequenceAsTwist(stamp);
       commitGearChangeSettle(static_cast<float>(control.twist.linear.x));
+      observeSteering(static_cast<float>(control.twist.linear.x),
+        static_cast<float>(control.twist.angular.z));
       control_history_.back() = {static_cast<float>(control.twist.linear.x),
         static_cast<float>(control.twist.linear.y), static_cast<float>(control.twist.angular.z)};
       return control;
@@ -1135,6 +1143,28 @@ void Optimizer::commitGearChangeSettle(float emitted_vx)
   } else if (emitted_vx < 0.0f) {
     settle_gear_ = -1;
   }
+}
+
+void Optimizer::observeSteering(float emitted_vx, float emitted_wz)
+{
+  auto ack = std::dynamic_pointer_cast<AckermannMotionModel>(motion_model_);
+  if (!ack || !ack->steeringSlewEnabled()) {return;}
+  auto node = parent_.lock();
+  if (!node) {return;}
+  const double now = node->get_clock()->now().seconds();
+  const double horizon = settings_.model_dt * static_cast<double>(settings_.time_steps);
+  if (steer_obs_last_s_ < 0.0 || now < steer_obs_last_s_ || now - steer_obs_last_s_ > horizon) {
+    // No command history within a horizon (start, reset, a pause): the drive has had time to
+    // centre on the stop command, so start from straight.
+    ack->resetSteering();
+  } else {
+    // The previous command was held from its emission until now.
+    ack->observeCommand(steer_obs_last_vx_, steer_obs_last_wz_,
+      static_cast<float>(now - steer_obs_last_s_));
+  }
+  steer_obs_last_s_ = now;
+  steer_obs_last_vx_ = emitted_vx;
+  steer_obs_last_wz_ = emitted_wz;
 }
 
 geometry_msgs::msg::TwistStamped Optimizer::getControlFromSequenceAsTwist(

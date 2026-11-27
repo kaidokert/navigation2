@@ -16,6 +16,8 @@
 #define NAV2_MPPI_CONTROLLER__MOTION_MODELS_HPP_
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "nav2_mppi_controller/models/control_sequence.hpp"
@@ -153,7 +155,56 @@ public:
   {
     auto getParam = param_handler->getParamGetter(name + ".AckermannConstraints");
     getParam(min_turning_r_, "min_turning_r", 0.2);
+    // ROBOT, default 0 = off: steering slew in the rollouts. steering_rate_max is the steering
+    // actuator's maximum angular rate (rad/s), steering_wheelbase the axle distance (m) that turns a
+    // steering angle into curvature (tan(delta) / wheelbase). With both > 0, each rollout's steering
+    // angle starts at the observed estimate and moves toward its commanded curvature at most
+    // steering_rate_max * model_dt per step, so rollouts after a gear change predict the late turn.
+    getParam(steering_rate_max_, "steering_rate_max", 0.0);
+    getParam(steering_wheelbase_, "steering_wheelbase", 0.0);
   }
+
+  /**
+   * @brief Whether the steering slew model is on
+   */
+  bool steeringSlewEnabled() const
+  {
+    return steering_rate_max_ > 0.0 && steering_wheelbase_ > 0.0;
+  }
+
+  /**
+   * @brief Steering angle (rad) the drive derives from a twist, as a tricycle steering controller
+   * does: atan(L wz / vx), lock-signed for vx == 0 with wz != 0, clamped at the min_turning_r lock
+   */
+  float commandedSteering(float vx, float wz) const
+  {
+    const float L = static_cast<float>(steering_wheelbase_);
+    const float lock = std::atan(L / std::max(min_turning_r_, 1e-3f));
+    float d;
+    if (vx == 0.0f) {
+      d = wz == 0.0f ? 0.0f : std::copysign(lock, wz);
+    } else {
+      d = std::atan(L * wz / vx);
+    }
+    return std::clamp(d, -lock, lock);
+  }
+
+  /**
+   * @brief Advance the observed steering estimate by an emitted command held for dt seconds
+   */
+  void observeCommand(float vx, float wz, float dt)
+  {
+    if (!steeringSlewEnabled()) {return;}
+    const float step = static_cast<float>(steering_rate_max_) * std::max(dt, 0.0f);
+    steer_est_ += std::clamp(commandedSteering(vx, wz) - steer_est_, -step, step);
+  }
+
+  /**
+   * @brief Forget the steering estimate (reset)
+   */
+  void resetSteering() {steer_est_ = 0.0f;}
+
+  float getSteeringEstimate() const {return steer_est_;}
 
   /**
    * @brief Whether the motion model is holonomic, using Y axis
@@ -213,6 +264,21 @@ public:
 
     auto view = xt::masked_view(wz, (xt::fabs(vx) / xt::fabs(wz)) < min_turning_r_);
     view = xt::sign(wz) * xt::fabs(vx) / min_turning_r_;
+
+    if (steeringSlewEnabled()) {
+      // Post-hoc on the rollout state, like the cone above (never written back into cwz).
+      const float L = static_cast<float>(steering_wheelbase_);
+      const float step = static_cast<float>(steering_rate_max_) * model_dt_;
+      for (unsigned int i = 0; i != state.vx.shape(0); i++) {
+        float d = steer_est_;
+        for (unsigned int j = 1; j != state.vx.shape(1); j++) {
+          const float v = state.vx(i, j);
+          // vx == 0: the drive does not move, the steering still heads to its commanded angle
+          d += std::clamp(commandedSteering(v, state.wz(i, j)) - d, -step, step);
+          state.wz(i, j) = v * std::tan(d) / L;
+        }
+      }
+    }
   }
 
   /**
@@ -223,6 +289,9 @@ public:
 
 private:
   float min_turning_r_{0};
+  double steering_rate_max_{0.0};
+  double steering_wheelbase_{0.0};
+  float steer_est_{0.0f};  // observed steering angle estimate (rad), from emitted commands
 };
 
 /**

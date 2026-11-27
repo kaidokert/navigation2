@@ -212,6 +212,11 @@ protected:
    * @brief Commit the gear-change settle state for the command that is emitted this cycle
    */
   void commitGearChangeSettle(float emitted_vx);
+  /**
+   * @brief Steering slew model (AckermannConstraints.steering_rate_max): advance the motion model's
+   * observed steering estimate with the previously emitted command, held until now
+   */
+  void observeSteering(float emitted_vx, float emitted_wz);
 
   /**
    * @brief The hard vehicle constraints of applyControlSequenceConstraints() on any sequence
@@ -398,6 +403,10 @@ protected:
   double settle_until_s_{-1.0};        // node clock (s): the cap applies before this time
   double settle_pending_until_s_{-1.0};  // window for the candidate this cycle, committed on emit
   double settle_last_now_s_{-1.0};     // detects a clock that went backwards (sim reset)
+  // steering slew observation: time and twist of the last emitted command
+  double steer_obs_last_s_{-1.0};
+  float steer_obs_last_vx_{0.0f};
+  float steer_obs_last_wz_{0.0f};
 
   // Optional diagnostics (FollowPath.trace_cycles / trace_rejections, GENERIC, default false)
   bool trace_cycles_{false};
